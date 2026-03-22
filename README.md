@@ -1,6 +1,7 @@
 # Journal Analysis Tool
 
-A personal journal insight engine that ingests handwritten journal pages and voice notes, then answers natural language queries about them.
+A personal journal insight engine that ingests handwritten journal pages and voice notes, then answers natural language
+queries about them.
 
 ## What It Does
 
@@ -53,6 +54,7 @@ docker compose up -d
 ```
 
 This starts:
+
 - **Journal MCP server** on port 8000 (streamable HTTP)
 - **ChromaDB** on port 8001
 
@@ -84,4 +86,5 @@ All external APIs are behind provider-agnostic interfaces (Python Protocols), ma
 
 ## Cost
 
-~$3.52/month for ~3 handwritten pages/day + 10 min voice notes. See [project-brief.md](project-brief.md) for detailed estimates.
+~$3.52/month for ~3 handwritten pages/day + 10 min voice notes. See [project-brief.md](project-brief.md) for detailed
+estimates.
