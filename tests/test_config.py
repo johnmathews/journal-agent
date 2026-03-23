@@ -1,7 +1,5 @@
 """Tests for configuration loading."""
 
-import os
-from pathlib import Path
 
 from journal.config import Config
 
@@ -12,7 +10,6 @@ class TestConfig:
         assert config.mcp_allowed_hosts == []
 
     def test_allowed_hosts_from_env(self, monkeypatch: object) -> None:
-        import pytest
 
         monkeypatch.setenv("MCP_ALLOWED_HOSTS", "192.168.2.105:8000,localhost:8000")  # type: ignore[attr-defined]
         config = Config()
