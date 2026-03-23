@@ -5,6 +5,7 @@ from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 
 from mcp.server.fastmcp import Context, FastMCP
+from mcp.server.transport_security import TransportSecuritySettings
 
 from journal.config import load_config
 from journal.db.connection import get_connection
@@ -314,6 +315,19 @@ def main() -> None:
     config = load_config()
     mcp.settings.host = config.mcp_host
     mcp.settings.port = config.mcp_port
+
+    if config.mcp_allowed_hosts:
+        allowed_origins = [f"http://{h}" for h in config.mcp_allowed_hosts]
+        mcp.settings.transport_security = TransportSecuritySettings(
+            enable_dns_rebinding_protection=True,
+            allowed_hosts=config.mcp_allowed_hosts,
+            allowed_origins=allowed_origins,
+        )
+    else:
+        mcp.settings.transport_security = TransportSecuritySettings(
+            enable_dns_rebinding_protection=False,
+        )
+
     mcp.run(transport="streamable-http")
 
 

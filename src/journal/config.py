@@ -37,6 +37,13 @@ class Config:
     # MCP Server
     mcp_host: str = field(default_factory=lambda: os.environ.get("MCP_HOST", "0.0.0.0"))
     mcp_port: int = field(default_factory=lambda: int(os.environ.get("MCP_PORT", "8000")))
+    mcp_allowed_hosts: list[str] = field(
+        default_factory=lambda: [
+            h.strip()
+            for h in os.environ.get("MCP_ALLOWED_HOSTS", "").split(",")
+            if h.strip()
+        ]
+    )
 
 
 def load_config() -> Config:
