@@ -312,7 +312,9 @@ def journal_ingest_entry(
 def main() -> None:
     """Run the MCP server."""
     config = load_config()
-    mcp.run(transport="streamable-http", host=config.mcp_host, port=config.mcp_port)
+    mcp.settings.host = config.mcp_host
+    mcp.settings.port = config.mcp_port
+    mcp.run(transport="streamable-http")
 
 
 if __name__ == "__main__":

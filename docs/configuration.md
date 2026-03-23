@@ -17,7 +17,7 @@ All configuration is via environment variables. No config files are needed.
 | `CHROMADB_HOST` | `localhost` | ChromaDB server hostname |
 | `CHROMADB_PORT` | `8000` | ChromaDB server port |
 | `MCP_HOST` | `0.0.0.0` | MCP server bind address |
-| `MCP_PORT` | `8000` | MCP server port |
+| `MCP_PORT` | `8000` | MCP server port (use 8400 on media VM to avoid Gluetun conflict) |
 | `LOG_LEVEL` | `INFO` | Logging level (DEBUG, INFO, WARNING, ERROR) |
 
 ## Models (hardcoded defaults, changeable in config.py)
@@ -39,4 +39,20 @@ When running via Docker Compose, set API keys in a `.env` file in the project ro
 export ANTHROPIC_API_KEY=sk-ant-...
 export OPENAI_API_KEY=sk-...
 docker compose up
+```
+
+## Media VM Deployment
+
+The `docker-compose.yml` is configured for the media VM stack:
+
+- **MCP server** on port 8400 (avoids Gluetun's port 8000)
+- **ChromaDB** on port 8401 (internal 8000)
+- Bind mounts to `/srv/media/config/journal/{data,chromadb}`
+- Image pulled from `ghcr.io/johnmathews/journal-agent:latest`
+
+MCP endpoint: `http://<media-vm-ip>:8400/mcp`
+
+Create data directories before first run:
+```bash
+mkdir -p /srv/media/config/journal/{data,chromadb}
 ```

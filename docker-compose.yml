@@ -1,32 +1,42 @@
+# Production deployment — add these services to the media VM's Ansible-templated compose.
+# For local dev, run: docker compose up
+#
+# On media VM, MCP endpoint will be at http://<host>:8400/mcp
+
 services:
   journal:
-    build: .
-    ports:
-      - "8000:8000"
-    volumes:
-      - journal_data:/data
+    image: ghcr.io/johnmathews/journal-agent:latest
+    container_name: journal
     environment:
+      - TZ=${TZ:-Europe/Amsterdam}
       - DB_PATH=/data/journal.db
-      - CHROMADB_HOST=chromadb
-      - CHROMADB_PORT=8001
+      - CHROMADB_HOST=journal-chromadb
+      - CHROMADB_PORT=8000
+      - MCP_HOST=0.0.0.0
+      - MCP_PORT=8400
       - ANTHROPIC_API_KEY=${ANTHROPIC_API_KEY}
       - OPENAI_API_KEY=${OPENAI_API_KEY}
-    depends_on:
-      chromadb:
-        condition: service_healthy
-
-  chromadb:
-    image: chromadb/chroma:1.5.5
     volumes:
-      - chroma_data:/data
+      - /srv/media/config/journal/data:/data
     ports:
-      - "8001:8000"
+      - "8400:8400"
+    depends_on:
+      journal-chromadb:
+        condition: service_healthy
+    restart: always
+
+  journal-chromadb:
+    image: chromadb/chroma:1.5.5
+    container_name: journal-chromadb
+    environment:
+      - TZ=${TZ:-Europe/Amsterdam}
+    volumes:
+      - /srv/media/config/journal/chromadb:/data
+    ports:
+      - "8401:8000"
     healthcheck:
       test: ["CMD", "curl", "-f", "http://localhost:8000/api/v2/heartbeat"]
       interval: 30s
       timeout: 10s
       retries: 3
-
-volumes:
-  journal_data:
-  chroma_data:
+    restart: always
