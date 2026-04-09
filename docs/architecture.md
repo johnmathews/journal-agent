@@ -104,14 +104,23 @@ Note: only the semantic path calls an external AI model (the embedding model). K
 - Embeddings: 1024-dimensional OpenAI vectors
 - Metadata: `entry_id`, `entry_date`, `chunk_index`
 
+## Initialization
+
+Services (DB, vector store, providers) are initialized eagerly at server startup in `main()`, before the HTTP server begins accepting requests. This ensures the REST API is immediately functional without waiting for the first MCP client session to connect.
+
+The same services dict is shared between MCP sessions (via the lifespan context) and REST API routes (via a module-level reference). Initialization is idempotent — the `_init_services()` function guards against duplicate setup.
+
 ## Deployment
 
-Docker Compose stack with two services running on the media VM:
-- `journal` — Python app running MCP server (port 8400)
+Docker Compose stack with three services running on the media VM (deployed via Ansible):
+- `journal-server` — Python app running MCP server + REST API (port 8400)
 - `journal-chromadb` — ChromaDB vector database (port 8401)
+- `journal-webapp` — Vue.js frontend served by nginx (port 8402), proxies `/api/` to journal-server
 
 **CI/CD pipeline:** On push to `main`, GitHub Actions runs tests and linting, then builds and pushes both Docker images to `ghcr.io/johnmathews/`. New images are manually pulled on the media VM.
 
 **Data persistence:** SQLite and ChromaDB data are bind-mounted to `/srv/media/config/journal/` on the host.
 
 **MCP endpoint:** `http://<media-vm-ip>:8400/mcp`
+**REST API:** `http://<media-vm-ip>:8400/api/`
+**Web UI:** `http://<media-vm-ip>:8402/`

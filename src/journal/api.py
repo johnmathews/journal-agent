@@ -68,6 +68,7 @@ def register_api_routes(
         """List journal entries with pagination and optional date filtering."""
         services = services_getter()
         if services is None:
+            log.error("GET /api/entries — services not initialized")
             return JSONResponse(
                 {"error": "Server not initialized"}, status_code=503
             )
@@ -94,6 +95,7 @@ def register_api_routes(
             page_count = query_svc._repo.get_page_count(entry.id)
             items.append(_entry_summary(entry, page_count))
 
+        log.info("GET /api/entries — returned %d/%d entries (offset=%d)", len(items), total, offset)
         return JSONResponse({
             "items": items,
             "total": total,
@@ -129,10 +131,12 @@ def register_api_routes(
         query_svc: QueryService = services["query"]
         entry = query_svc._repo.get_entry(entry_id)
         if entry is None:
+            log.warning("GET /api/entries/%d — not found", entry_id)
             return JSONResponse(
                 {"error": f"Entry {entry_id} not found"}, status_code=404
             )
         page_count = query_svc._repo.get_page_count(entry_id)
+        log.info("GET /api/entries/%d — %s, %d words", entry_id, entry.entry_date, entry.word_count)
         return JSONResponse(_entry_to_dict(entry, page_count))
 
     async def _patch_entry(
@@ -172,9 +176,11 @@ def register_api_routes(
         try:
             updated = ingestion_svc.update_entry_text(entry_id, final_text)
         except ValueError as e:
+            log.warning("PATCH /api/entries/%d — error: %s", entry_id, e)
             return JSONResponse({"error": str(e)}, status_code=400)
 
         page_count = query_svc._repo.get_page_count(entry_id)
+        log.info("PATCH /api/entries/%d — updated, %d words", entry_id, updated.word_count)
         return JSONResponse(_entry_to_dict(updated, page_count))
 
     @mcp.custom_route("/api/stats", methods=["GET"], name="api_stats")
@@ -192,4 +198,5 @@ def register_api_routes(
         end_date = request.query_params.get("end_date")
 
         stats = query_svc.get_statistics(start_date, end_date)
+        log.info("GET /api/stats — %d entries, %d words", stats.total_entries, stats.total_words)
         return JSONResponse(asdict(stats))

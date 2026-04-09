@@ -22,75 +22,89 @@ from journal.vectorstore.store import ChromaVectorStore
 
 log = logging.getLogger(__name__)
 
-# Shared services — initialized once on first MCP session, reused across all sessions.
-# The streamable-HTTP transport creates a new lifespan context per client session,
-# so we guard initialization to avoid duplicate DB connections and log handlers.
+# Shared services — initialized once at startup, reused across all sessions and
+# REST API requests. Both the MCP lifespan and the REST API routes access this.
 _services: dict | None = None
+
+
+def _init_services() -> dict:
+    """Initialize shared services (DB, vector store, providers). Idempotent."""
+    global _services
+    if _services is not None:
+        return _services
+
+    setup_logging()
+    config = load_config()
+
+    log.info("Initializing services...")
+    log.info("  DB path: %s", config.db_path)
+    log.info("  ChromaDB: %s:%d", config.chromadb_host, config.chromadb_port)
+    log.info("  MCP: %s:%d", config.mcp_host, config.mcp_port)
+
+    # Database
+    conn = get_connection(config.db_path)
+    run_migrations(conn)
+    repo = SQLiteEntryRepository(conn)
+    log.info("  SQLite connected and migrated")
+
+    # Vector store
+    vector_store = ChromaVectorStore(
+        host=config.chromadb_host,
+        port=config.chromadb_port,
+        collection_name=config.chromadb_collection,
+    )
+    log.info("  ChromaDB connected (collection=%s)", config.chromadb_collection)
+
+    # Providers
+    ocr = AnthropicOCRProvider(
+        api_key=config.anthropic_api_key,
+        model=config.ocr_model,
+        max_tokens=config.ocr_max_tokens,
+    )
+    transcription = OpenAITranscriptionProvider(
+        api_key=config.openai_api_key,
+        model=config.transcription_model,
+    )
+    embeddings = OpenAIEmbeddingsProvider(
+        api_key=config.openai_api_key,
+        model=config.embedding_model,
+        dimensions=config.embedding_dimensions,
+    )
+    log.info("  Providers: OCR=%s, transcription=%s, embeddings=%s",
+             config.ocr_model, config.transcription_model, config.embedding_model)
+
+    _services = {
+        "ingestion": IngestionService(
+            repository=repo,
+            vector_store=vector_store,
+            ocr_provider=ocr,
+            transcription_provider=transcription,
+            embeddings_provider=embeddings,
+            chunk_max_tokens=config.chunk_max_tokens,
+            chunk_overlap_tokens=config.chunk_overlap_tokens,
+            slack_bot_token=config.slack_bot_token,
+        ),
+        "query": QueryService(
+            repository=repo,
+            vector_store=vector_store,
+            embeddings_provider=embeddings,
+        ),
+    }
+
+    entry_count = repo.count_entries()
+    log.info("Services initialized (entries in DB: %d)", entry_count)
+    return _services
 
 
 @asynccontextmanager
 async def lifespan(server: FastMCP) -> AsyncIterator[dict]:
-    """Yield shared services, initializing them once on first session."""
-    global _services
-
-    if _services is None:
-        setup_logging()
-        config = load_config()
-
-        # Database
-        conn = get_connection(config.db_path)
-        run_migrations(conn)
-        repo = SQLiteEntryRepository(conn)
-
-        # Vector store
-        vector_store = ChromaVectorStore(
-            host=config.chromadb_host,
-            port=config.chromadb_port,
-            collection_name=config.chromadb_collection,
-        )
-
-        # Providers
-        ocr = AnthropicOCRProvider(
-            api_key=config.anthropic_api_key,
-            model=config.ocr_model,
-            max_tokens=config.ocr_max_tokens,
-        )
-        transcription = OpenAITranscriptionProvider(
-            api_key=config.openai_api_key,
-            model=config.transcription_model,
-        )
-        embeddings = OpenAIEmbeddingsProvider(
-            api_key=config.openai_api_key,
-            model=config.embedding_model,
-            dimensions=config.embedding_dimensions,
-        )
-
-        _services = {
-            "ingestion": IngestionService(
-                repository=repo,
-                vector_store=vector_store,
-                ocr_provider=ocr,
-                transcription_provider=transcription,
-                embeddings_provider=embeddings,
-                chunk_max_tokens=config.chunk_max_tokens,
-                chunk_overlap_tokens=config.chunk_overlap_tokens,
-                slack_bot_token=config.slack_bot_token,
-            ),
-            "query": QueryService(
-                repository=repo,
-                vector_store=vector_store,
-                embeddings_provider=embeddings,
-            ),
-        }
-        log.info("Journal MCP server initialized")
-
-    yield _services
+    """Yield shared services for MCP sessions."""
+    yield _init_services()
 
 
 mcp = FastMCP("journal", lifespan=lifespan)
 
-# Register REST API routes — they access the shared _services dict directly,
-# bypassing the MCP lifespan context (which is per-session).
+# Register REST API routes — they access the shared _services dict directly.
 register_api_routes(mcp, lambda: _services)
 
 
@@ -488,8 +502,17 @@ def main() -> None:
             enable_dns_rebinding_protection=False,
         )
 
+    # Initialize services eagerly so REST API routes work immediately,
+    # without waiting for the first MCP session to connect.
+    _init_services()
+
     # Build the Starlette app from FastMCP (includes MCP routes + custom_routes)
     app = mcp.streamable_http_app()
+
+    # Log registered routes for debugging
+    for route in app.routes:
+        methods = getattr(route, "methods", None)
+        log.info("  Route: %s %s", route.path, methods or "(all)")
 
     # Add CORS middleware if configured
     if config.api_cors_origins:
