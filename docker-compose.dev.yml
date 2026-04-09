@@ -1,0 +1,23 @@
+# Local development: runs ChromaDB only.
+# The journal-server and webapp run natively.
+#
+# Usage:
+#   docker compose -f docker-compose.dev.yml up -d
+#   uv run python -m journal.mcp_server          # backend on :8400
+#   cd ../journal-webapp && npm run dev           # frontend on :5173
+
+services:
+  journal-chromadb:
+    image: chromadb/chroma:latest
+    ports:
+      - "8401:8000"
+    volumes:
+      - chromadb-dev-data:/chroma/chroma
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/api/v2/heartbeat"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+
+volumes:
+  chromadb-dev-data:

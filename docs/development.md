@@ -70,12 +70,66 @@ Naming: `NNNN_description.sql` where NNNN is the version number.
 
 Migrations run automatically on startup. The current version is tracked via `PRAGMA user_version`.
 
-## Local ChromaDB
+## Local Development (Full Stack)
 
-For development, run ChromaDB locally:
+To develop the journal-server and journal-webapp together locally:
 
 ```bash
-docker run -d --name chromadb -p 8000:8000 -v ./chroma-data:/data chromadb/chroma:1.5.5
+# 1. Start ChromaDB
+docker compose -f docker-compose.dev.yml up -d
+
+# 2. Configure environment
+cp .env.example .env
+# Edit .env — API keys only needed for ingestion, not for browsing/editing
+
+# 3. Seed sample data (no API keys needed)
+uv run journal seed
+
+# 4. Start the backend (REST API + MCP on port 8400)
+uv run python -m journal.mcp_server
+
+# 5. In another terminal, start the webapp
+cd ../journal-webapp
+npm run dev
+# Opens at http://localhost:5173, proxies /api/* to localhost:8400
+```
+
+### What needs API keys and what doesn't
+
+| Feature              | Needs API keys? | Which key?     |
+|----------------------|-----------------|----------------|
+| List / browse entries | No              |                |
+| Edit final_text      | No              |                |
+| View statistics      | No              |                |
+| Ingest image (OCR)   | Yes             | ANTHROPIC      |
+| Ingest voice         | Yes             | OPENAI         |
+| Semantic search      | Yes             | OPENAI         |
+| Keyword search (FTS) | No              |                |
+| Seed sample data     | No              |                |
+
+### Seed data
+
+The `seed` command creates 5 sample journal entries with realistic text. No API keys, no ChromaDB, no embeddings needed — just SQLite:
+
+```bash
+uv run journal seed              # all 5 samples
+uv run journal seed --count 2    # just 2
+```
+
+Seeded entries won't have embeddings, so semantic search won't find them. To add embeddings, re-ingest with API keys or use the backfill command (future).
+
+## Local ChromaDB
+
+The `docker-compose.dev.yml` runs ChromaDB on port 8401 (matching `.env.example`):
+
+```bash
+docker compose -f docker-compose.dev.yml up -d
+```
+
+Alternatively, run it directly:
+
+```bash
+docker run -d --name chromadb -p 8401:8000 chromadb/chroma:latest
 ```
 
 ## MCP Server Testing

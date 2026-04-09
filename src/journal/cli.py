@@ -198,6 +198,94 @@ def cmd_backfill_chunks(args, config):
     print(f"\nBackfilled {updated} entries.")
 
 
+def cmd_seed(args, config):
+    """Seed the database with sample journal entries for development."""
+    conn = get_connection(config.db_path)
+    run_migrations(conn)
+    repo = SQLiteEntryRepository(conn)
+
+    samples = [
+        {
+            "date": "2026-03-15",
+            "source_type": "ocr",
+            "text": (
+                "Woke up early today and went for a long walk through the park. "
+                "The cherry blossoms are starting to bloom and the air smelled "
+                "incredible. Met Atlas at the coffee shop afterwards — we talked "
+                "about his new project and the upcoming trip to Vienna. Feeling "
+                "optimistic about the week ahead. Need to remember to call the "
+                "dentist and finish the report for work."
+            ),
+        },
+        {
+            "date": "2026-03-16",
+            "source_type": "ocr",
+            "text": (
+                "Rainy day. Spent most of it inside reading and working on the "
+                "journal analysis tool. Made good progress on the chunking "
+                "algorithm — it now handles edge cases with very short paragraphs "
+                "much better. Had a video call with Sarah about the conference "
+                "next month. She suggested we submit a talk proposal together."
+            ),
+        },
+        {
+            "date": "2026-03-18",
+            "source_type": "voice",
+            "text": (
+                "Quick voice note before bed. Today was intense at work — three "
+                "back-to-back meetings and a production incident that took most "
+                "of the afternoon to resolve. The root cause was a misconfigured "
+                "timeout on the database connection pool. Lesson learned: always "
+                "check the connection pool settings when deploying to a new "
+                "environment. On the bright side, dinner with Emma was lovely."
+            ),
+        },
+        {
+            "date": "2026-03-20",
+            "source_type": "ocr",
+            "text": (
+                "Took the train to Amsterdam for the day. Visited the "
+                "Rijksmuseum — the Vermeer room was as stunning as ever. Had "
+                "stroopwafels from that stand near Centraal Station. Walking "
+                "along the canals in the late afternoon light is one of my "
+                "favourite things. Bumped into Marcus at the station on the way "
+                "back — small world. He's doing well, just started a new role "
+                "at a fintech startup."
+            ),
+        },
+        {
+            "date": "2026-03-22",
+            "source_type": "ocr",
+            "text": (
+                "Saturday morning journaling. This week flew by. Highlights: "
+                "the Amsterdam trip, solving that production bug, and the long "
+                "walk on Monday. I want to be more intentional about exercise "
+                "next week — aim for at least 3 runs. Also need to start "
+                "planning the Vienna trip properly. Atlas sent me a list of "
+                "restaurants to try. Feeling grateful for good friends and "
+                "interesting work."
+            ),
+        },
+    ]
+
+    count = int(args.count) if hasattr(args, "count") and args.count else len(samples)
+    created = 0
+    for sample in samples[:count]:
+        word_count = len(sample["text"].split())
+        entry = repo.create_entry(
+            sample["date"], sample["source_type"], sample["text"], word_count,
+        )
+        # Add a page record for OCR entries
+        if sample["source_type"] == "ocr":
+            repo.add_entry_page(entry.id, 1, sample["text"])
+        created += 1
+        src = sample["source_type"]
+        print(f"  Created entry {entry.id}: {sample['date']} ({src}, {word_count} words)")
+
+    print(f"\nSeeded {created} entries.")
+    print("No embeddings generated (use backfill or re-ingest for search).")
+
+
 def cmd_stats(args, config):
     """Show journal statistics."""
     _, query = _build_services(config)
@@ -255,6 +343,12 @@ def main():
     # backfill-chunks
     subparsers.add_parser("backfill-chunks", help="Backfill chunk_count from ChromaDB")
 
+    # seed
+    p_seed = subparsers.add_parser(
+        "seed", help="Seed database with sample entries (no API keys needed)",
+    )
+    p_seed.add_argument("--count", type=int, help="Number of sample entries (default: all 5)")
+
     args = parser.parse_args()
     setup_logging(args.log_level)
     config = load_config()
@@ -266,5 +360,6 @@ def main():
         "list": cmd_list,
         "stats": cmd_stats,
         "backfill-chunks": cmd_backfill_chunks,
+        "seed": cmd_seed,
     }
     commands[args.command](args, config)
