@@ -39,6 +39,26 @@ topic-level retrieval.
 
 Note: existing entry 1 retains its original single chunk. Only new entries use the new sizes.
 
+### URL-based ingestion with Slack auth
+
+Added `journal_ingest_from_url` MCP tool — downloads images/audio from a URL instead of
+requiring base64 in the tool parameter. This solves the MCP parameter size limit that forced
+Nanoclaw to fall back to curl for large images.
+
+For Slack file URLs (`files.slack.com`), the service auto-adds Bearer auth using a server-side
+`SLACK_BOT_TOKEN` env var. The token never crosses the MCP boundary — same security pattern as
+the Anthropic and OpenAI API keys. This approach was chosen over passing auth headers in tool
+parameters (which would expose the token in the MCP protocol layer) after researching the MCP
+spec, Slack API auth, and evaluating 4 alternative approaches.
+
+Key architectural decision: the Nanoclaw agent doesn't need to see journal images — it just
+passes the Slack URL to the journal service, which handles OCR via Claude Opus. This means the
+image only transits through Anthropic's API once (for OCR), not twice (vision + OCR), improving
+privacy, cost, and latency.
+
+Requires a corresponding change to Nanoclaw's host layer (`src/channels/slack.ts`) to include
+the Slack file URL in the message content passed to the agent.
+
 ## Documentation
 
 Updated deployment docs to reflect actual workflow (CI pushes to ghcr.io, manually pulled on

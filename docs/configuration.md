@@ -18,6 +18,7 @@ All configuration is via environment variables. No config files are needed.
 | `CHROMADB_PORT` | `8000` | ChromaDB server port |
 | `MCP_HOST` | `0.0.0.0` | MCP server bind address |
 | `MCP_PORT` | `8000` | MCP server port (use 8400 on media VM to avoid Gluetun conflict) |
+| `SLACK_BOT_TOKEN` | | Slack bot token for downloading files from Slack URLs |
 | `LOG_LEVEL` | `INFO` | Logging level (DEBUG, INFO, WARNING, ERROR) |
 
 ## Models (hardcoded defaults, changeable in config.py)
@@ -38,6 +39,7 @@ When running via Docker Compose, set API keys in a `.env` file in the project ro
 ```bash
 export ANTHROPIC_API_KEY=sk-ant-...
 export OPENAI_API_KEY=sk-...
+export SLACK_BOT_TOKEN=xoxb-...  # optional, for Slack file URL ingestion
 docker compose up
 ```
 

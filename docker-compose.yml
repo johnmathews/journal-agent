@@ -17,6 +17,7 @@ services:
       - MCP_PORT=8400
       - ANTHROPIC_API_KEY=${ANTHROPIC_API_KEY}
       - OPENAI_API_KEY=${OPENAI_API_KEY}
+      - SLACK_BOT_TOKEN=${SLACK_BOT_TOKEN:-}
     volumes:
       - /srv/media/config/journal/data:/data
     ports:

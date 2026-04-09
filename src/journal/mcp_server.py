@@ -73,6 +73,7 @@ async def lifespan(server: FastMCP) -> AsyncIterator[dict]:
                 embeddings_provider=embeddings,
                 chunk_max_tokens=config.chunk_max_tokens,
                 chunk_overlap_tokens=config.chunk_overlap_tokens,
+                slack_bot_token=config.slack_bot_token,
             ),
             "query": QueryService(
                 repository=repo,
@@ -285,6 +286,55 @@ def journal_get_topic_frequency(
     if freq.count > 10:
         lines.append(f"  ... and {freq.count - 10} more entries")
     return "\n".join(lines)
+
+
+@mcp.tool()
+def journal_ingest_from_url(
+    source_type: str,
+    url: str,
+    media_type: str | None = None,
+    date: str | None = None,
+    language: str = "en",
+    ctx: Context = None,  # type: ignore[assignment]
+) -> str:
+    """Ingest a journal entry by downloading an image or voice note from a URL.
+
+    Preferred over journal_ingest_entry when the file is available at a URL,
+    since it avoids base64-encoding large files as tool parameters.
+
+    Args:
+        source_type: Either "image" (for handwritten page OCR) or "voice" (for audio).
+        url: URL to download the file from (must be accessible from the server).
+        media_type: MIME type override. If omitted, inferred from the response header.
+        date: Date of the journal entry (ISO 8601, e.g. "2026-03-22"). Defaults to today.
+        language: Language code for voice transcription (default "en"). Ignored for images.
+    """
+    from datetime import date as date_type
+
+    log.info(
+        "Tool call: journal_ingest_from_url(source_type=%s, url=%s, date=%s)",
+        source_type, url, date,
+    )
+    service = _get_ingestion(ctx)
+    entry_date = date or date_type.today().isoformat()
+
+    if source_type == "image":
+        entry = service.ingest_image_from_url(url, entry_date, media_type)
+    elif source_type == "voice":
+        entry = service.ingest_voice_from_url(
+            url, entry_date, media_type, language,
+        )
+    else:
+        return f"Invalid source_type '{source_type}'. Must be 'image' or 'voice'."
+
+    return (
+        f"Entry ingested successfully.\n"
+        f"  ID: {entry.id}\n"
+        f"  Date: {entry.entry_date}\n"
+        f"  Source: {entry.source_type}\n"
+        f"  Words: {entry.word_count}\n"
+        f"  Preview: {entry.raw_text[:200]}..."
+    )
 
 
 @mcp.tool()

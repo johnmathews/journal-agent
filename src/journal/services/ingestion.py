@@ -2,6 +2,8 @@
 
 import hashlib
 import logging
+from urllib.error import HTTPError, URLError
+from urllib.request import Request, urlopen
 
 from journal.db.repository import EntryRepository
 from journal.models import Entry
@@ -24,6 +26,7 @@ class IngestionService:
         embeddings_provider: EmbeddingsProvider,
         chunk_max_tokens: int = 150,
         chunk_overlap_tokens: int = 40,
+        slack_bot_token: str = "",
     ) -> None:
         self._repo = repository
         self._vector_store = vector_store
@@ -32,6 +35,7 @@ class IngestionService:
         self._embeddings = embeddings_provider
         self._chunk_max_tokens = chunk_max_tokens
         self._chunk_overlap_tokens = chunk_overlap_tokens
+        self._slack_bot_token = slack_bot_token
 
     def ingest_image(
         self, image_data: bytes, media_type: str, date: str
@@ -87,6 +91,60 @@ class IngestionService:
 
         log.info("Ingested voice entry %d: %d words, date %s", entry.id, word_count, date)
         return entry
+
+    def ingest_image_from_url(
+        self,
+        url: str,
+        date: str,
+        media_type: str | None = None,
+    ) -> Entry:
+        """Download an image from a URL and ingest it."""
+        data, resolved_type = self._download(url, media_type)
+        return self.ingest_image(data, resolved_type, date)
+
+    def ingest_voice_from_url(
+        self,
+        url: str,
+        date: str,
+        media_type: str | None = None,
+        language: str = "en",
+    ) -> Entry:
+        """Download audio from a URL and ingest it."""
+        data, resolved_type = self._download(url, media_type)
+        return self.ingest_voice(data, resolved_type, date, language)
+
+    def _download(
+        self, url: str, media_type: str | None = None
+    ) -> tuple[bytes, str]:
+        """Download a file from a URL, return (data, media_type)."""
+        log.info("Downloading from %s", url)
+        try:
+            req = Request(url, headers={"User-Agent": "journal-agent/0.1"})
+            if (
+                "files.slack.com" in url
+                and self._slack_bot_token
+            ):
+                req.add_header(
+                    "Authorization",
+                    f"Bearer {self._slack_bot_token}",
+                )
+            with urlopen(req) as resp:  # noqa: S310
+                data = resp.read()
+                if media_type is None:
+                    media_type = resp.headers.get(
+                        "Content-Type", "application/octet-stream"
+                    )
+        except HTTPError as e:
+            raise ValueError(
+                f"Failed to download {url}: HTTP {e.code}"
+            ) from e
+        except URLError as e:
+            raise ValueError(
+                f"Failed to download {url}: {e.reason}"
+            ) from e
+
+        log.info("Downloaded %d bytes (type: %s)", len(data), media_type)
+        return data, media_type
 
     def _process_text(self, entry_id: int, text: str, date: str) -> None:
         """Chunk text, generate embeddings, store in vector DB."""

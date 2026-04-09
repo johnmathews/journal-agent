@@ -1,6 +1,6 @@
 # MCP Tool Reference
 
-The journal MCP server exposes 7 tools via streamable HTTP transport.
+The journal MCP server exposes 8 tools via streamable HTTP transport.
 
 ## Query Tools
 
@@ -66,22 +66,56 @@ Count how often a topic, person, or place appears.
 | `start_date` | string | no | Start of period |
 | `end_date` | string | no | End of period |
 
-## Ingestion Tool
+## Ingestion Tools
+
+### journal_ingest_from_url
+
+Ingest a journal entry by downloading an image or voice note from a URL. This is the
+preferred ingestion method for MCP clients like Nanoclaw, since it avoids base64-encoding
+large files as tool parameters.
+
+| Parameter     | Type   | Required | Default | Description                                       |
+|---------------|--------|----------|---------|---------------------------------------------------|
+| `source_type` | string | yes      |         | "image" or "voice"                                |
+| `url`         | string | yes      |         | URL to download the file from                     |
+| `media_type`  | string | no       |         | MIME type override (inferred from response header) |
+| `date`        | string | no       | today   | Entry date (ISO 8601)                             |
+| `language`    | string | no       | "en"    | Language for voice transcription                  |
+
+**Slack file URLs** (`files.slack.com`) are automatically authenticated using the
+`SLACK_BOT_TOKEN` environment variable. No auth headers needed in the tool call — just
+pass the raw `url_private` or `url_private_download` URL from Slack.
+
+For other URLs, the server makes a plain HTTP GET with no authentication. The URL must be
+accessible from the journal server's network.
 
 ### journal_ingest_entry
 
-Ingest a journal entry from an image or voice note.
+Ingest a journal entry from base64-encoded data. Use `journal_ingest_from_url` instead when
+the file is available at a URL — this avoids MCP tool parameter size limits.
 
-| Parameter | Type | Required | Default | Description |
-|-----------|------|----------|---------|-------------|
-| `source_type` | string | yes | | "image" or "voice" |
-| `data_base64` | string | yes | | Base64-encoded file data |
-| `media_type` | string | yes | | MIME type (e.g. "image/jpeg", "audio/mp3") |
-| `date` | string | no | today | Entry date (ISO 8601) |
-| `language` | string | no | "en" | Language for voice transcription |
+| Parameter     | Type   | Required | Default | Description                          |
+|---------------|--------|----------|---------|--------------------------------------|
+| `source_type` | string | yes      |         | "image" or "voice"                   |
+| `data_base64` | string | yes      |         | Base64-encoded file data             |
+| `media_type`  | string | yes      |         | MIME type (e.g. "image/jpeg")        |
+| `date`        | string | no       | today   | Entry date (ISO 8601)                |
+| `language`    | string | no       | "en"    | Language for voice transcription     |
 
 ## Transport
 
 - **Protocol**: Streamable HTTP (MCP spec 2025-03-26)
-- **Default endpoint**: `http://localhost:8000/mcp`
-- **Docker Compose**: `http://journal:8000/mcp` (internal service name)
+- **Default endpoint**: `http://localhost:8400/mcp`
+- **Docker Compose**: `http://journal:8400/mcp` (internal service name)
+
+### Direct HTTP Calls
+
+MCP clients normally handle the session protocol automatically. If calling directly (e.g.,
+via curl), the streamable HTTP transport requires a session handshake:
+
+1. **Initialize** — `POST /mcp` with the MCP `initialize` request. The response includes an
+   `mcp-session-id` header.
+2. **Call tools** — `POST /mcp` with headers:
+   - `Content-Type: application/json`
+   - `Accept: application/json, text/event-stream`
+   - `Mcp-Session-Id: <id from step 1>`

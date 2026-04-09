@@ -12,7 +12,7 @@ The main interface is via Slack. The [Nanoclaw](https://github.com/johnmathews/n
 
 ### Interface Layer
 Thin adapters that expose the service layer to external consumers:
-- **MCP Server** (`mcp_server.py`) — 7 tools via FastMCP, streamable HTTP transport
+- **MCP Server** (`mcp_server.py`) — 8 tools via FastMCP, streamable HTTP transport
 - **CLI** (`cli.py`) — argparse-based command-line interface
 - **API** — Future REST endpoints (out of scope for v0.1)
 
