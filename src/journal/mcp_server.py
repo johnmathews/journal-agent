@@ -21,67 +21,68 @@ from journal.vectorstore.store import ChromaVectorStore
 
 log = logging.getLogger(__name__)
 
+# Shared services — initialized once on first MCP session, reused across all sessions.
+# The streamable-HTTP transport creates a new lifespan context per client session,
+# so we guard initialization to avoid duplicate DB connections and log handlers.
+_services: dict | None = None
+
 
 @asynccontextmanager
 async def lifespan(server: FastMCP) -> AsyncIterator[dict]:
-    """Initialize services on startup, clean up on shutdown."""
-    setup_logging()
-    config = load_config()
+    """Yield shared services, initializing them once on first session."""
+    global _services
 
-    # Database
-    conn = get_connection(config.db_path)
-    run_migrations(conn)
-    repo = SQLiteEntryRepository(conn)
+    if _services is None:
+        setup_logging()
+        config = load_config()
 
-    # Vector store
-    vector_store = ChromaVectorStore(
-        host=config.chromadb_host,
-        port=config.chromadb_port,
-        collection_name=config.chromadb_collection,
-    )
+        # Database
+        conn = get_connection(config.db_path)
+        run_migrations(conn)
+        repo = SQLiteEntryRepository(conn)
 
-    # Providers
-    ocr = AnthropicOCRProvider(
-        api_key=config.anthropic_api_key,
-        model=config.ocr_model,
-        max_tokens=config.ocr_max_tokens,
-    )
-    transcription = OpenAITranscriptionProvider(
-        api_key=config.openai_api_key,
-        model=config.transcription_model,
-    )
-    embeddings = OpenAIEmbeddingsProvider(
-        api_key=config.openai_api_key,
-        model=config.embedding_model,
-        dimensions=config.embedding_dimensions,
-    )
+        # Vector store
+        vector_store = ChromaVectorStore(
+            host=config.chromadb_host,
+            port=config.chromadb_port,
+            collection_name=config.chromadb_collection,
+        )
 
-    # Services
-    ingestion_service = IngestionService(
-        repository=repo,
-        vector_store=vector_store,
-        ocr_provider=ocr,
-        transcription_provider=transcription,
-        embeddings_provider=embeddings,
-        chunk_max_tokens=config.chunk_max_tokens,
-        chunk_overlap_tokens=config.chunk_overlap_tokens,
-    )
-    query_service = QueryService(
-        repository=repo,
-        vector_store=vector_store,
-        embeddings_provider=embeddings,
-    )
+        # Providers
+        ocr = AnthropicOCRProvider(
+            api_key=config.anthropic_api_key,
+            model=config.ocr_model,
+            max_tokens=config.ocr_max_tokens,
+        )
+        transcription = OpenAITranscriptionProvider(
+            api_key=config.openai_api_key,
+            model=config.transcription_model,
+        )
+        embeddings = OpenAIEmbeddingsProvider(
+            api_key=config.openai_api_key,
+            model=config.embedding_model,
+            dimensions=config.embedding_dimensions,
+        )
 
-    log.info("Journal MCP server initialized")
-
-    try:
-        yield {
-            "ingestion": ingestion_service,
-            "query": query_service,
+        _services = {
+            "ingestion": IngestionService(
+                repository=repo,
+                vector_store=vector_store,
+                ocr_provider=ocr,
+                transcription_provider=transcription,
+                embeddings_provider=embeddings,
+                chunk_max_tokens=config.chunk_max_tokens,
+                chunk_overlap_tokens=config.chunk_overlap_tokens,
+            ),
+            "query": QueryService(
+                repository=repo,
+                vector_store=vector_store,
+                embeddings_provider=embeddings,
+            ),
         }
-    finally:
-        conn.close()
-        log.info("Journal MCP server shut down")
+        log.info("Journal MCP server initialized")
+
+    yield _services
 
 
 mcp = FastMCP("journal", lifespan=lifespan)

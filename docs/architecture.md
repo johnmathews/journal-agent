@@ -4,6 +4,10 @@
 
 The Journal Analysis Tool follows a layered architecture with strict separation of concerns. External services are abstracted behind Protocol interfaces, enabling provider swapping without changes to core logic.
 
+## Primary Usage
+
+The main interface is via Slack. The [Nanoclaw](https://github.com/johnmathews/nanoclaw-ai-assistant) AI assistant monitors a Slack channel where the user sends photos of handwritten journal pages. Nanoclaw connects as an MCP client to this service's MCP server, triggering OCR ingestion and enabling natural language queries against the journal archive.
+
 ## Layers
 
 ### Interface Layer
@@ -63,8 +67,12 @@ Natural Language Query
 
 ## Deployment
 
-Docker Compose stack with two services:
-- `journal` — Python app running MCP server
-- `chromadb` — ChromaDB vector database
+Docker Compose stack with two services running on the media VM:
+- `journal` — Python app running MCP server (port 8400)
+- `journal-chromadb` — ChromaDB vector database (port 8401)
 
-SQLite is stored on a named Docker volume. ChromaDB persists to its own volume.
+**CI/CD pipeline:** On push to `main`, GitHub Actions runs tests and linting, then builds and pushes both Docker images to `ghcr.io/johnmathews/`. New images are manually pulled on the media VM.
+
+**Data persistence:** SQLite and ChromaDB data are bind-mounted to `/srv/media/config/journal/` on the host.
+
+**MCP endpoint:** `http://<media-vm-ip>:8400/mcp`

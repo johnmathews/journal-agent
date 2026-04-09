@@ -5,7 +5,16 @@ import sys
 
 
 def setup_logging(level: str = "INFO") -> None:
-    """Configure logging for the application."""
+    """Configure logging for the application.
+
+    Safe to call multiple times — only adds a handler on the first call.
+    """
+    root = logging.getLogger("journal")
+    root.setLevel(getattr(logging, level.upper(), logging.INFO))
+
+    if root.handlers:
+        return
+
     handler = logging.StreamHandler(sys.stderr)
     handler.setFormatter(
         logging.Formatter(
@@ -13,9 +22,6 @@ def setup_logging(level: str = "INFO") -> None:
             datefmt="%Y-%m-%d %H:%M:%S",
         )
     )
-
-    root = logging.getLogger("journal")
-    root.setLevel(getattr(logging, level.upper(), logging.INFO))
     root.addHandler(handler)
 
     # Quiet noisy libraries

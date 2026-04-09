@@ -1,4 +1,5 @@
-# Production deployment — add these services to the media VM's Ansible-templated compose.
+# Production: runs on the media VM. Images are built by GitHub Actions CI
+# and pushed to ghcr.io, then manually pulled on the VM.
 # For local dev, run: docker compose up
 #
 # On media VM, MCP endpoint will be at http://<host>:8400/mcp
