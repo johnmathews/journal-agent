@@ -8,13 +8,26 @@ The Journal Analysis Tool follows a layered architecture with strict separation 
 
 The main interface is via Slack. The [Nanoclaw](https://github.com/johnmathews/nanoclaw-ai-assistant) AI assistant monitors a Slack channel where the user sends photos of handwritten journal pages. Nanoclaw connects as an MCP client to this service's MCP server, triggering OCR ingestion and enabling natural language queries against the journal archive.
 
+## How Search Works
+
+Semantic search uses an **embedding model** (OpenAI `text-embedding-3-large`), not an LLM. The embedding model converts text into a vector — a list of 1024 numbers representing the meaning of the text. At query time, the query string is embedded into a vector and ChromaDB finds stored chunks with the nearest vectors by cosine distance. This is a mathematical nearest-neighbor lookup, not language model reasoning.
+
+This means no model reads, interprets, or summarizes your journal entries during search. You get back raw journal text ranked by vector similarity. A query like "times I felt grateful" will match entries containing "I was really thankful" because those phrases produce similar vectors, even though they share no keywords — but there is no comprehension happening, just geometric proximity.
+
+The distinction matters because of how the two interfaces work:
+
+- **Via MCP** — an LLM client (e.g. Claude via Nanoclaw) decides what to search for, calls the search tool, and interprets the ranked results for you. The intelligence is in the calling LLM, not in this service.
+- **Via CLI** — you run `journal search "times I felt grateful"` and get raw ranked results printed to your terminal. You interpret them yourself.
+
+In both cases, this service does the same thing: embed the query, find nearest vectors, return ranked text. The difference is whether an LLM is in the loop to interpret the results.
+
 ## Layers
 
 ### Interface Layer
 Thin adapters that expose the service layer to external consumers:
-- **MCP Server** (`mcp_server.py`) — 10 tools via FastMCP, streamable HTTP transport
-- **CLI** (`cli.py`) — argparse-based command-line interface
-- **REST API** (`api.py`) — 4 endpoints via `mcp.custom_route()`, same port as MCP server
+- **MCP Server** (`mcp_server.py`) — 10 tools via FastMCP, streamable HTTP transport. The primary interface, designed to be called by LLM-based MCP clients that interpret results for the user.
+- **REST API** (`api.py`) — 4 endpoints via `mcp.custom_route()`, same port as MCP server. Used by the journal-webapp frontend.
+- **CLI** (`cli.py`) — argparse-based command-line interface. Exposes 6 commands (ingest, ingest-multi, search, list, stats, backfill-chunks) for direct use without an LLM client.
 
 ### Service Layer
 Business logic orchestration:
@@ -69,10 +82,11 @@ Edit final_text → Update SQLite → Delete old ChromaDB chunks
 ### Query
 ```
 Natural Language Query
-    → Semantic: Embed query → ChromaDB similarity search → Enrich from SQLite
-    → Keyword: FTS5 search on SQLite
+    → Semantic: Embed query (OpenAI) → Vector nearest-neighbor search (ChromaDB) → Enrich from SQLite
+    → Keyword: FTS5 full-text search on SQLite
     → Statistical: SQL aggregation on SQLite
 ```
+Note: only the semantic path calls an external AI model (the embedding model). Keyword and statistical queries are purely local database operations. No LLM is involved in any query path — see "How Search Works" above.
 
 ## Database Schema
 

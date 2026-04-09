@@ -122,7 +122,7 @@ The journal MCP server exposes 10 tools via streamable HTTP transport.
 
 ### journal_search_entries
 
-Semantic similarity search across journal entries.
+Semantic similarity search across journal entries. The query is converted to a vector by the embedding model (not an LLM) and matched against stored entry vectors by cosine distance. Results are ranked by similarity score. No model reads or interprets the entries — you get raw text back, ranked by how close the meaning is to your query.
 
 | Parameter | Type | Required | Default | Description |
 |-----------|------|----------|---------|-------------|
