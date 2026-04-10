@@ -12,7 +12,7 @@ the chunker would produce today.
 from dataclasses import dataclass, field
 
 from journal.db.repository import EntryRepository
-from journal.services.chunking import chunk_text
+from journal.services.chunking import ChunkingStrategy
 
 
 @dataclass
@@ -27,8 +27,7 @@ class BackfillResult:
 
 def backfill_chunk_counts(
     repository: EntryRepository,
-    max_tokens: int = 150,
-    overlap_tokens: int = 40,
+    chunker: ChunkingStrategy,
 ) -> BackfillResult:
     """Recompute and persist `chunk_count` for every entry.
 
@@ -37,7 +36,8 @@ def backfill_chunk_counts(
     already matches the recomputed value are left alone.
 
     Does not touch the vector store — search coverage is unaffected. If
-    you need to regenerate embeddings as well, re-ingest the entry.
+    you need to regenerate embeddings as well, use `rechunk_entries`
+    (added in WU-D) or re-ingest the entry.
     """
     result = BackfillResult()
     entries = repository.list_entries(limit=1_000_000)
@@ -49,7 +49,7 @@ def backfill_chunk_counts(
             continue
 
         try:
-            chunks = chunk_text(text, max_tokens, overlap_tokens)
+            chunks = chunker.chunk(text)
             new_count = len(chunks)
         except Exception as exc:  # noqa: BLE001 — surface any chunker failure
             result.errors.append(f"entry {entry.id}: {exc}")

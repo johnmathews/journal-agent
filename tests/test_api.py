@@ -61,14 +61,14 @@ def services(
     mock_ocr = MagicMock()
     mock_transcription = MagicMock()
 
+    from journal.services.chunking import FixedTokenChunker
     ingestion = IngestionService(
         repository=repo,
         vector_store=mock_vector_store,
         ocr_provider=mock_ocr,
         transcription_provider=mock_transcription,
         embeddings_provider=mock_embeddings,
-        chunk_max_tokens=150,
-        chunk_overlap_tokens=40,
+        chunker=FixedTokenChunker(max_tokens=150, overlap_tokens=40),
     )
     query = QueryService(
         repository=repo,

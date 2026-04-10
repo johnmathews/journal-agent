@@ -4,11 +4,17 @@ import pytest
 
 from journal.db.repository import SQLiteEntryRepository
 from journal.services.backfill import BackfillResult, backfill_chunk_counts
+from journal.services.chunking import FixedTokenChunker
 
 
 @pytest.fixture
 def repo(db_conn):
     return SQLiteEntryRepository(db_conn)
+
+
+@pytest.fixture
+def chunker():
+    return FixedTokenChunker(max_tokens=150, overlap_tokens=40)
 
 
 def _insert(repo: SQLiteEntryRepository, text: str, *, final_text: str | None = None):
@@ -22,10 +28,10 @@ def _insert(repo: SQLiteEntryRepository, text: str, *, final_text: str | None = 
 
 
 class TestBackfillChunkCounts:
-    def test_sets_chunk_count_from_raw_text(self, repo):
+    def test_sets_chunk_count_from_raw_text(self, repo, chunker):
         entry = _insert(repo, "Short seeded entry text.")
 
-        result = backfill_chunk_counts(repo)
+        result = backfill_chunk_counts(repo, chunker)
 
         refreshed = repo.get_entry(entry.id)
         assert refreshed is not None
@@ -35,26 +41,26 @@ class TestBackfillChunkCounts:
         assert result.skipped == 0
         assert result.errors == []
 
-    def test_prefers_final_text_over_raw_text(self, repo):
+    def test_prefers_final_text_over_raw_text(self, repo, chunker):
         entry = _insert(
             repo,
             "raw",
             final_text="This is the corrected version of the entry with more words.",
         )
 
-        result = backfill_chunk_counts(repo)
+        result = backfill_chunk_counts(repo, chunker)
 
         refreshed = repo.get_entry(entry.id)
         assert refreshed is not None
         assert refreshed.chunk_count >= 1
         assert result.updated == 1
 
-    def test_leaves_already_correct_rows_unchanged(self, repo):
+    def test_leaves_already_correct_rows_unchanged(self, repo, chunker):
         entry = _insert(repo, "Short text.")
         # Run once to populate the correct count, then again.
-        backfill_chunk_counts(repo)
+        backfill_chunk_counts(repo, chunker)
 
-        result = backfill_chunk_counts(repo)
+        result = backfill_chunk_counts(repo, chunker)
 
         assert result.updated == 0
         assert result.unchanged == 1
@@ -62,11 +68,11 @@ class TestBackfillChunkCounts:
         assert refreshed is not None
         assert refreshed.chunk_count >= 1
 
-    def test_skips_entries_with_no_text(self, repo):
+    def test_skips_entries_with_no_text(self, repo, chunker):
         entry = repo.create_entry("2026-03-02", "ocr", "", 0)
         repo.update_chunk_count(entry.id, 0)
 
-        result = backfill_chunk_counts(repo)
+        result = backfill_chunk_counts(repo, chunker)
 
         assert result.skipped == 1
         assert result.updated == 0
@@ -80,18 +86,20 @@ class TestBackfillChunkCounts:
         ).strip()  # ~360 words, definitely > 150 tokens
         entry = _insert(repo, long_paragraph)
 
-        backfill_chunk_counts(repo, max_tokens=150, overlap_tokens=40)
+        backfill_chunk_counts(
+            repo, FixedTokenChunker(max_tokens=150, overlap_tokens=40)
+        )
 
         refreshed = repo.get_entry(entry.id)
         assert refreshed is not None
         assert refreshed.chunk_count > 1
 
-    def test_processes_multiple_entries(self, repo):
+    def test_processes_multiple_entries(self, repo, chunker):
         _insert(repo, "First entry.")
         _insert(repo, "Second entry with more words in it.")
         _insert(repo, "Third entry also short.")
 
-        result = backfill_chunk_counts(repo)
+        result = backfill_chunk_counts(repo, chunker)
 
         assert result.updated == 3
         assert result.unchanged == 0
@@ -100,23 +108,18 @@ class TestBackfillChunkCounts:
         _insert(repo, "Entry one.")
         _insert(repo, "Entry two.")
 
-        # Monkey-patch chunk_text via the backfill module to raise on the second call.
-        from journal.services import backfill as backfill_module
-
+        # Build a flaky chunker that raises on the second call.
         call_count = {"n": 0}
-        original = backfill_module.chunk_text
+        real_chunker = FixedTokenChunker(max_tokens=150, overlap_tokens=40)
 
-        def flaky(*args, **kwargs):
-            call_count["n"] += 1
-            if call_count["n"] == 2:
-                raise RuntimeError("boom")
-            return original(*args, **kwargs)
+        class FlakyChunker:
+            def chunk(self, text: str) -> list[str]:
+                call_count["n"] += 1
+                if call_count["n"] == 2:
+                    raise RuntimeError("boom")
+                return real_chunker.chunk(text)
 
-        backfill_module.chunk_text = flaky
-        try:
-            result = backfill_chunk_counts(repo)
-        finally:
-            backfill_module.chunk_text = original
+        result = backfill_chunk_counts(repo, FlakyChunker())
 
         assert result.updated == 1
         assert len(result.errors) == 1

@@ -5,6 +5,7 @@ from unittest.mock import MagicMock
 import pytest
 
 from journal.db.repository import SQLiteEntryRepository
+from journal.services.chunking import FixedTokenChunker
 from journal.services.ingestion import IngestionService
 from journal.vectorstore.store import InMemoryVectorStore
 
@@ -41,6 +42,7 @@ def ingestion_service(db_conn, mock_ocr, mock_transcription, mock_embeddings):
         ocr_provider=mock_ocr,
         transcription_provider=mock_transcription,
         embeddings_provider=mock_embeddings,
+        chunker=FixedTokenChunker(max_tokens=150, overlap_tokens=40),
     )
 
 

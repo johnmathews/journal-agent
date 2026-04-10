@@ -14,7 +14,7 @@ from journal.providers.embeddings import OpenAIEmbeddingsProvider
 from journal.providers.ocr import AnthropicOCRProvider
 from journal.providers.transcription import OpenAITranscriptionProvider
 from journal.services.backfill import backfill_chunk_counts
-from journal.services.chunking import chunk_text
+from journal.services.chunking import build_chunker
 from journal.services.ingestion import IngestionService
 from journal.services.query import QueryService
 from journal.vectorstore.store import ChromaVectorStore
@@ -46,14 +46,15 @@ def _build_services(config):
         dimensions=config.embedding_dimensions,
     )
 
+    chunker = build_chunker(config, embeddings)
+
     ingestion = IngestionService(
         repository=repo,
         vector_store=vector_store,
         ocr_provider=ocr,
         transcription_provider=transcription,
         embeddings_provider=embeddings,
-        chunk_max_tokens=config.chunk_max_tokens,
-        chunk_overlap_tokens=config.chunk_overlap_tokens,
+        chunker=chunker,
     )
     query = QueryService(
         repository=repo,
@@ -182,11 +183,12 @@ def cmd_backfill_chunks(args, config):
     run_migrations(conn)
     repo = SQLiteEntryRepository(conn)
 
-    result = backfill_chunk_counts(
-        repo,
-        max_tokens=config.chunk_max_tokens,
-        overlap_tokens=config.chunk_overlap_tokens,
-    )
+    # Backfill doesn't need embeddings, so pass None — SemanticChunker
+    # would require one but we're intentionally using the configured
+    # chunker (which, if semantic, would need embeddings; see WU-D for
+    # the rechunk command that does full re-embedding).
+    chunker = build_chunker(config, embeddings=None)
+    result = backfill_chunk_counts(repo, chunker=chunker)
 
     print(f"Updated:   {result.updated}")
     print(f"Unchanged: {result.unchanged}")
@@ -267,6 +269,15 @@ def cmd_seed(args, config):
         },
     ]
 
+    # Seeding does not have access to an embeddings provider (no API keys
+    # required to seed), so we force a FixedTokenChunker regardless of the
+    # configured strategy. Good enough for populating chunk_count on dev data.
+    from journal.services.chunking import FixedTokenChunker
+    seed_chunker = FixedTokenChunker(
+        max_tokens=config.chunking_max_tokens,
+        overlap_tokens=config.chunking_overlap_tokens,
+    )
+
     count = int(args.count) if hasattr(args, "count") and args.count else len(samples)
     created = 0
     for sample in samples[:count]:
@@ -279,9 +290,7 @@ def cmd_seed(args, config):
             repo.add_entry_page(entry.id, 1, sample["text"])
         # Compute and store chunk_count so the UI shows the real value even
         # though we don't generate embeddings during seeding.
-        chunks = chunk_text(
-            sample["text"], config.chunk_max_tokens, config.chunk_overlap_tokens
-        )
+        chunks = seed_chunker.chunk(sample["text"])
         repo.update_chunk_count(entry.id, len(chunks))
         created += 1
         src = sample["source_type"]

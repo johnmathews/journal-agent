@@ -36,8 +36,15 @@ class Config:
     )
 
     # Chunking
-    chunk_max_tokens: int = 150
-    chunk_overlap_tokens: int = 40
+    chunking_strategy: str = field(
+        default_factory=lambda: os.environ.get("CHUNKING_STRATEGY", "fixed")
+    )
+    chunking_max_tokens: int = field(
+        default_factory=lambda: int(os.environ.get("CHUNKING_MAX_TOKENS", "150"))
+    )
+    chunking_overlap_tokens: int = field(
+        default_factory=lambda: int(os.environ.get("CHUNKING_OVERLAP_TOKENS", "40"))
+    )
 
     # MCP Server
     mcp_host: str = field(default_factory=lambda: os.environ.get("MCP_HOST", "0.0.0.0"))

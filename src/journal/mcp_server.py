@@ -16,6 +16,7 @@ from journal.logging import setup_logging
 from journal.providers.embeddings import OpenAIEmbeddingsProvider
 from journal.providers.ocr import AnthropicOCRProvider
 from journal.providers.transcription import OpenAITranscriptionProvider
+from journal.services.chunking import build_chunker
 from journal.services.ingestion import IngestionService
 from journal.services.query import QueryService
 from journal.vectorstore.store import ChromaVectorStore
@@ -73,6 +74,8 @@ def _init_services() -> dict:
     log.info("  Providers: OCR=%s, transcription=%s, embeddings=%s",
              config.ocr_model, config.transcription_model, config.embedding_model)
 
+    chunker = build_chunker(config, embeddings)
+
     _services = {
         "ingestion": IngestionService(
             repository=repo,
@@ -80,8 +83,7 @@ def _init_services() -> dict:
             ocr_provider=ocr,
             transcription_provider=transcription,
             embeddings_provider=embeddings,
-            chunk_max_tokens=config.chunk_max_tokens,
-            chunk_overlap_tokens=config.chunk_overlap_tokens,
+            chunker=chunker,
             slack_bot_token=config.slack_bot_token,
         ),
         "query": QueryService(

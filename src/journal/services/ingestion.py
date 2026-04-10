@@ -10,7 +10,7 @@ from journal.models import Entry
 from journal.providers.embeddings import EmbeddingsProvider
 from journal.providers.ocr import OCRProvider
 from journal.providers.transcription import TranscriptionProvider
-from journal.services.chunking import chunk_text
+from journal.services.chunking import ChunkingStrategy
 from journal.vectorstore.store import VectorStore
 
 log = logging.getLogger(__name__)
@@ -24,8 +24,7 @@ class IngestionService:
         ocr_provider: OCRProvider,
         transcription_provider: TranscriptionProvider,
         embeddings_provider: EmbeddingsProvider,
-        chunk_max_tokens: int = 150,
-        chunk_overlap_tokens: int = 40,
+        chunker: ChunkingStrategy,
         slack_bot_token: str = "",
     ) -> None:
         self._repo = repository
@@ -33,8 +32,7 @@ class IngestionService:
         self._ocr = ocr_provider
         self._transcription = transcription_provider
         self._embeddings = embeddings_provider
-        self._chunk_max_tokens = chunk_max_tokens
-        self._chunk_overlap_tokens = chunk_overlap_tokens
+        self._chunker = chunker
         self._slack_bot_token = slack_bot_token
 
     def ingest_image(
@@ -155,7 +153,7 @@ class IngestionService:
 
     def _process_text(self, entry_id: int, text: str, date: str) -> int:
         """Chunk text, generate embeddings, store in vector DB. Returns chunk count."""
-        chunks = chunk_text(text, self._chunk_max_tokens, self._chunk_overlap_tokens)
+        chunks = self._chunker.chunk(text)
         if not chunks:
             log.warning("No chunks produced for entry %d", entry_id)
             return 0

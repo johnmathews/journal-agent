@@ -6,6 +6,7 @@ from urllib.error import HTTPError, URLError
 import pytest
 
 from journal.db.repository import SQLiteEntryRepository
+from journal.services.chunking import FixedTokenChunker
 from journal.services.ingestion import IngestionService
 from journal.vectorstore.store import InMemoryVectorStore
 
@@ -42,6 +43,7 @@ def ingestion_service(db_conn, mock_ocr, mock_transcription, mock_embeddings):
         ocr_provider=mock_ocr,
         transcription_provider=mock_transcription,
         embeddings_provider=mock_embeddings,
+        chunker=FixedTokenChunker(max_tokens=150, overlap_tokens=40),
     )
 
 
@@ -57,6 +59,7 @@ def ingestion_service_with_slack(
         ocr_provider=mock_ocr,
         transcription_provider=mock_transcription,
         embeddings_provider=mock_embeddings,
+        chunker=FixedTokenChunker(max_tokens=150, overlap_tokens=40),
         slack_bot_token="xoxb-test-token-123",
     )
 
