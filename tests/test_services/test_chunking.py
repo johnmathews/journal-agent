@@ -1,6 +1,39 @@
 """Tests for text chunking."""
 
-from journal.services.chunking import FixedTokenChunker, count_tokens, split_sentences
+import math
+
+import pytest
+
+from journal.services.chunking import (
+    ChunkingStrategy,
+    FixedTokenChunker,
+    SemanticChunker,
+    count_tokens,
+    split_sentences,
+)
+
+
+class StubEmbeddings:
+    """Deterministic stub `EmbeddingsProvider` for testing SemanticChunker.
+
+    The caller pre-registers a mapping from sentence → vector via
+    `.vectors`. When `embed_texts` is called, each sentence is looked up
+    in the map; unknown sentences get a zero vector. This lets us make
+    very precise assertions about where cuts land given a known similarity
+    structure.
+    """
+
+    def __init__(self, dim: int = 4):
+        self._dim = dim
+        self.vectors: dict[str, list[float]] = {}
+        self.embed_calls: list[list[str]] = []
+
+    def embed_texts(self, texts: list[str]) -> list[list[float]]:
+        self.embed_calls.append(list(texts))
+        return [self.vectors.get(t, [0.0] * self._dim) for t in texts]
+
+    def embed_query(self, query: str) -> list[float]:
+        return self.vectors.get(query, [0.0] * self._dim)
 
 
 class TestSplitSentences:
@@ -137,6 +170,240 @@ class TestFixedTokenChunker:
 
     def test_implements_protocol(self):
         # Duck-typing check: FixedTokenChunker satisfies ChunkingStrategy.
-        from journal.services.chunking import ChunkingStrategy
         chunker = FixedTokenChunker()
         assert isinstance(chunker, ChunkingStrategy)
+
+
+def _unit_vector(angle: float, dim: int = 4) -> list[float]:
+    """Build a unit vector pointing at `angle` radians in the xy-plane.
+
+    The remaining dimensions are zero so cosine similarity between two
+    such vectors is just cos(angle_diff) — a simple, human-predictable way
+    to control test embeddings.
+    """
+    v = [0.0] * dim
+    v[0] = math.cos(angle)
+    v[1] = math.sin(angle)
+    return v
+
+
+class TestSemanticChunker:
+    def test_implements_protocol(self):
+        chunker = SemanticChunker(embeddings=StubEmbeddings())
+        assert isinstance(chunker, ChunkingStrategy)
+
+    def test_empty_text_returns_empty(self):
+        chunker = SemanticChunker(embeddings=StubEmbeddings())
+        assert chunker.chunk("") == []
+        assert chunker.chunk("   ") == []
+
+    def test_single_sentence_short_circuits(self):
+        stub = StubEmbeddings()
+        chunker = SemanticChunker(embeddings=stub)
+        result = chunker.chunk("Just one sentence.")
+        assert result == ["Just one sentence."]
+        # Short-circuit should not call the embedder.
+        assert stub.embed_calls == []
+
+    def test_two_sentences_short_circuit(self):
+        stub = StubEmbeddings()
+        chunker = SemanticChunker(embeddings=stub)
+        result = chunker.chunk("First. Second.")
+        assert len(result) == 1
+        assert stub.embed_calls == []
+
+    def test_three_sentences_with_one_decisive_cut(self):
+        # s1 and s2 point the same direction; s3 is orthogonal.
+        # That's a decisive cut between s2 and s3.
+        stub = StubEmbeddings()
+        s1 = "Vienna was beautiful in spring."
+        s2 = "The blossoms were everywhere in Vienna."
+        s3 = "I also need to call the dentist."
+        stub.vectors[s1] = _unit_vector(0.0)  # (1, 0, 0, 0)
+        stub.vectors[s2] = _unit_vector(0.1)  # nearly same direction
+        stub.vectors[s3] = _unit_vector(math.pi / 2)  # orthogonal
+
+        chunker = SemanticChunker(
+            embeddings=stub,
+            min_tokens=1,  # don't merge
+            max_tokens=1000,  # don't split
+            boundary_percentile=50,  # aggressive enough to cut
+            decisive_percentile=50,  # any cut is decisive (no overlap)
+        )
+        result = chunker.chunk(f"{s1} {s2} {s3}")
+
+        assert len(result) == 2
+        assert s1 in result[0]
+        assert s2 in result[0]
+        assert s3 in result[1]
+        # Decisive cut — no overlap, s2 should only appear in chunk 0.
+        assert s2 not in result[1]
+
+    def test_weak_cut_duplicates_boundary_sentence(self):
+        # 5 sentences, 4 adjacent similarities engineered so that the
+        # percentile buckets cleanly separate a weak cut from a decisive
+        # cut. Similarity structure:
+        #   sim[0] = 1.0  (s1↔s2 — stay together)
+        #   sim[1] = 0.7  (s2↔s3 — WEAK cut, duplicate s2 into next chunk)
+        #   sim[2] = 0.2  (s3↔s4 — DECISIVE cut, no overlap)
+        #   sim[3] = 1.0  (s4↔s5 — stay together)
+        #
+        # With boundary_percentile=50 the threshold sits around 0.85, so
+        # both the 0.7 and 0.2 sims fire as cuts. With decisive_percentile=25
+        # the decisive threshold is around 0.575, so only the 0.2 sim is
+        # decisive — the 0.7 sim is a weak cut.
+        stub = StubEmbeddings()
+        s1 = "Walking through the park this morning was lovely."
+        s2 = "The cherry blossoms were out in force."
+        s3 = "Life is good, mostly, these days."
+        s4 = "Tomorrow I need to finish the quarterly report."
+        s5 = "Deadlines at work are piling up again."
+        stub.vectors[s1] = _unit_vector(0.0)
+        stub.vectors[s2] = _unit_vector(0.0)  # sim(s1,s2)=1.0
+        stub.vectors[s3] = _unit_vector(math.acos(0.7))  # sim(s2,s3)=0.7
+        stub.vectors[s4] = _unit_vector(math.acos(0.2) + math.acos(0.7))  # sim(s3,s4)=0.2
+        stub.vectors[s5] = _unit_vector(math.acos(0.2) + math.acos(0.7))  # sim(s4,s5)=1.0
+
+        chunker = SemanticChunker(
+            embeddings=stub,
+            min_tokens=1,
+            max_tokens=1000,
+            boundary_percentile=50,
+            decisive_percentile=25,
+        )
+        result = chunker.chunk(f"{s1} {s2} {s3} {s4} {s5}")
+
+        # Expected segmentation:
+        #   chunk 0: [s1, s2]                            (first run, ends before weak cut)
+        #   chunk 1: [s2 (overlap), s3]                  (weak cut carries s2 forward)
+        #   chunk 2: [s4, s5]                            (decisive cut, no overlap of s3)
+        assert len(result) == 3
+        assert s1 in result[0] and s2 in result[0]
+        # Weak-cut overlap: s2 appears in BOTH chunk 0 and chunk 1.
+        assert s2 in result[1]
+        assert s3 in result[1]
+        # Decisive cut: s3 must NOT appear in chunk 2.
+        assert s3 not in result[2]
+        assert s4 in result[2] and s5 in result[2]
+
+    def test_decisive_cut_does_not_overlap(self):
+        # Same 5-sentence setup as the weak-cut test but with
+        # decisive_percentile bumped to 50 so every cut is decisive.
+        stub = StubEmbeddings()
+        s1 = "Coffee with Atlas at the new cafe on Main Street today."
+        s2 = "He showed me his latest drawings — they are wonderful."
+        s3 = "Life is good, mostly, these days."
+        s4 = "Tomorrow I must finish the tax return before the deadline."
+        s5 = "Numbers and paperwork are not my favourite thing."
+        stub.vectors[s1] = _unit_vector(0.0)
+        stub.vectors[s2] = _unit_vector(0.0)
+        stub.vectors[s3] = _unit_vector(math.acos(0.7))
+        stub.vectors[s4] = _unit_vector(math.acos(0.2) + math.acos(0.7))
+        stub.vectors[s5] = _unit_vector(math.acos(0.2) + math.acos(0.7))
+
+        chunker = SemanticChunker(
+            embeddings=stub,
+            min_tokens=1,
+            max_tokens=1000,
+            boundary_percentile=50,
+            decisive_percentile=50,  # every cut is decisive
+        )
+        result = chunker.chunk(f"{s1} {s2} {s3} {s4} {s5}")
+
+        # Expected segmentation (all cuts decisive → no overlaps):
+        #   chunk 0: [s1, s2]
+        #   chunk 1: [s3]
+        #   chunk 2: [s4, s5]
+        assert len(result) == 3
+        assert s1 in result[0] and s2 in result[0]
+        assert s3 in result[1]
+        # No weak-cut overlap: s2 must NOT appear in chunk 1, s3 not in chunk 2.
+        assert s2 not in result[1]
+        assert s3 not in result[2]
+        assert s4 in result[2] and s5 in result[2]
+
+    def test_max_size_enforcement_splits_oversized_segment(self):
+        # Build ~10 sentences that all point in the same direction so no
+        # cuts happen from the semantic pass, then set a small max_tokens
+        # so the single segment has to be broken by the fixed-size fallback.
+        stub = StubEmbeddings()
+        sentences = [f"Sentence number {i} with some padding words." for i in range(10)]
+        for s in sentences:
+            stub.vectors[s] = _unit_vector(0.0)
+        text = " ".join(sentences)
+
+        chunker = SemanticChunker(
+            embeddings=stub,
+            min_tokens=1,
+            max_tokens=20,  # very small — forces sub-segmentation
+            boundary_percentile=0,  # no semantic cuts
+            decisive_percentile=0,
+        )
+        result = chunker.chunk(text)
+
+        # Should produce multiple chunks via the oversize-split fallback.
+        assert len(result) > 1
+        for chunk in result:
+            # Each sub-segment should fit roughly within max_tokens. Allow
+            # some tolerance for a single long sentence that exceeds
+            # max_tokens on its own (the packer will still emit it).
+            assert count_tokens(chunk) <= 40
+
+    def test_min_size_enforcement_merges_tiny_segments(self):
+        # 4 sentences, cut aggressively between every pair, but a min
+        # token floor high enough that some segments need merging.
+        stub = StubEmbeddings()
+        sentences = [
+            "Short one here.",
+            "Another brief thought.",
+            "And a third note.",
+            "Finally the fourth bit.",
+        ]
+        angles = [0.0, math.pi / 2, math.pi, 3 * math.pi / 2]
+        for s, a in zip(sentences, angles, strict=True):
+            stub.vectors[s] = _unit_vector(a)
+
+        chunker = SemanticChunker(
+            embeddings=stub,
+            min_tokens=20,  # each single sentence is too small alone
+            max_tokens=1000,
+            boundary_percentile=100,  # cut between every pair
+            decisive_percentile=100,
+        )
+        result = chunker.chunk(" ".join(sentences))
+
+        # After merging, we should have fewer chunks than cuts would suggest.
+        assert 1 <= len(result) <= 3
+
+    def test_raises_on_invalid_percentile_order(self):
+        with pytest.raises(ValueError):
+            SemanticChunker(
+                embeddings=StubEmbeddings(),
+                boundary_percentile=10,
+                decisive_percentile=25,  # > boundary, invalid
+            )
+
+    def test_propagates_embedding_errors(self):
+        class BrokenEmbedder:
+            def embed_texts(self, texts):
+                raise RuntimeError("embed exploded")
+
+            def embed_query(self, q):
+                return [0.0]
+
+        chunker = SemanticChunker(embeddings=BrokenEmbedder())
+        with pytest.raises(RuntimeError, match="embed exploded"):
+            chunker.chunk("First sentence. Second sentence. Third sentence.")
+
+    def test_batches_all_sentences_in_one_embed_call(self):
+        stub = StubEmbeddings()
+        sentences = ["S1.", "S2.", "S3.", "S4.", "S5."]
+        for i, s in enumerate(sentences):
+            stub.vectors[s] = _unit_vector(i * 0.1)
+
+        chunker = SemanticChunker(embeddings=stub)
+        chunker.chunk(" ".join(sentences))
+
+        # Exactly one batched call to embed_texts.
+        assert len(stub.embed_calls) == 1
+        assert len(stub.embed_calls[0]) == 5

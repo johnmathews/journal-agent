@@ -45,6 +45,25 @@ class Config:
     chunking_overlap_tokens: int = field(
         default_factory=lambda: int(os.environ.get("CHUNKING_OVERLAP_TOKENS", "40"))
     )
+    # SemanticChunker only — min chunk size in tokens. Segments below this
+    # are merged with their nearest neighbour.
+    chunking_min_tokens: int = field(
+        default_factory=lambda: int(os.environ.get("CHUNKING_MIN_TOKENS", "30"))
+    )
+    # SemanticChunker only — percentile (0-100) at or below which adjacent
+    # sentence similarity counts as a chunk boundary. Smaller = more
+    # conservative (fewer cuts, larger chunks). Larger = more aggressive.
+    chunking_boundary_percentile: int = field(
+        default_factory=lambda: int(os.environ.get("CHUNKING_BOUNDARY_PERCENTILE", "25"))
+    )
+    # SemanticChunker only — percentile below which a cut is considered
+    # "decisive" and no tail overlap is carried. Cuts between
+    # decisive_percentile and boundary_percentile are "weak" cuts that
+    # duplicate the boundary sentence into both adjacent chunks as
+    # transition context.
+    chunking_decisive_percentile: int = field(
+        default_factory=lambda: int(os.environ.get("CHUNKING_DECISIVE_PERCENTILE", "10"))
+    )
 
     # MCP Server
     mcp_host: str = field(default_factory=lambda: os.environ.get("MCP_HOST", "0.0.0.0"))
