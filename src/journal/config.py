@@ -23,6 +23,21 @@ class Config:
     )
     ocr_model: str = "claude-opus-4-6"
     ocr_max_tokens: int = 4096
+    # Optional directory of markdown files loaded once at startup and
+    # injected into the OCR system prompt to prime the model with
+    # known proper nouns (family, places, topics). When unset the
+    # adapter behaves exactly as before. See docs/ocr-context.md.
+    ocr_context_dir: Path | None = field(
+        default_factory=lambda: (
+            Path(p) if (p := os.environ.get("OCR_CONTEXT_DIR")) else None
+        )
+    )
+    # Cache TTL for the OCR system prompt block. "5m" or "1h".
+    # 1-hour is cheaper when an ingestion session does more than
+    # ~5 OCR calls in an hour.
+    ocr_context_cache_ttl: str = field(
+        default_factory=lambda: os.environ.get("OCR_CONTEXT_CACHE_TTL", "1h")
+    )
 
     # OpenAI (Whisper + Embeddings)
     openai_api_key: str = field(default_factory=lambda: os.environ.get("OPENAI_API_KEY", ""))
@@ -76,10 +91,16 @@ class Config:
     # MCP Server
     mcp_host: str = field(default_factory=lambda: os.environ.get("MCP_HOST", "0.0.0.0"))
     mcp_port: int = field(default_factory=lambda: int(os.environ.get("MCP_PORT", "8000")))
+    # Hosts permitted by MCP's DNS rebinding protection. When the env var is
+    # unset, we default to loopback only — any production deployment must set
+    # this explicitly to the externally-reachable host(s). An empty list is
+    # impossible with this default, and the rebinding guard is always on.
     mcp_allowed_hosts: list[str] = field(
         default_factory=lambda: [
             h.strip()
-            for h in os.environ.get("MCP_ALLOWED_HOSTS", "").split(",")
+            for h in os.environ.get(
+                "MCP_ALLOWED_HOSTS", "127.0.0.1,localhost"
+            ).split(",")
             if h.strip()
         ]
     )
@@ -91,6 +112,29 @@ class Config:
             for h in os.environ.get("API_CORS_ORIGINS", "").split(",")
             if h.strip()
         ]
+    )
+
+    # REST API / MCP bearer token. Every request to /api/* and /mcp must
+    # send `Authorization: Bearer <token>` matching this value. None means
+    # no token is configured, which is fail-closed: the server refuses to
+    # start in `mcp_server.main()`. Generate a token with:
+    #     python -c "import secrets; print(secrets.token_urlsafe(32))"
+    api_bearer_token: str | None = field(
+        default_factory=lambda: os.environ.get("JOURNAL_API_TOKEN") or None
+    )
+
+    # Entity extraction
+    entity_extraction_model: str = "claude-opus-4-6"
+    entity_extraction_max_tokens: int = 4096
+    entity_dedup_similarity_threshold: float = field(
+        default_factory=lambda: float(
+            os.environ.get("ENTITY_DEDUP_SIMILARITY_THRESHOLD", "0.88")
+        )
+    )
+    # Name the extractor uses for the journal author — "I went to Blue
+    # Bottle" becomes a relationship with this name as the subject.
+    journal_author_name: str = field(
+        default_factory=lambda: os.environ.get("JOURNAL_AUTHOR_NAME", "John")
     )
 
 

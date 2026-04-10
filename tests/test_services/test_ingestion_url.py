@@ -1,4 +1,12 @@
-"""Tests for URL-based ingestion."""
+"""Tests for URL-based ingestion.
+
+The module-scoped autouse fixture `_skip_ssrf_validation` stubs out
+`_validate_public_url` so the tests can use literal hostnames like
+`example.com` and `files.slack.com` without triggering real DNS
+resolution (which is unreliable in CI and irrelevant to what these
+tests are checking). SSRF validation itself is covered by
+`tests/test_services/test_ssrf.py`.
+"""
 
 from unittest.mock import MagicMock, patch
 from urllib.error import HTTPError, URLError
@@ -9,6 +17,12 @@ from journal.db.repository import SQLiteEntryRepository
 from journal.services.chunking import FixedTokenChunker
 from journal.services.ingestion import IngestionService
 from journal.vectorstore.store import InMemoryVectorStore
+
+
+@pytest.fixture(autouse=True)
+def _skip_ssrf_validation():
+    with patch("journal.services.ingestion._validate_public_url"):
+        yield
 
 
 @pytest.fixture

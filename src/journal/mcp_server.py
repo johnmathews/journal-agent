@@ -12,11 +12,14 @@ from journal.config import load_config
 from journal.db.connection import get_connection
 from journal.db.migrations import run_migrations
 from journal.db.repository import SQLiteEntryRepository
+from journal.entitystore.store import SQLiteEntityStore
 from journal.logging import setup_logging
 from journal.providers.embeddings import OpenAIEmbeddingsProvider
+from journal.providers.extraction import AnthropicExtractionProvider
 from journal.providers.ocr import AnthropicOCRProvider
 from journal.providers.transcription import OpenAITranscriptionProvider
 from journal.services.chunking import build_chunker
+from journal.services.entity_extraction import EntityExtractionService
 from journal.services.ingestion import IngestionService
 from journal.services.query import QueryService
 from journal.vectorstore.store import ChromaVectorStore
@@ -61,6 +64,8 @@ def _init_services() -> dict:
         api_key=config.anthropic_api_key,
         model=config.ocr_model,
         max_tokens=config.ocr_max_tokens,
+        context_dir=config.ocr_context_dir,
+        cache_ttl=config.ocr_context_cache_ttl,
     )
     transcription = OpenAITranscriptionProvider(
         api_key=config.openai_api_key,
@@ -75,6 +80,13 @@ def _init_services() -> dict:
              config.ocr_model, config.transcription_model, config.embedding_model)
 
     chunker = build_chunker(config, embeddings)
+
+    entity_store = SQLiteEntityStore(conn)
+    extraction_provider = AnthropicExtractionProvider(
+        api_key=config.anthropic_api_key,
+        model=config.entity_extraction_model,
+        max_tokens=config.entity_extraction_max_tokens,
+    )
 
     _services = {
         "ingestion": IngestionService(
@@ -91,6 +103,15 @@ def _init_services() -> dict:
             repository=repo,
             vector_store=vector_store,
             embeddings_provider=embeddings,
+        ),
+        "entity_store": entity_store,
+        "entity_extraction": EntityExtractionService(
+            repository=repo,
+            entity_store=entity_store,
+            extraction_provider=extraction_provider,
+            embeddings_provider=embeddings,
+            author_name=config.journal_author_name,
+            dedup_similarity_threshold=config.entity_dedup_similarity_threshold,
         ),
     }
 
@@ -117,6 +138,14 @@ def _get_query(ctx: Context) -> QueryService:
 
 def _get_ingestion(ctx: Context) -> IngestionService:
     return ctx.request_context.lifespan_context["ingestion"]
+
+
+def _get_entity_extraction(ctx: Context) -> EntityExtractionService:
+    return ctx.request_context.lifespan_context["entity_extraction"]
+
+
+def _get_entity_store(ctx: Context) -> SQLiteEntityStore:
+    return ctx.request_context.lifespan_context["entity_store"]
 
 
 @mcp.tool()
@@ -558,27 +587,209 @@ def journal_update_entry_text(
     )
 
 
+@mcp.tool()
+def journal_extract_entities(
+    entry_id: int | None = None,
+    start_date: str | None = None,
+    end_date: str | None = None,
+    stale_only: bool = False,
+    ctx: Context = None,  # type: ignore[assignment]
+) -> str:
+    """Run the entity extraction batch job over one or more entries.
+
+    Args:
+        entry_id: If provided, run extraction for this single entry only.
+        start_date: Filter entries from this date (ISO 8601). Optional.
+        end_date: Filter entries until this date (ISO 8601). Optional.
+        stale_only: When True, only process entries flagged as stale
+            (text updated since the last extraction run).
+    """
+    log.info(
+        "Tool call: journal_extract_entities("
+        "entry_id=%s, start_date=%s, end_date=%s, stale_only=%s)",
+        entry_id, start_date, end_date, stale_only,
+    )
+    service = _get_entity_extraction(ctx)
+    try:
+        if entry_id is not None:
+            results = [service.extract_from_entry(entry_id)]
+        else:
+            results = service.extract_batch(
+                start_date=start_date,
+                end_date=end_date,
+                stale_only=stale_only,
+            )
+    except ValueError as e:
+        return f"Error: {e}"
+
+    if not results:
+        return "No entries matched the filter — nothing to extract."
+
+    total_new = sum(r.entities_created for r in results)
+    total_matched = sum(r.entities_matched for r in results)
+    total_mentions = sum(r.mentions_created for r in results)
+    total_rels = sum(r.relationships_created for r in results)
+    warnings = [w for r in results for w in r.warnings]
+
+    lines = [
+        f"Extraction complete for {len(results)} entries:",
+        f"  Entities created: {total_new}",
+        f"  Entities matched: {total_matched}",
+        f"  Mentions recorded: {total_mentions}",
+        f"  Relationships recorded: {total_rels}",
+    ]
+    if warnings:
+        lines.append(f"  Warnings: {len(warnings)}")
+        for w in warnings[:20]:
+            lines.append(f"    - {w}")
+        if len(warnings) > 20:
+            lines.append(f"    ... and {len(warnings) - 20} more")
+    return "\n".join(lines)
+
+
+@mcp.tool()
+def journal_list_entities(
+    entity_type: str | None = None,
+    limit: int = 50,
+    ctx: Context = None,  # type: ignore[assignment]
+) -> str:
+    """List extracted entities, optionally filtered by type.
+
+    Args:
+        entity_type: One of 'person', 'place', 'activity', 'organization',
+            'topic', 'other'. Omit to list all types.
+        limit: Max results (default 50).
+    """
+    log.info(
+        "Tool call: journal_list_entities(entity_type=%s, limit=%d)",
+        entity_type, limit,
+    )
+    store = _get_entity_store(ctx)
+    rows = store.list_entities_with_mention_counts(
+        entity_type=entity_type, limit=min(limit, 200), offset=0
+    )
+    if not rows:
+        return "No entities found."
+    lines = [f"Showing {len(rows)} entities:"]
+    for entity, count in rows:
+        aliases = f" (aliases: {', '.join(entity.aliases)})" if entity.aliases else ""
+        lines.append(
+            f"  [{entity.id}] {entity.entity_type}: {entity.canonical_name}"
+            f" — {count} mentions{aliases}"
+        )
+    return "\n".join(lines)
+
+
+@mcp.tool()
+def journal_get_entity_mentions(
+    entity_id: int,
+    limit: int = 50,
+    ctx: Context = None,  # type: ignore[assignment]
+) -> str:
+    """Return every mention of a specific entity across the journal.
+
+    Args:
+        entity_id: The entity to look up.
+        limit: Max mentions to return (default 50).
+    """
+    log.info(
+        "Tool call: journal_get_entity_mentions(entity_id=%d, limit=%d)",
+        entity_id, limit,
+    )
+    store = _get_entity_store(ctx)
+    entity = store.get_entity(entity_id)
+    if entity is None:
+        return f"Entity {entity_id} not found."
+    mentions = store.get_mentions_for_entity(entity_id, limit=limit)
+    if not mentions:
+        return f"No mentions recorded for {entity.canonical_name}."
+    lines = [f"{len(mentions)} mentions of {entity.canonical_name}:"]
+    for m in mentions:
+        lines.append(
+            f"  entry {m.entry_id}: \"{m.quote}\" (confidence {m.confidence:.2f})"
+        )
+    return "\n".join(lines)
+
+
+@mcp.tool()
+def journal_get_entity_relationships(
+    entity_id: int,
+    ctx: Context = None,  # type: ignore[assignment]
+) -> str:
+    """Return the outgoing and incoming relationships for an entity.
+
+    Args:
+        entity_id: The entity whose edges to return.
+    """
+    log.info(
+        "Tool call: journal_get_entity_relationships(entity_id=%d)",
+        entity_id,
+    )
+    store = _get_entity_store(ctx)
+    entity = store.get_entity(entity_id)
+    if entity is None:
+        return f"Entity {entity_id} not found."
+    outgoing, incoming = store.get_relationships_for_entity(entity_id)
+    if not outgoing and not incoming:
+        return f"No relationships recorded for {entity.canonical_name}."
+    lines = [f"Relationships for {entity.canonical_name}:"]
+    if outgoing:
+        lines.append(f"  Outgoing ({len(outgoing)}):")
+        for r in outgoing:
+            other = store.get_entity(r.object_entity_id)
+            other_name = other.canonical_name if other else f"#{r.object_entity_id}"
+            lines.append(
+                f"    -> {r.predicate} -> {other_name} "
+                f"(entry {r.entry_id}, conf {r.confidence:.2f})"
+            )
+    if incoming:
+        lines.append(f"  Incoming ({len(incoming)}):")
+        for r in incoming:
+            other = store.get_entity(r.subject_entity_id)
+            other_name = other.canonical_name if other else f"#{r.subject_entity_id}"
+            lines.append(
+                f"    <- {r.predicate} <- {other_name} "
+                f"(entry {r.entry_id}, conf {r.confidence:.2f})"
+            )
+    return "\n".join(lines)
+
+
 def main() -> None:
-    """Run the MCP server with REST API and optional CORS."""
+    """Run the MCP server with REST API, bearer-token auth, and optional CORS."""
     import anyio
     import uvicorn
     from starlette.middleware.cors import CORSMiddleware
 
+    from journal.auth import BearerTokenMiddleware
+
     config = load_config()
+
+    # Fail-closed: refuse to start without an API bearer token. A missing
+    # token means every REST and MCP call would be unauthenticated, which
+    # is the exact vulnerability this middleware closes.
+    if not config.api_bearer_token:
+        raise RuntimeError(
+            "JOURNAL_API_TOKEN is not set. The API and MCP endpoints "
+            "require a bearer token — generate one with:\n"
+            "    python -c \"import secrets; print(secrets.token_urlsafe(32))\"\n"
+            "and add it to your .env file as JOURNAL_API_TOKEN=..."
+        )
+
+    # DNS rebinding protection is always on. `mcp_allowed_hosts` defaults
+    # to loopback in config.py, so there is no path that disables it. The
+    # only configurable is which hosts are trusted.
     mcp.settings.host = config.mcp_host
     mcp.settings.port = config.mcp_port
-
-    if config.mcp_allowed_hosts:
-        allowed_origins = [f"http://{h}" for h in config.mcp_allowed_hosts]
-        mcp.settings.transport_security = TransportSecuritySettings(
-            enable_dns_rebinding_protection=True,
-            allowed_hosts=config.mcp_allowed_hosts,
-            allowed_origins=allowed_origins,
-        )
-    else:
-        mcp.settings.transport_security = TransportSecuritySettings(
-            enable_dns_rebinding_protection=False,
-        )
+    allowed_origins = [f"http://{h}" for h in config.mcp_allowed_hosts]
+    mcp.settings.transport_security = TransportSecuritySettings(
+        enable_dns_rebinding_protection=True,
+        allowed_hosts=config.mcp_allowed_hosts,
+        allowed_origins=allowed_origins,
+    )
+    log.info(
+        "MCP transport security: DNS rebinding protection ON, allowed hosts=%s",
+        config.mcp_allowed_hosts,
+    )
 
     # Initialize services eagerly so REST API routes work immediately,
     # without waiting for the first MCP session to connect.
@@ -592,14 +803,30 @@ def main() -> None:
         methods = getattr(route, "methods", None)
         log.info("  Route: %s %s", route.path, methods or "(all)")
 
-    # Add CORS middleware if configured
+    # Middleware stack: the FIRST add_middleware call is the OUTERMOST
+    # wrapper (Starlette iterates user_middleware in reverse at build
+    # time, so the first entry is the one requests hit first). We want
+    # CORS outermost so that 401 responses from the auth middleware
+    # still carry Access-Control-Allow-Origin headers — otherwise the
+    # browser swallows them as a CORS error instead of surfacing the
+    # 401, and the webapp has no way to distinguish the two.
+    #
+    # Request flow:
+    #   client -> CORS -> BearerToken -> route -> BearerToken -> CORS -> client
+    #
+    # CORS handles OPTIONS preflight itself (it short-circuits before
+    # BearerToken sees them), and BearerToken also allows OPTIONS through
+    # as a belt-and-braces defence.
     if config.api_cors_origins:
         app.add_middleware(
             CORSMiddleware,
             allow_origins=config.api_cors_origins,
-            allow_methods=["GET", "PATCH", "OPTIONS"],
-            allow_headers=["Content-Type"],
+            allow_methods=["GET", "PATCH", "DELETE", "POST", "OPTIONS"],
+            allow_headers=["Content-Type", "Authorization"],
         )
+
+    app.add_middleware(BearerTokenMiddleware, token=config.api_bearer_token)
+    log.info("Bearer token auth middleware installed")
 
     async def _serve() -> None:
         uvi_config = uvicorn.Config(

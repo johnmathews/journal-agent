@@ -6,8 +6,11 @@ All configuration is via environment variables. No config files are needed.
 
 | Variable | Description |
 |----------|-------------|
+| `JOURNAL_API_TOKEN` | Bearer token required on every REST and MCP request. The server refuses to start without it. Generate with `python -c "import secrets; print(secrets.token_urlsafe(32))"`. |
 | `ANTHROPIC_API_KEY` | Anthropic API key for OCR (Claude Opus 4.6 vision) |
 | `OPENAI_API_KEY` | OpenAI API key for Whisper transcription and embeddings |
+
+See `docs/security.md` for the threat model and how auth fits in.
 
 ## Optional — deployment
 
@@ -16,11 +19,14 @@ All configuration is via environment variables. No config files are needed.
 | `DB_PATH` | `journal.db` | Path to SQLite database file |
 | `CHROMADB_HOST` | `localhost` | ChromaDB server hostname |
 | `CHROMADB_PORT` | `8000` | ChromaDB server port |
-| `MCP_HOST` | `0.0.0.0` | MCP server bind address |
+| `MCP_HOST` | `0.0.0.0` | MCP server bind address (in-container). The host-side port in `docker-compose.yml` is bound to `127.0.0.1` — see `docs/security.md`. |
 | `MCP_PORT` | `8000` | MCP server port (use 8400 on media VM to avoid Gluetun conflict) |
+| `MCP_ALLOWED_HOSTS` | `127.0.0.1,localhost` | Comma-separated hostnames that DNS rebinding protection will accept as Host headers. Add any externally-facing hostname if you front the service with a reverse proxy. |
 | `SLACK_BOT_TOKEN` | | Slack bot token for downloading files from Slack URLs |
 | `API_CORS_ORIGINS` | | Comma-separated list of allowed CORS origins for the REST API (e.g., `http://localhost:5173`). Empty disables CORS. |
 | `LOG_LEVEL` | `INFO` | Logging level (DEBUG, INFO, WARNING, ERROR) |
+| `JOURNAL_AUTHOR_NAME` | `John` | Name the entity extractor uses as the subject of first-person statements. See `docs/entity-tracking.md`. |
+| `ENTITY_DEDUP_SIMILARITY_THRESHOLD` | `0.88` | Cosine similarity threshold for the stage-c embedding dedup fallback. Raise to be stricter, lower to merge more aggressively. |
 
 ## Optional — chunking
 

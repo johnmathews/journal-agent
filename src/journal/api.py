@@ -24,6 +24,8 @@ if TYPE_CHECKING:
     from mcp.server.fastmcp import FastMCP
     from starlette.requests import Request
 
+    from journal.entitystore.store import EntityStore
+    from journal.services.entity_extraction import EntityExtractionService
     from journal.services.ingestion import IngestionService
     from journal.services.query import QueryService
 
@@ -44,6 +46,71 @@ def _entry_to_dict(entry: Any, page_count: int = 0) -> dict[str, Any]:
         "language": entry.language,
         "created_at": entry.created_at,
         "updated_at": entry.updated_at,
+    }
+
+
+def _entity_summary(entity: Any, mention_count: int = 0) -> dict[str, Any]:
+    """Convert an Entity to a JSON-serialisable summary dict."""
+    return {
+        "id": entity.id,
+        "canonical_name": entity.canonical_name,
+        "entity_type": entity.entity_type,
+        "aliases": list(entity.aliases),
+        "mention_count": mention_count,
+        "first_seen": entity.first_seen,
+    }
+
+
+def _entity_detail(entity: Any) -> dict[str, Any]:
+    """Convert an Entity to a full JSON-serialisable dict."""
+    return {
+        "id": entity.id,
+        "canonical_name": entity.canonical_name,
+        "entity_type": entity.entity_type,
+        "aliases": list(entity.aliases),
+        "description": entity.description,
+        "first_seen": entity.first_seen,
+        "created_at": entity.created_at,
+        "updated_at": entity.updated_at,
+    }
+
+
+def _mention_dict(mention: Any, entry_date: str | None = None) -> dict[str, Any]:
+    return {
+        "id": mention.id,
+        "entity_id": mention.entity_id,
+        "entry_id": mention.entry_id,
+        "entry_date": entry_date,
+        "quote": mention.quote,
+        "confidence": mention.confidence,
+        "extraction_run_id": mention.extraction_run_id,
+        "created_at": mention.created_at,
+    }
+
+
+def _relationship_dict(rel: Any) -> dict[str, Any]:
+    return {
+        "id": rel.id,
+        "subject_entity_id": rel.subject_entity_id,
+        "predicate": rel.predicate,
+        "object_entity_id": rel.object_entity_id,
+        "quote": rel.quote,
+        "entry_id": rel.entry_id,
+        "confidence": rel.confidence,
+        "extraction_run_id": rel.extraction_run_id,
+        "created_at": rel.created_at,
+    }
+
+
+def _extraction_result_dict(result: Any) -> dict[str, Any]:
+    return {
+        "entry_id": result.entry_id,
+        "extraction_run_id": result.extraction_run_id,
+        "entities_created": result.entities_created,
+        "entities_matched": result.entities_matched,
+        "mentions_created": result.mentions_created,
+        "relationships_created": result.relationships_created,
+        "warnings": list(result.warnings),
     }
 
 
@@ -359,3 +426,249 @@ def register_api_routes(
         stats = query_svc.get_statistics(start_date, end_date)
         log.info("GET /api/stats — %d entries, %d words", stats.total_entries, stats.total_words)
         return JSONResponse(asdict(stats))
+
+    # -----------------------------------------------------------------
+    # Entity routes
+    # -----------------------------------------------------------------
+
+    def _require_services() -> dict | None:
+        svcs = services_getter()
+        return svcs
+
+    @mcp.custom_route(
+        "/api/entities/extract",
+        methods=["POST"],
+        name="api_entities_extract",
+    )
+    async def extract_entities(request: Request) -> JSONResponse:
+        """Run the entity extraction batch job on demand."""
+        services = _require_services()
+        if services is None:
+            return JSONResponse(
+                {"error": "Server not initialized"}, status_code=503
+            )
+        extraction_svc: EntityExtractionService = services["entity_extraction"]
+
+        try:
+            body = await request.json()
+        except (json.JSONDecodeError, ValueError):
+            body = {}
+
+        entry_id = body.get("entry_id")
+        start_date = body.get("start_date")
+        end_date = body.get("end_date")
+        stale_only = bool(body.get("stale_only", False))
+
+        try:
+            if entry_id is not None:
+                results = [extraction_svc.extract_from_entry(int(entry_id))]
+            else:
+                results = extraction_svc.extract_batch(
+                    start_date=start_date,
+                    end_date=end_date,
+                    stale_only=stale_only,
+                )
+        except ValueError as e:
+            log.warning("POST /api/entities/extract — %s", e)
+            return JSONResponse({"error": str(e)}, status_code=400)
+
+        log.info(
+            "POST /api/entities/extract — processed %d entries", len(results)
+        )
+        return JSONResponse(
+            {"results": [_extraction_result_dict(r) for r in results]}
+        )
+
+    @mcp.custom_route(
+        "/api/entities", methods=["GET"], name="api_list_entities"
+    )
+    async def list_entities_route(request: Request) -> JSONResponse:
+        services = _require_services()
+        if services is None:
+            return JSONResponse(
+                {"error": "Server not initialized"}, status_code=503
+            )
+        entity_store: EntityStore = services["entity_store"]
+
+        entity_type = request.query_params.get("type")
+        search = request.query_params.get("search")
+        try:
+            limit = min(int(request.query_params.get("limit", "50")), 200)
+        except ValueError:
+            limit = 50
+        try:
+            offset = max(int(request.query_params.get("offset", "0")), 0)
+        except ValueError:
+            offset = 0
+
+        rows = entity_store.list_entities_with_mention_counts(
+            entity_type=entity_type, limit=limit, offset=offset
+        )
+        if search:
+            needle = search.strip().lower()
+            rows = [
+                (e, c)
+                for e, c in rows
+                if needle in e.canonical_name.lower()
+                or any(needle in a.lower() for a in e.aliases)
+            ]
+        total = entity_store.count_entities(entity_type=entity_type)
+        items = [_entity_summary(e, c) for e, c in rows]
+        log.info(
+            "GET /api/entities — returned %d/%d entities", len(items), total
+        )
+        return JSONResponse(
+            {
+                "items": items,
+                "total": total,
+                "limit": limit,
+                "offset": offset,
+            }
+        )
+
+    @mcp.custom_route(
+        "/api/entities/{entity_id:int}",
+        methods=["GET"],
+        name="api_entity_detail",
+    )
+    async def entity_detail(request: Request) -> JSONResponse:
+        services = _require_services()
+        if services is None:
+            return JSONResponse(
+                {"error": "Server not initialized"}, status_code=503
+            )
+        entity_store: EntityStore = services["entity_store"]
+        entity_id = int(request.path_params["entity_id"])
+
+        entity = entity_store.get_entity(entity_id)
+        if entity is None:
+            log.warning("GET /api/entities/%d — not found", entity_id)
+            return JSONResponse(
+                {"error": f"Entity {entity_id} not found"}, status_code=404
+            )
+        log.info("GET /api/entities/%d — %s", entity_id, entity.canonical_name)
+        return JSONResponse(_entity_detail(entity))
+
+    @mcp.custom_route(
+        "/api/entities/{entity_id:int}/mentions",
+        methods=["GET"],
+        name="api_entity_mentions",
+    )
+    async def entity_mentions(request: Request) -> JSONResponse:
+        services = _require_services()
+        if services is None:
+            return JSONResponse(
+                {"error": "Server not initialized"}, status_code=503
+            )
+        entity_store: EntityStore = services["entity_store"]
+        query_svc: QueryService = services["query"]
+        entity_id = int(request.path_params["entity_id"])
+
+        entity = entity_store.get_entity(entity_id)
+        if entity is None:
+            return JSONResponse(
+                {"error": f"Entity {entity_id} not found"}, status_code=404
+            )
+
+        try:
+            limit = min(int(request.query_params.get("limit", "50")), 200)
+        except ValueError:
+            limit = 50
+        try:
+            offset = max(int(request.query_params.get("offset", "0")), 0)
+        except ValueError:
+            offset = 0
+
+        mentions = entity_store.get_mentions_for_entity(
+            entity_id, limit=limit, offset=offset
+        )
+        mention_payload: list[dict[str, Any]] = []
+        for m in mentions:
+            entry = query_svc._repo.get_entry(m.entry_id)
+            entry_date = entry.entry_date if entry else None
+            mention_payload.append(_mention_dict(m, entry_date))
+        log.info(
+            "GET /api/entities/%d/mentions — %d mentions",
+            entity_id, len(mention_payload),
+        )
+        return JSONResponse(
+            {
+                "entity_id": entity_id,
+                "mentions": mention_payload,
+                "total": len(mention_payload),
+            }
+        )
+
+    @mcp.custom_route(
+        "/api/entities/{entity_id:int}/relationships",
+        methods=["GET"],
+        name="api_entity_relationships",
+    )
+    async def entity_relationships(request: Request) -> JSONResponse:
+        services = _require_services()
+        if services is None:
+            return JSONResponse(
+                {"error": "Server not initialized"}, status_code=503
+            )
+        entity_store: EntityStore = services["entity_store"]
+        entity_id = int(request.path_params["entity_id"])
+
+        entity = entity_store.get_entity(entity_id)
+        if entity is None:
+            return JSONResponse(
+                {"error": f"Entity {entity_id} not found"}, status_code=404
+            )
+
+        outgoing, incoming = entity_store.get_relationships_for_entity(
+            entity_id
+        )
+        log.info(
+            "GET /api/entities/%d/relationships — %d out, %d in",
+            entity_id, len(outgoing), len(incoming),
+        )
+        return JSONResponse(
+            {
+                "entity_id": entity_id,
+                "outgoing": [_relationship_dict(r) for r in outgoing],
+                "incoming": [_relationship_dict(r) for r in incoming],
+            }
+        )
+
+    @mcp.custom_route(
+        "/api/entries/{entry_id:int}/entities",
+        methods=["GET"],
+        name="api_entry_entities",
+    )
+    async def entry_entities(request: Request) -> JSONResponse:
+        services = _require_services()
+        if services is None:
+            return JSONResponse(
+                {"error": "Server not initialized"}, status_code=503
+            )
+        entity_store: EntityStore = services["entity_store"]
+        query_svc: QueryService = services["query"]
+        entry_id = int(request.path_params["entry_id"])
+
+        entry = query_svc._repo.get_entry(entry_id)
+        if entry is None:
+            return JSONResponse(
+                {"error": f"Entry {entry_id} not found"}, status_code=404
+            )
+
+        entities = entity_store.get_entities_for_entry(entry_id)
+        mentions = entity_store.get_mentions_for_entry(entry_id)
+        mentions_by_entity: dict[int, int] = {}
+        for m in mentions:
+            mentions_by_entity[m.entity_id] = (
+                mentions_by_entity.get(m.entity_id, 0) + 1
+            )
+        items = [
+            _entity_summary(e, mentions_by_entity.get(e.id, 0))
+            for e in entities
+        ]
+        log.info(
+            "GET /api/entries/%d/entities — %d entities", entry_id, len(items)
+        )
+        return JSONResponse(
+            {"entry_id": entry_id, "items": items, "total": len(items)}
+        )

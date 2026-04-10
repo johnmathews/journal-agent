@@ -2,7 +2,11 @@
 # and pushed to ghcr.io, then manually pulled on the VM.
 # For local dev, run: docker compose up
 #
-# On media VM, MCP endpoint will be at http://<host>:8400/mcp
+# On media VM, MCP endpoint is reachable at http://127.0.0.1:8400/mcp from
+# the VM itself. External clients (Slack agent, webapp) MUST go through a
+# reverse proxy that terminates TLS and adds any additional authentication
+# — the port is intentionally bound to loopback only and the container
+# requires a JOURNAL_API_TOKEN bearer token on every request.
 
 services:
   journal:
@@ -13,15 +17,29 @@ services:
       - DB_PATH=/data/journal.db
       - CHROMADB_HOST=journal-chromadb
       - CHROMADB_PORT=8000
+      # Bind inside the container on all interfaces — the host-side bind
+      # below restricts external reachability to loopback. Without the
+      # in-container 0.0.0.0, docker-proxy cannot forward the published
+      # port into the container's network namespace.
       - MCP_HOST=0.0.0.0
       - MCP_PORT=8400
+      # Restricts DNS rebinding protection to the loopback / reverse-proxy
+      # host(s). Add any externally-facing hostname here if you front the
+      # service with a proxy at e.g. journal.home.arpa.
+      - MCP_ALLOWED_HOSTS=${MCP_ALLOWED_HOSTS:-127.0.0.1,localhost}
       - ANTHROPIC_API_KEY=${ANTHROPIC_API_KEY}
       - OPENAI_API_KEY=${OPENAI_API_KEY}
       - SLACK_BOT_TOKEN=${SLACK_BOT_TOKEN:-}
+      # Bearer token required on every /api/* and /mcp request. The
+      # server refuses to start if this is unset.
+      - JOURNAL_API_TOKEN=${JOURNAL_API_TOKEN}
     volumes:
       - /srv/media/config/journal/data:/data
     ports:
-      - "8400:8400"
+      # Host-side bind is loopback-only. External access must go through
+      # a reverse proxy (Caddy/Traefik) that can add TLS and enforce any
+      # additional access controls.
+      - "127.0.0.1:8400:8400"
     depends_on:
       journal-chromadb:
         condition: service_healthy
@@ -34,8 +52,10 @@ services:
       - TZ=${TZ:-Europe/Amsterdam}
     volumes:
       - /srv/media/config/journal/chromadb:/data
-    ports:
-      - "8401:8000"
+    # ChromaDB is deliberately NOT published on the host — it has no auth
+    # of its own and exposes chunk text in cleartext. The `journal`
+    # service reaches it via compose-internal DNS (journal-chromadb:8000)
+    # and nothing outside the compose network needs to talk to it.
     healthcheck:
       test: ["CMD", "curl", "-f", "http://localhost:8000/api/v2/heartbeat"]
       interval: 30s

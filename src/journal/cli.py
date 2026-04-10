@@ -9,13 +9,16 @@ from journal.config import load_config
 from journal.db.connection import get_connection
 from journal.db.migrations import run_migrations
 from journal.db.repository import SQLiteEntryRepository
+from journal.entitystore.store import SQLiteEntityStore
 from journal.logging import setup_logging
 from journal.providers.embeddings import OpenAIEmbeddingsProvider
+from journal.providers.extraction import AnthropicExtractionProvider
 from journal.providers.ocr import AnthropicOCRProvider
 from journal.providers.transcription import OpenAITranscriptionProvider
 from journal.services.backfill import backfill_chunk_counts, rechunk_entries
 from journal.services.chunking import build_chunker
 from journal.services.chunking_eval import evaluate_chunking
+from journal.services.entity_extraction import EntityExtractionService
 from journal.services.ingestion import IngestionService
 from journal.services.query import QueryService
 from journal.vectorstore.store import ChromaVectorStore
@@ -36,6 +39,8 @@ def _build_services(config):
         api_key=config.anthropic_api_key,
         model=config.ocr_model,
         max_tokens=config.ocr_max_tokens,
+        context_dir=config.ocr_context_dir,
+        cache_ttl=config.ocr_context_cache_ttl,
     )
     transcription = OpenAITranscriptionProvider(
         api_key=config.openai_api_key,
@@ -64,12 +69,27 @@ def _build_services(config):
         embeddings_provider=embeddings,
     )
 
-    return ingestion, query
+    entity_store = SQLiteEntityStore(conn)
+    extraction_provider = AnthropicExtractionProvider(
+        api_key=config.anthropic_api_key,
+        model=config.entity_extraction_model,
+        max_tokens=config.entity_extraction_max_tokens,
+    )
+    entity_extraction = EntityExtractionService(
+        repository=repo,
+        entity_store=entity_store,
+        extraction_provider=extraction_provider,
+        embeddings_provider=embeddings,
+        author_name=config.journal_author_name,
+        dedup_similarity_threshold=config.entity_dedup_similarity_threshold,
+    )
+
+    return ingestion, query, entity_extraction
 
 
 def cmd_ingest(args, config):
     """Ingest a journal entry from an image or audio file."""
-    ingestion, _ = _build_services(config)
+    ingestion, _, _ = _build_services(config)
     file_path = Path(args.file)
 
     if not file_path.exists():
@@ -112,7 +132,7 @@ def cmd_ingest(args, config):
 
 def cmd_search(args, config):
     """Search journal entries semantically."""
-    _, query = _build_services(config)
+    _, query, _ = _build_services(config)
     results = query.search_entries(args.query, args.start_date, args.end_date, args.limit)
 
     if not results:
@@ -128,7 +148,7 @@ def cmd_search(args, config):
 
 def cmd_list(args, config):
     """List journal entries."""
-    _, query = _build_services(config)
+    _, query, _ = _build_services(config)
     entries = query.list_entries(args.start_date, args.end_date, args.limit)
 
     if not entries:
@@ -142,7 +162,7 @@ def cmd_list(args, config):
 
 def cmd_ingest_multi(args, config):
     """Ingest multiple page images as a single journal entry."""
-    ingestion, _ = _build_services(config)
+    ingestion, _, _ = _build_services(config)
 
     images: list[tuple[bytes, str]] = []
     image_exts = {".jpg", ".jpeg", ".png", ".gif", ".webp"}
@@ -257,7 +277,7 @@ def cmd_rechunk(args, config):
     With `--dry-run`, reports what would change without writing to
     ChromaDB or SQLite and without calling the embeddings API.
     """
-    ingestion, _ = _build_services(config)
+    ingestion, _, _ = _build_services(config)
     repo = ingestion._repo  # type: ignore[attr-defined]
 
     result = rechunk_entries(ingestion, repo, dry_run=args.dry_run)
@@ -379,9 +399,53 @@ def cmd_seed(args, config):
     print("No embeddings generated (re-ingest entries if you want semantic search).")
 
 
+def cmd_extract_entities(args, config):
+    """Run the on-demand entity extraction batch job.
+
+    Accepts a single `--entry-id` to extract one entry, or filter by
+    `--start-date`/`--end-date`/`--stale-only` to pick a batch.
+    """
+    _, _, extraction = _build_services(config)
+
+    if args.entry_id is not None:
+        try:
+            results = [extraction.extract_from_entry(args.entry_id)]
+        except ValueError as e:
+            print(f"Error: {e}", file=sys.stderr)
+            sys.exit(1)
+    else:
+        results = extraction.extract_batch(
+            start_date=args.start_date,
+            end_date=args.end_date,
+            stale_only=args.stale_only,
+        )
+
+    if not results:
+        print("No entries matched the filter — nothing to extract.")
+        return
+
+    total_new = sum(r.entities_created for r in results)
+    total_matched = sum(r.entities_matched for r in results)
+    total_mentions = sum(r.mentions_created for r in results)
+    total_rels = sum(r.relationships_created for r in results)
+    total_warnings = sum(len(r.warnings) for r in results)
+
+    print(f"Extracted entities for {len(results)} entries:")
+    print(f"  Entities created:       {total_new}")
+    print(f"  Entities matched:       {total_matched}")
+    print(f"  Mentions recorded:      {total_mentions}")
+    print(f"  Relationships recorded: {total_rels}")
+    print(f"  Warnings:               {total_warnings}")
+    if total_warnings:
+        print()
+        for r in results:
+            for w in r.warnings:
+                print(f"  [entry {r.entry_id}] {w}")
+
+
 def cmd_stats(args, config):
     """Show journal statistics."""
-    _, query = _build_services(config)
+    _, query, _ = _build_services(config)
     stats = query.get_statistics(args.start_date, args.end_date)
 
     print("Journal Statistics")
@@ -467,6 +531,20 @@ def main():
     )
     p_seed.add_argument("--count", type=int, help="Number of sample entries (default: all 5)")
 
+    # extract-entities
+    p_extract = subparsers.add_parser(
+        "extract-entities",
+        help="Run the entity extraction batch job over one or more entries",
+    )
+    p_extract.add_argument("--entry-id", type=int, help="Extract a single entry by id")
+    p_extract.add_argument("--start-date", help="Filter entries from this date (ISO 8601)")
+    p_extract.add_argument("--end-date", help="Filter entries until this date (ISO 8601)")
+    p_extract.add_argument(
+        "--stale-only",
+        action="store_true",
+        help="Only process entries flagged as stale",
+    )
+
     args = parser.parse_args()
     setup_logging(args.log_level)
     config = load_config()
@@ -481,5 +559,6 @@ def main():
         "rechunk": cmd_rechunk,
         "eval-chunking": cmd_eval_chunking,
         "seed": cmd_seed,
+        "extract-entities": cmd_extract_entities,
     }
     commands[args.command](args, config)

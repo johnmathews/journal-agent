@@ -1,0 +1,374 @@
+"""Tests for EntityExtractionService."""
+
+from __future__ import annotations
+
+from typing import TYPE_CHECKING
+from unittest.mock import MagicMock
+
+import pytest
+
+from journal.db.repository import SQLiteEntryRepository
+from journal.entitystore.store import SQLiteEntityStore
+from journal.providers.extraction import RawExtractionResult
+from journal.services.entity_extraction import EntityExtractionService
+
+if TYPE_CHECKING:
+    import sqlite3
+
+
+@pytest.fixture
+def repo(db_conn: sqlite3.Connection) -> SQLiteEntryRepository:
+    return SQLiteEntryRepository(db_conn)
+
+
+@pytest.fixture
+def entity_store(db_conn: sqlite3.Connection) -> SQLiteEntityStore:
+    return SQLiteEntityStore(db_conn)
+
+
+def _raw(
+    entities: list[dict] | None = None,
+    relationships: list[dict] | None = None,
+) -> RawExtractionResult:
+    return RawExtractionResult(
+        entities=entities or [],
+        relationships=relationships or [],
+    )
+
+
+def _entity(
+    canonical_name: str,
+    entity_type: str = "person",
+    description: str = "",
+    aliases: list[str] | None = None,
+    quote: str = "",
+    confidence: float = 0.9,
+) -> dict:
+    return {
+        "entity_type": entity_type,
+        "canonical_name": canonical_name,
+        "description": description,
+        "aliases": aliases or [],
+        "quote": quote,
+        "confidence": confidence,
+    }
+
+
+def _rel(
+    subject: str,
+    predicate: str,
+    obj: str,
+    quote: str = "",
+    confidence: float = 0.9,
+) -> dict:
+    return {
+        "subject": subject,
+        "predicate": predicate,
+        "object": obj,
+        "quote": quote,
+        "confidence": confidence,
+    }
+
+
+@pytest.fixture
+def sample_entry(repo: SQLiteEntryRepository) -> int:
+    entry = repo.create_entry(
+        "2026-03-22",
+        "ocr",
+        "I went to Vienna with Atlas today.",
+        8,
+    )
+    return entry.id
+
+
+def _make_service(
+    repo: SQLiteEntryRepository,
+    store: SQLiteEntityStore,
+    extractor: MagicMock,
+    *,
+    author_name: str = "John",
+    threshold: float = 0.88,
+    embeddings: MagicMock | None = None,
+) -> EntityExtractionService:
+    if embeddings is None:
+        embeddings = MagicMock()
+        embeddings.embed_query = MagicMock(return_value=[0.0] * 8)
+    return EntityExtractionService(
+        repository=repo,
+        entity_store=store,
+        extraction_provider=extractor,
+        embeddings_provider=embeddings,
+        author_name=author_name,
+        dedup_similarity_threshold=threshold,
+    )
+
+
+class TestHappyPath:
+    def test_basic_entity_and_relationship(
+        self,
+        repo: SQLiteEntryRepository,
+        entity_store: SQLiteEntityStore,
+        sample_entry: int,
+    ) -> None:
+        extractor = MagicMock()
+        extractor.extract_entities.return_value = _raw(
+            entities=[
+                _entity("John", "person", quote="I went"),
+                _entity("Atlas", "person", quote="with Atlas"),
+                _entity("Vienna", "place", quote="to Vienna"),
+            ],
+            relationships=[
+                _rel("John", "visited", "Vienna", "I went to Vienna"),
+                _rel("John", "knows", "Atlas", "with Atlas"),
+            ],
+        )
+        service = _make_service(repo, entity_store, extractor)
+
+        result = service.extract_from_entry(sample_entry)
+        assert result.entities_created == 3
+        assert result.entities_matched == 0
+        assert result.mentions_created == 3
+        assert result.relationships_created == 2
+        assert result.warnings == []
+
+        assert entity_store.count_entities() == 3
+        mentions = entity_store.get_mentions_for_entry(sample_entry)
+        assert len(mentions) == 3
+        rels = entity_store.get_relationships_for_entry(sample_entry)
+        assert len(rels) == 2
+
+    def test_entry_marked_extracted_after_success(
+        self,
+        repo: SQLiteEntryRepository,
+        entity_store: SQLiteEntityStore,
+        sample_entry: int,
+        db_conn: sqlite3.Connection,
+    ) -> None:
+        extractor = MagicMock()
+        extractor.extract_entities.return_value = _raw()
+        service = _make_service(repo, entity_store, extractor)
+        service.extract_from_entry(sample_entry)
+        row = db_conn.execute(
+            "SELECT entity_extraction_stale FROM entries WHERE id = ?",
+            (sample_entry,),
+        ).fetchone()
+        assert row["entity_extraction_stale"] == 0
+
+
+class TestDedupExactName:
+    def test_second_extraction_reuses_existing(
+        self,
+        repo: SQLiteEntryRepository,
+        entity_store: SQLiteEntityStore,
+    ) -> None:
+        e1 = repo.create_entry("2026-03-22", "ocr", "one", 1).id
+        e2 = repo.create_entry("2026-03-23", "ocr", "two", 1).id
+
+        extractor = MagicMock()
+        extractor.extract_entities.side_effect = [
+            _raw(entities=[_entity("Atlas", "person")]),
+            _raw(entities=[_entity("Atlas", "person")]),
+        ]
+        service = _make_service(repo, entity_store, extractor)
+
+        r1 = service.extract_from_entry(e1)
+        r2 = service.extract_from_entry(e2)
+        assert r1.entities_created == 1
+        assert r2.entities_created == 0
+        assert r2.entities_matched == 1
+        assert entity_store.count_entities() == 1
+
+
+class TestDedupAliasMatch:
+    def test_alias_matches_existing_entity(
+        self,
+        repo: SQLiteEntryRepository,
+        entity_store: SQLiteEntityStore,
+    ) -> None:
+        # Pre-seed an entity with an alias.
+        existing = entity_store.create_entity(
+            "person", "Atlas Wong", "", "2026-03-01"
+        )
+        entity_store.add_alias(existing.id, "Atty")
+
+        e1 = repo.create_entry("2026-03-22", "ocr", "one", 1).id
+        extractor = MagicMock()
+        extractor.extract_entities.return_value = _raw(
+            entities=[_entity("Atty", "person")],
+        )
+        service = _make_service(repo, entity_store, extractor)
+        r = service.extract_from_entry(e1)
+        assert r.entities_created == 0
+        assert r.entities_matched == 1
+
+
+class TestDedupEmbeddingSimilarity:
+    def test_embedding_fallback_produces_warning(
+        self,
+        repo: SQLiteEntryRepository,
+        entity_store: SQLiteEntityStore,
+    ) -> None:
+        # Pre-seed an entity WITH an embedding so the fallback has
+        # something to compare against.
+        existing = entity_store.create_entity(
+            "person", "Dr Atlas Wong", "", "2026-03-01"
+        )
+        entity_store.set_entity_embedding(existing.id, [1.0, 0.0, 0.0])
+
+        e1 = repo.create_entry("2026-03-22", "ocr", "one", 1).id
+        extractor = MagicMock()
+        extractor.extract_entities.return_value = _raw(
+            entities=[_entity("Atlas W.", "person")],
+        )
+        # Return an embedding close to the existing one.
+        embeddings = MagicMock()
+        embeddings.embed_query = MagicMock(return_value=[0.99, 0.01, 0.0])
+
+        service = _make_service(
+            repo, entity_store, extractor, embeddings=embeddings, threshold=0.9
+        )
+        r = service.extract_from_entry(e1)
+        assert r.entities_created == 0
+        assert r.entities_matched == 1
+        assert any("potential merge" in w for w in r.warnings)
+
+    def test_below_threshold_creates_new_entity(
+        self,
+        repo: SQLiteEntryRepository,
+        entity_store: SQLiteEntityStore,
+    ) -> None:
+        existing = entity_store.create_entity(
+            "person", "Somebody Else", "", "2026-03-01"
+        )
+        entity_store.set_entity_embedding(existing.id, [1.0, 0.0, 0.0])
+
+        e1 = repo.create_entry("2026-03-22", "ocr", "one", 1).id
+        extractor = MagicMock()
+        extractor.extract_entities.return_value = _raw(
+            entities=[_entity("Atlas", "person")],
+        )
+        embeddings = MagicMock()
+        embeddings.embed_query = MagicMock(return_value=[0.0, 1.0, 0.0])
+        service = _make_service(
+            repo, entity_store, extractor, embeddings=embeddings, threshold=0.9
+        )
+        r = service.extract_from_entry(e1)
+        assert r.entities_created == 1
+        assert r.warnings == []
+
+
+class TestIdempotency:
+    def test_rerun_replaces_mentions(
+        self,
+        repo: SQLiteEntryRepository,
+        entity_store: SQLiteEntityStore,
+        sample_entry: int,
+    ) -> None:
+        extractor = MagicMock()
+        extractor.extract_entities.return_value = _raw(
+            entities=[_entity("Atlas", "person", quote="q1")],
+            relationships=[],
+        )
+        service = _make_service(repo, entity_store, extractor)
+        service.extract_from_entry(sample_entry)
+        service.extract_from_entry(sample_entry)
+
+        mentions = entity_store.get_mentions_for_entry(sample_entry)
+        assert len(mentions) == 1
+
+    def test_rerun_replaces_relationships(
+        self,
+        repo: SQLiteEntryRepository,
+        entity_store: SQLiteEntityStore,
+        sample_entry: int,
+    ) -> None:
+        extractor = MagicMock()
+        extractor.extract_entities.return_value = _raw(
+            entities=[
+                _entity("John", "person"),
+                _entity("Vienna", "place"),
+            ],
+            relationships=[_rel("John", "visited", "Vienna")],
+        )
+        service = _make_service(repo, entity_store, extractor)
+        service.extract_from_entry(sample_entry)
+        service.extract_from_entry(sample_entry)
+        rels = entity_store.get_relationships_for_entry(sample_entry)
+        assert len(rels) == 1
+
+
+class TestAuthorPronoun:
+    def test_author_created_lazily_via_relationship(
+        self,
+        repo: SQLiteEntryRepository,
+        entity_store: SQLiteEntityStore,
+        sample_entry: int,
+    ) -> None:
+        # LLM does NOT include John in its entity list — only Vienna.
+        extractor = MagicMock()
+        extractor.extract_entities.return_value = _raw(
+            entities=[_entity("Vienna", "place", quote="to Vienna")],
+            relationships=[_rel("John", "visited", "Vienna")],
+        )
+        service = _make_service(repo, entity_store, extractor)
+        result = service.extract_from_entry(sample_entry)
+
+        # John should have been auto-created as a person.
+        john = entity_store.get_entity_by_name("John", "person")
+        assert john is not None
+        assert result.relationships_created == 1
+
+
+class TestBatchExtraction:
+    def test_batch_collects_per_entry_failures(
+        self,
+        repo: SQLiteEntryRepository,
+        entity_store: SQLiteEntityStore,
+    ) -> None:
+        e1 = repo.create_entry("2026-03-22", "ocr", "first", 1).id
+        e2 = repo.create_entry("2026-03-23", "ocr", "second", 1).id
+
+        extractor = MagicMock()
+
+        def side_effect(entry_text, entry_date, author_name):  # type: ignore[no-untyped-def]
+            if "first" in entry_text:
+                return _raw(entities=[_entity("Atlas", "person")])
+            raise RuntimeError("boom")
+
+        extractor.extract_entities.side_effect = side_effect
+        service = _make_service(repo, entity_store, extractor)
+        results = service.extract_batch(entry_ids=[e1, e2])
+        assert len(results) == 2
+        assert results[0].entities_created == 1
+        assert any("extraction failed" in w for w in results[1].warnings)
+
+    def test_stale_only_filter(
+        self,
+        repo: SQLiteEntryRepository,
+        entity_store: SQLiteEntityStore,
+    ) -> None:
+        e1 = repo.create_entry("2026-03-22", "ocr", "first", 1).id
+        e2 = repo.create_entry("2026-03-23", "ocr", "second", 1).id
+        # Mark e1 as already extracted so stale_only should skip it.
+        entity_store.mark_entry_extracted(e1)
+
+        extractor = MagicMock()
+        extractor.extract_entities.return_value = _raw()
+        service = _make_service(repo, entity_store, extractor)
+
+        results = service.extract_batch(stale_only=True)
+        ids = {r.entry_id for r in results}
+        assert e1 not in ids
+        assert e2 in ids
+
+
+class TestErrors:
+    def test_missing_entry_raises(
+        self,
+        repo: SQLiteEntryRepository,
+        entity_store: SQLiteEntityStore,
+    ) -> None:
+        extractor = MagicMock()
+        service = _make_service(repo, entity_store, extractor)
+        with pytest.raises(ValueError, match="not found"):
+            service.extract_from_entry(999)

@@ -2,8 +2,11 @@
 
 import datetime
 import hashlib
+import ipaddress
 import logging
+import socket
 from urllib.error import HTTPError, URLError
+from urllib.parse import urlparse
 from urllib.request import Request, urlopen
 
 from journal.db.repository import EntryRepository
@@ -15,6 +18,64 @@ from journal.services.chunking import ChunkingStrategy
 from journal.vectorstore.store import VectorStore
 
 log = logging.getLogger(__name__)
+
+
+def _validate_public_url(url: str) -> None:
+    """Reject URLs that would expose the server to SSRF.
+
+    Resolves the hostname via DNS and refuses to continue if any of its
+    addresses are loopback (127.0.0.0/8, ::1), private (RFC1918 + RFC
+    4193), link-local (169.254.0.0/16 — includes cloud metadata
+    endpoints), multicast, reserved, or unspecified. Non-HTTP(S) schemes
+    are also rejected, so `file://`, `gopher://`, and friends are
+    blocked wholesale.
+
+    This is called from `_download()` before any network traffic, so
+    an attacker cannot use a journal-server ingest endpoint to pivot
+    into internal services on the host VM or the cloud metadata IP.
+    It does NOT defend against DNS rebinding between resolution and
+    connection — an attacker with control of DNS could return a public
+    IP to this check and a private IP to urlopen — but closing that is
+    a socket-level fix that requires patching urllib's connection
+    pathway, which is out of scope for a personal tool. Loopback and
+    RFC1918 are the realistic threat surface, and they are closed.
+    """
+    parsed = urlparse(url)
+    if parsed.scheme not in ("http", "https"):
+        raise ValueError(
+            f"URL scheme must be http or https, got {parsed.scheme!r}"
+        )
+    if not parsed.hostname:
+        raise ValueError(f"URL has no hostname: {url!r}")
+
+    try:
+        infos = socket.getaddrinfo(parsed.hostname, None)
+    except OSError as e:
+        raise ValueError(
+            f"Failed to resolve {parsed.hostname!r}: {e}"
+        ) from e
+
+    for info in infos:
+        sockaddr = info[4]
+        ip_str = sockaddr[0]
+        try:
+            ip = ipaddress.ip_address(ip_str)
+        except ValueError:
+            # getaddrinfo returned something that isn't an IP — skip it.
+            # The socket layer will refuse to connect to it anyway.
+            continue
+        if (
+            ip.is_private
+            or ip.is_loopback
+            or ip.is_link_local
+            or ip.is_multicast
+            or ip.is_reserved
+            or ip.is_unspecified
+        ):
+            raise ValueError(
+                f"Refusing to fetch {url!r} — host {parsed.hostname} "
+                f"resolved to non-public address {ip_str}"
+            )
 
 
 class IngestionService:
@@ -160,7 +221,14 @@ class IngestionService:
     def _download(
         self, url: str, media_type: str | None = None
     ) -> tuple[bytes, str]:
-        """Download a file from a URL, return (data, media_type)."""
+        """Download a file from a URL, return (data, media_type).
+
+        SSRF protection: the URL is validated against `_validate_public_url`
+        before any socket is opened, so loopback/private/link-local targets
+        (including cloud metadata endpoints like 169.254.169.254) are
+        refused regardless of the caller.
+        """
+        _validate_public_url(url)
         log.info("Downloading from %s", url)
         try:
             req = Request(url, headers={"User-Agent": "journal-server/0.1"})

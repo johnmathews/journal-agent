@@ -64,3 +64,8 @@ Thumbs.db
 
 # Engineering team working docs
 .engineering-team/
+
+# OCR context files — personal (family names, places, topics).
+# The README is checked in; everything else is local-only.
+/context/*
+!/context/README.md
