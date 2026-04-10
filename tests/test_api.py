@@ -343,6 +343,121 @@ class TestDeleteEntry:
         assert ids[0] not in [item["id"] for item in data["items"]]
 
 
+class TestGetEntryChunks:
+    def test_returns_chunks_for_entry_with_chunks(
+        self, client: TestClient, repo: SQLiteEntryRepository
+    ) -> None:
+        from journal.models import ChunkSpan
+        entry = repo.create_entry("2026-03-22", "ocr", "Entry text", 2)
+        repo.replace_chunks(
+            entry.id,
+            [
+                ChunkSpan(text="First chunk.", char_start=0, char_end=12, token_count=3),
+                ChunkSpan(text="Second chunk.", char_start=14, char_end=27, token_count=3),
+            ],
+        )
+        response = client.get(f"/api/entries/{entry.id}/chunks")
+        assert response.status_code == 200
+        data = response.json()
+        assert data["entry_id"] == entry.id
+        assert len(data["chunks"]) == 2
+        assert data["chunks"][0] == {
+            "index": 0,
+            "text": "First chunk.",
+            "char_start": 0,
+            "char_end": 12,
+            "token_count": 3,
+        }
+        assert data["chunks"][1]["index"] == 1
+
+    def test_returns_404_chunks_not_backfilled(
+        self, client: TestClient, repo: SQLiteEntryRepository
+    ) -> None:
+        entry = repo.create_entry("2026-03-22", "ocr", "Unchunked entry", 2)
+        response = client.get(f"/api/entries/{entry.id}/chunks")
+        assert response.status_code == 404
+        data = response.json()
+        assert data["error"] == "chunks_not_backfilled"
+        assert "backfill" in data["message"].lower()
+
+    def test_returns_404_entry_not_found(self, client: TestClient) -> None:
+        response = client.get("/api/entries/99999/chunks")
+        assert response.status_code == 404
+        data = response.json()
+        assert data["error"] == "entry_not_found"
+
+
+class TestGetEntryTokens:
+    def test_returns_tokens_for_entry(
+        self, client: TestClient, repo: SQLiteEntryRepository
+    ) -> None:
+        entry = repo.create_entry(
+            "2026-03-22", "ocr", "Hello world this is a test.", 6,
+        )
+        response = client.get(f"/api/entries/{entry.id}/tokens")
+        assert response.status_code == 200
+        data = response.json()
+        assert data["entry_id"] == entry.id
+        assert data["encoding"] == "cl100k_base"
+        assert data["model_hint"] == "text-embedding-3-large"
+        assert data["token_count"] == len(data["tokens"])
+        assert data["token_count"] > 0
+        # First token starts at position 0.
+        assert data["tokens"][0]["char_start"] == 0
+        # Every token has consistent fields.
+        for tok in data["tokens"]:
+            assert {"index", "token_id", "text", "char_start", "char_end"} <= tok.keys()
+            assert tok["char_start"] <= tok["char_end"]
+
+    def test_offsets_reconstruct_original_text(
+        self, client: TestClient, repo: SQLiteEntryRepository
+    ) -> None:
+        """Concatenating each token's text by char_start must equal final_text."""
+        text = "The quick brown fox jumps over the lazy dog."
+        entry = repo.create_entry("2026-03-22", "ocr", text, 9)
+        response = client.get(f"/api/entries/{entry.id}/tokens")
+        data = response.json()
+        # Slicing by offsets reconstructs the original text.
+        reconstructed = "".join(
+            text[t["char_start"] : t["char_end"]] for t in data["tokens"]
+        )
+        assert reconstructed == text
+
+    def test_unicode_text_reconstructs_correctly(
+        self, client: TestClient, repo: SQLiteEntryRepository
+    ) -> None:
+        text = "Café résumé — naïve façade."
+        entry = repo.create_entry("2026-03-22", "ocr", text, 4)
+        response = client.get(f"/api/entries/{entry.id}/tokens")
+        data = response.json()
+        reconstructed = "".join(
+            t["text"] for t in data["tokens"]
+        )
+        assert reconstructed == text
+
+    def test_returns_404_entry_not_found(self, client: TestClient) -> None:
+        response = client.get("/api/entries/99999/tokens")
+        assert response.status_code == 404
+        data = response.json()
+        assert data["error"] == "entry_not_found"
+
+    def test_uses_final_text_when_different_from_raw(
+        self, client: TestClient, repo: SQLiteEntryRepository
+    ) -> None:
+        raw = "raw has a typo"
+        entry = repo.create_entry("2026-03-22", "ocr", raw, 4)
+        # Simulate a correction by updating final_text directly on the row.
+        repo._conn.execute(
+            "UPDATE entries SET final_text = ? WHERE id = ?",
+            ("corrected text without any typo", entry.id),
+        )
+        repo._conn.commit()
+        response = client.get(f"/api/entries/{entry.id}/tokens")
+        data = response.json()
+        reconstructed = "".join(t["text"] for t in data["tokens"])
+        assert reconstructed == "corrected text without any typo"
+
+
 class TestGetStats:
     def test_get_stats(
         self, client: TestClient, repo: SQLiteEntryRepository

@@ -128,6 +128,51 @@ class TestIngestImageUpdates:
         assert len(pages) == 0
 
 
+class TestChunkPersistence:
+    """Chunks produced during ingestion must land in the entry_chunks table
+    with the offsets the chunker computed, so the webapp overlay can read
+    them back without re-running the chunker."""
+
+    def test_ingest_image_persists_chunks(self, ingestion_service):
+        entry = ingestion_service.ingest_image(b"page data", "image/jpeg", "2026-03-22")
+        stored = ingestion_service._repo.get_chunks(entry.id)
+        assert len(stored) == entry.chunk_count
+        assert len(stored) > 0
+        # Every persisted chunk must have its source range contained
+        # within the entry's text.
+        for chunk in stored:
+            assert 0 <= chunk.char_start <= chunk.char_end <= len(entry.final_text)
+            assert chunk.token_count > 0
+
+    def test_ingest_voice_persists_chunks(self, ingestion_service):
+        entry = ingestion_service.ingest_voice(b"audio data", "audio/mp3", "2026-03-22")
+        stored = ingestion_service._repo.get_chunks(entry.id)
+        assert len(stored) == entry.chunk_count
+        assert len(stored) > 0
+
+    def test_update_entry_text_replaces_chunks(self, ingestion_service):
+        entry = ingestion_service.ingest_image(b"page data", "image/jpeg", "2026-03-22")
+        original_chunks = ingestion_service._repo.get_chunks(entry.id)
+        assert len(original_chunks) > 0
+
+        new_text = "Completely different corrected text for the entry."
+        ingestion_service.update_entry_text(entry.id, new_text)
+
+        updated_chunks = ingestion_service._repo.get_chunks(entry.id)
+        # New chunks reflect the new text.
+        assert len(updated_chunks) > 0
+        assert updated_chunks[0].text != original_chunks[0].text
+        # All chunk offsets fit within the new text.
+        for chunk in updated_chunks:
+            assert chunk.char_end <= len(new_text)
+
+    def test_delete_entry_removes_chunks(self, ingestion_service):
+        entry = ingestion_service.ingest_image(b"page data", "image/jpeg", "2026-03-22")
+        assert len(ingestion_service._repo.get_chunks(entry.id)) > 0
+        ingestion_service.delete_entry(entry.id)
+        assert ingestion_service._repo.get_chunks(entry.id) == []
+
+
 class TestMultiPageIngestion:
     def test_ingest_multi_page(self, ingestion_service, mock_ocr, mock_embeddings):
         mock_ocr.extract_text.side_effect = ["Page one text.", "Page two text."]

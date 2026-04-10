@@ -102,6 +102,115 @@ the vector store.
 { "error": "Entry 999 not found" }
 ```
 
+### GET /api/entries/{id}/chunks
+
+Return the persisted chunks for an entry, with each chunk's source
+character range and token count. Used by the webapp overlay to draw
+chunk boundaries on top of the entry text.
+
+Chunks are persisted to SQLite (`entry_chunks` table) at ingestion
+time, so this endpoint is a straight SELECT — the chunker is not
+re-run. Chunks produced before migration 0003 are not automatically
+populated; re-ingest the entry or run the backfill service to
+populate them.
+
+**Response (200):**
+```json
+{
+  "entry_id": 1,
+  "chunks": [
+    {
+      "index": 0,
+      "text": "First chunk text, normalised paragraph separators.",
+      "char_start": 0,
+      "char_end": 51,
+      "token_count": 14
+    },
+    {
+      "index": 1,
+      "text": "Second chunk picks up where the first ends.",
+      "char_start": 53,
+      "char_end": 96,
+      "token_count": 12
+    }
+  ]
+}
+```
+
+`char_start` / `char_end` are character offsets into the entry's
+`final_text` (or `raw_text` as fallback). `char_end` is exclusive.
+Slicing `final_text[char_start:char_end]` yields the source range the
+chunk covers — which may include slightly more whitespace than `text`,
+because paragraph and sentence separators are normalised when the
+chunk was rendered.
+
+**Response (404, entry not found):**
+```json
+{
+  "error": "entry_not_found",
+  "message": "Entry 999 not found"
+}
+```
+
+**Response (404, chunks not backfilled):**
+```json
+{
+  "error": "chunks_not_backfilled",
+  "message": "This entry was ingested before chunk persistence was available. Re-ingest the entry or run the backfill service to populate chunks."
+}
+```
+
+### GET /api/entries/{id}/tokens
+
+Tokenise an entry's text on demand using tiktoken `cl100k_base` — the
+encoding that matches `text-embedding-3-large`. Returns per-token
+records including the token ID, the token text, and the character
+range the token covers in `final_text`.
+
+Computed per request — the call is cheap (< 10 ms for a ~2000-word
+entry) and avoids any cache invalidation when the user edits the
+entry's text.
+
+**Response (200):**
+```json
+{
+  "entry_id": 1,
+  "encoding": "cl100k_base",
+  "model_hint": "text-embedding-3-large",
+  "token_count": 357,
+  "tokens": [
+    {
+      "index": 0,
+      "token_id": 9906,
+      "text": "Hello",
+      "char_start": 0,
+      "char_end": 5
+    },
+    {
+      "index": 1,
+      "token_id": 1917,
+      "text": " world",
+      "char_start": 5,
+      "char_end": 11
+    }
+  ]
+}
+```
+
+For valid UTF-8 input the offsets slice `final_text` exactly —
+concatenating `[final_text[t.char_start:t.char_end] for t in tokens]`
+reconstructs the entry text. Note that leading whitespace is part of
+the token (e.g. `" world"` above), which matches how the embedding
+model sees the text.
+
+**Response (404):**
+```json
+{
+  "error": "entry_not_found",
+  "message": "Entry 999 not found"
+}
+```
+
 ### GET /api/stats
 
 Journal statistics with optional date filtering.

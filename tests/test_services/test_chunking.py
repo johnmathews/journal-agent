@@ -4,6 +4,7 @@ import math
 
 import pytest
 
+from journal.models import ChunkSpan
 from journal.services.chunking import (
     ChunkingStrategy,
     FixedTokenChunker,
@@ -118,9 +119,13 @@ def test_count_tokens():
 class TestFixedTokenChunker:
     def test_short_text_single_chunk(self):
         chunker = FixedTokenChunker()
-        chunks = chunker.chunk("This is a short journal entry.")
+        text = "This is a short journal entry."
+        chunks = chunker.chunk(text)
         assert len(chunks) == 1
-        assert chunks[0] == "This is a short journal entry."
+        assert chunks[0].text == text
+        # Offsets must slice back to the chunk text for a single-paragraph input.
+        assert text[chunks[0].char_start : chunks[0].char_end] == text
+        assert chunks[0].token_count == count_tokens(text)
 
     def test_empty_text(self):
         chunker = FixedTokenChunker()
@@ -137,8 +142,8 @@ class TestFixedTokenChunker:
 
         # Each chunk should be within the token limit (tolerance for boundaries).
         for chunk in chunks:
-            tokens = count_tokens(chunk)
-            assert tokens <= 150
+            assert isinstance(chunk, ChunkSpan)
+            assert chunk.token_count <= 150
 
     def test_overlap_between_chunks(self):
         paragraphs = [f"Unique paragraph {i} with some content." for i in range(20)]
@@ -150,8 +155,8 @@ class TestFixedTokenChunker:
 
         # Consecutive chunks should share some content (overlap).
         for i in range(len(chunks) - 1):
-            words_end = set(chunks[i].split()[-5:])
-            words_start = set(chunks[i + 1].split()[:10])
+            words_end = set(chunks[i].text.split()[-5:])
+            words_start = set(chunks[i + 1].text.split()[:10])
             assert words_end & words_start, f"No overlap between chunk {i} and {i + 1}"
 
     def test_preserves_paragraph_structure(self):
@@ -159,9 +164,9 @@ class TestFixedTokenChunker:
         chunker = FixedTokenChunker(max_tokens=1000)
         chunks = chunker.chunk(text)
         assert len(chunks) == 1
-        assert "First paragraph." in chunks[0]
-        assert "Second paragraph." in chunks[0]
-        assert "Third paragraph." in chunks[0]
+        assert "First paragraph." in chunks[0].text
+        assert "Second paragraph." in chunks[0].text
+        assert "Third paragraph." in chunks[0].text
 
     def test_default_params(self):
         # Default 150/40 should produce one chunk for short text.
@@ -172,6 +177,44 @@ class TestFixedTokenChunker:
         # Duck-typing check: FixedTokenChunker satisfies ChunkingStrategy.
         chunker = FixedTokenChunker()
         assert isinstance(chunker, ChunkingStrategy)
+
+    def test_offsets_slice_back_to_chunk_text_single_paragraph(self):
+        """For a single-paragraph chunk the source slice must equal chunk.text."""
+        chunker = FixedTokenChunker(max_tokens=1000)
+        text = "First paragraph.\n\nSecond paragraph.\n\nThird paragraph."
+        chunks = chunker.chunk(text)
+        assert len(chunks) == 1
+        # Multi-paragraph chunk: the source range spans all three paragraphs
+        # including the original `\n\n` separators.
+        assert chunks[0].char_start == 0
+        assert chunks[0].char_end == len(text)
+
+    def test_offsets_non_overlapping_chunks_span_source(self):
+        """Concatenated source ranges should cover the original paragraph positions."""
+        paragraphs = [f"Paragraph {i} has meaningful content." for i in range(15)]
+        text = "\n\n".join(paragraphs)
+
+        chunker = FixedTokenChunker(max_tokens=40, overlap_tokens=0)
+        chunks = chunker.chunk(text)
+        assert len(chunks) > 1
+        # First chunk must start at the start of the first paragraph, last
+        # chunk must end at the end of the last paragraph.
+        assert chunks[0].char_start == 0
+        assert chunks[-1].char_end == len(text)
+        # char_start is monotonically non-decreasing across chunks.
+        for i in range(len(chunks) - 1):
+            assert chunks[i].char_start <= chunks[i + 1].char_start
+
+    def test_offsets_survive_leading_whitespace(self):
+        """Leading blank lines must not shift paragraph offsets off by one."""
+        text = "\n\n  First para.\n\nSecond para."
+        chunker = FixedTokenChunker(max_tokens=1000)
+        chunks = chunker.chunk(text)
+        assert len(chunks) == 1
+        # The first paragraph content ("First para.") starts after the
+        # leading "\n\n  " — offset 4, not 0.
+        first_para_end = chunks[0].char_start + len("First para.")
+        assert text[chunks[0].char_start : first_para_end] == "First para."
 
 
 def _unit_vector(angle: float, dim: int = 4) -> list[float]:
@@ -201,7 +244,8 @@ class TestSemanticChunker:
         stub = StubEmbeddings()
         chunker = SemanticChunker(embeddings=stub)
         result = chunker.chunk("Just one sentence.")
-        assert result == ["Just one sentence."]
+        assert len(result) == 1
+        assert result[0].text == "Just one sentence."
         # Short-circuit should not call the embedder.
         assert stub.embed_calls == []
 
@@ -233,11 +277,11 @@ class TestSemanticChunker:
         result = chunker.chunk(f"{s1} {s2} {s3}")
 
         assert len(result) == 2
-        assert s1 in result[0]
-        assert s2 in result[0]
-        assert s3 in result[1]
+        assert s1 in result[0].text
+        assert s2 in result[0].text
+        assert s3 in result[1].text
         # Decisive cut — no overlap, s2 should only appear in chunk 0.
-        assert s2 not in result[1]
+        assert s2 not in result[1].text
 
     def test_weak_cut_duplicates_boundary_sentence(self):
         # 5 sentences, 4 adjacent similarities engineered so that the
@@ -278,13 +322,13 @@ class TestSemanticChunker:
         #   chunk 1: [s2 (overlap), s3]                  (weak cut carries s2 forward)
         #   chunk 2: [s4, s5]                            (decisive cut, no overlap of s3)
         assert len(result) == 3
-        assert s1 in result[0] and s2 in result[0]
+        assert s1 in result[0].text and s2 in result[0].text
         # Weak-cut overlap: s2 appears in BOTH chunk 0 and chunk 1.
-        assert s2 in result[1]
-        assert s3 in result[1]
+        assert s2 in result[1].text
+        assert s3 in result[1].text
         # Decisive cut: s3 must NOT appear in chunk 2.
-        assert s3 not in result[2]
-        assert s4 in result[2] and s5 in result[2]
+        assert s3 not in result[2].text
+        assert s4 in result[2].text and s5 in result[2].text
 
     def test_decisive_cut_does_not_overlap(self):
         # Same 5-sentence setup as the weak-cut test but with
@@ -315,12 +359,12 @@ class TestSemanticChunker:
         #   chunk 1: [s3]
         #   chunk 2: [s4, s5]
         assert len(result) == 3
-        assert s1 in result[0] and s2 in result[0]
-        assert s3 in result[1]
+        assert s1 in result[0].text and s2 in result[0].text
+        assert s3 in result[1].text
         # No weak-cut overlap: s2 must NOT appear in chunk 1, s3 not in chunk 2.
-        assert s2 not in result[1]
-        assert s3 not in result[2]
-        assert s4 in result[2] and s5 in result[2]
+        assert s2 not in result[1].text
+        assert s3 not in result[2].text
+        assert s4 in result[2].text and s5 in result[2].text
 
     def test_max_size_enforcement_splits_oversized_segment(self):
         # Build ~10 sentences that all point in the same direction so no
@@ -347,7 +391,7 @@ class TestSemanticChunker:
             # Each sub-segment should fit roughly within max_tokens. Allow
             # some tolerance for a single long sentence that exceeds
             # max_tokens on its own (the packer will still emit it).
-            assert count_tokens(chunk) <= 40
+            assert chunk.token_count <= 40
 
     def test_min_size_enforcement_merges_tiny_segments(self):
         # 4 sentences, cut aggressively between every pair, but a min
@@ -407,3 +451,35 @@ class TestSemanticChunker:
         # Exactly one batched call to embed_texts.
         assert len(stub.embed_calls) == 1
         assert len(stub.embed_calls[0]) == 5
+
+    def test_offsets_locate_sentences_in_source(self):
+        """Each ChunkSpan's source range must contain the sentences it reports."""
+        stub = StubEmbeddings()
+        s1 = "Vienna was beautiful in spring today."
+        s2 = "The blossoms were everywhere along the river."
+        s3 = "I also need to call the dentist tomorrow."
+        stub.vectors[s1] = _unit_vector(0.0)
+        stub.vectors[s2] = _unit_vector(0.05)
+        stub.vectors[s3] = _unit_vector(math.pi / 2)
+
+        source = f"{s1} {s2} {s3}"
+        chunker = SemanticChunker(
+            embeddings=stub,
+            min_tokens=1,
+            max_tokens=1000,
+            boundary_percentile=50,
+            decisive_percentile=50,
+        )
+        result = chunker.chunk(source)
+
+        assert len(result) >= 2
+        # For every chunk, its source range must contain all the sentences
+        # that appear in its text.
+        for chunk in result:
+            source_slice = source[chunk.char_start : chunk.char_end]
+            for sentence in (s1, s2, s3):
+                if sentence in chunk.text:
+                    assert sentence in source_slice, (
+                        f"chunk at [{chunk.char_start}:{chunk.char_end}] claims to contain "
+                        f"{sentence!r} but source_slice is {source_slice!r}"
+                    )

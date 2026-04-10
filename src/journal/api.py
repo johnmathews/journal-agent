@@ -7,7 +7,16 @@ import logging
 from dataclasses import asdict
 from typing import TYPE_CHECKING, Any
 
+import tiktoken
 from starlette.responses import JSONResponse
+
+# Cache the encoding at module load — tiktoken.get_encoding is not free
+# and the tokens endpoint may be called repeatedly as the user switches
+# overlays. cl100k_base matches text-embedding-3-large, which is the
+# embedding model the chunker's token counts are computed against.
+_TOKEN_ENCODING_NAME = "cl100k_base"
+_TOKEN_MODEL_HINT = "text-embedding-3-large"
+_token_encoder = tiktoken.get_encoding(_TOKEN_ENCODING_NAME)
 
 if TYPE_CHECKING:
     from collections.abc import Callable
@@ -195,6 +204,143 @@ def register_api_routes(
             )
         log.info("DELETE /api/entries/%d — deleted", entry_id)
         return JSONResponse({"deleted": True, "id": entry_id})
+
+    @mcp.custom_route(
+        "/api/entries/{entry_id:int}/chunks",
+        methods=["GET"],
+        name="api_entry_chunks",
+    )
+    async def entry_chunks(request: Request) -> JSONResponse:
+        """Return the persisted chunks for an entry, with source offsets.
+
+        Used by the webapp overlay to draw chunk boundaries on top of
+        the entry text. The 404 `chunks_not_backfilled` response is
+        distinguished from `entry_not_found` so the webapp can surface
+        a clear message telling the user to re-ingest or run backfill.
+        """
+        services = services_getter()
+        if services is None:
+            return JSONResponse(
+                {"error": "Server not initialized"}, status_code=503
+            )
+
+        query_svc: QueryService = services["query"]
+        entry_id = int(request.path_params["entry_id"])
+
+        entry = query_svc._repo.get_entry(entry_id)
+        if entry is None:
+            log.warning("GET /api/entries/%d/chunks — entry not found", entry_id)
+            return JSONResponse(
+                {
+                    "error": "entry_not_found",
+                    "message": f"Entry {entry_id} not found",
+                },
+                status_code=404,
+            )
+
+        chunks = query_svc._repo.get_chunks(entry_id)
+        if not chunks:
+            log.info(
+                "GET /api/entries/%d/chunks — no chunks persisted (pre-backfill entry)",
+                entry_id,
+            )
+            return JSONResponse(
+                {
+                    "error": "chunks_not_backfilled",
+                    "message": (
+                        "This entry was ingested before chunk persistence was "
+                        "available. Re-ingest the entry or run the backfill "
+                        "service to populate chunks."
+                    ),
+                },
+                status_code=404,
+            )
+
+        payload = {
+            "entry_id": entry_id,
+            "chunks": [
+                {
+                    "index": i,
+                    "text": c.text,
+                    "char_start": c.char_start,
+                    "char_end": c.char_end,
+                    "token_count": c.token_count,
+                }
+                for i, c in enumerate(chunks)
+            ],
+        }
+        log.info("GET /api/entries/%d/chunks — %d chunks", entry_id, len(chunks))
+        return JSONResponse(payload)
+
+    @mcp.custom_route(
+        "/api/entries/{entry_id:int}/tokens",
+        methods=["GET"],
+        name="api_entry_tokens",
+    )
+    async def entry_tokens(request: Request) -> JSONResponse:
+        """Tokenise an entry's text on demand using tiktoken `cl100k_base`.
+
+        Returns per-token `{index, token_id, text, char_start, char_end}`
+        where the character offsets are positions in `final_text` (or
+        `raw_text` as fallback). Valid UTF-8 text round-trips through
+        tiktoken exactly, so the offsets slice the original text without
+        any loss. Computed per request — the call is cheap (< 10 ms for
+        journal-scale text) and avoids any cache invalidation logic
+        when `final_text` is edited.
+        """
+        services = services_getter()
+        if services is None:
+            return JSONResponse(
+                {"error": "Server not initialized"}, status_code=503
+            )
+
+        query_svc: QueryService = services["query"]
+        entry_id = int(request.path_params["entry_id"])
+
+        entry = query_svc._repo.get_entry(entry_id)
+        if entry is None:
+            log.warning("GET /api/entries/%d/tokens — entry not found", entry_id)
+            return JSONResponse(
+                {
+                    "error": "entry_not_found",
+                    "message": f"Entry {entry_id} not found",
+                },
+                status_code=404,
+            )
+
+        text = entry.final_text or entry.raw_text or ""
+        token_ids = _token_encoder.encode(text)
+        # `decode_with_offsets` returns (decoded_str, offsets) where each
+        # offset is the character index in the decoded string where the
+        # corresponding token begins. For valid UTF-8 input the decoded
+        # string equals the input, so these offsets are positions in the
+        # original text the webapp will render.
+        decoded, starts = _token_encoder.decode_with_offsets(token_ids)
+        tokens: list[dict[str, Any]] = []
+        for i, (tid, start) in enumerate(zip(token_ids, starts, strict=True)):
+            end = starts[i + 1] if i + 1 < len(starts) else len(decoded)
+            tokens.append(
+                {
+                    "index": i,
+                    "token_id": int(tid),
+                    "text": decoded[start:end],
+                    "char_start": int(start),
+                    "char_end": int(end),
+                }
+            )
+
+        log.info(
+            "GET /api/entries/%d/tokens — %d tokens", entry_id, len(tokens)
+        )
+        return JSONResponse(
+            {
+                "entry_id": entry_id,
+                "encoding": _TOKEN_ENCODING_NAME,
+                "model_hint": _TOKEN_MODEL_HINT,
+                "token_count": len(tokens),
+                "tokens": tokens,
+            }
+        )
 
     @mcp.custom_route("/api/stats", methods=["GET"], name="api_stats")
     async def get_stats(request: Request) -> JSONResponse:

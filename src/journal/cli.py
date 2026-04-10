@@ -362,9 +362,11 @@ def cmd_seed(args, config):
         # Add a page record for OCR entries
         if sample["source_type"] == "ocr":
             repo.add_entry_page(entry.id, 1, sample["text"])
-        # Compute and store chunk_count so the UI shows the real value even
-        # though we don't generate embeddings during seeding.
+        # Compute and store chunks (with offsets) so the UI shows the
+        # real value and the overlay works even though we don't
+        # generate embeddings during seeding.
         chunks = seed_chunker.chunk(sample["text"])
+        repo.replace_chunks(entry.id, chunks)
         repo.update_chunk_count(entry.id, len(chunks))
         created += 1
         src = sample["source_type"]

@@ -53,6 +53,28 @@ class MoodTrend:
     entry_count: int
 
 
+@dataclass(frozen=True)
+class ChunkSpan:
+    """A chunk of text with its position in the source text and token count.
+
+    `char_start` and `char_end` are character offsets into the original
+    input text passed to `ChunkingStrategy.chunk()`. `char_end` is
+    exclusive — `source_text[char_start:char_end]` yields the range the
+    chunk covers in the source. That range may contain slightly more
+    whitespace than `text` does, because paragraph and sentence
+    separators are normalised when building the chunk's rendered text
+    (paragraphs joined with `\\n\\n`, sentences with a single space).
+
+    `token_count` is the tiktoken `cl100k_base` token count of `text`,
+    which matches the tokenizer used by `text-embedding-3-large`.
+    """
+
+    text: str
+    char_start: int
+    char_end: int
+    token_count: int
+
+
 @dataclass
 class ChunkMatch:
     """A single chunk that matched a query, with its relevance score."""

@@ -60,3 +60,51 @@ def test_entries_has_final_text_column(db_conn):
 def test_migration_version_is_at_least_2(db_conn):
     version = get_current_version(db_conn)
     assert version >= 2
+
+
+def test_entry_chunks_table_exists(db_conn):
+    row = db_conn.execute(
+        "SELECT name FROM sqlite_master WHERE type='table' AND name='entry_chunks'"
+    ).fetchone()
+    assert row is not None
+
+
+def test_entry_chunks_has_expected_columns(db_conn):
+    columns = db_conn.execute("PRAGMA table_info(entry_chunks)").fetchall()
+    column_names = {col["name"] for col in columns}
+    assert {
+        "id",
+        "entry_id",
+        "chunk_index",
+        "chunk_text",
+        "char_start",
+        "char_end",
+        "token_count",
+        "created_at",
+    } <= column_names
+
+
+def test_entry_chunks_cascade_delete(db_conn):
+    db_conn.execute(
+        "INSERT INTO entries (entry_date, source_type, raw_text, word_count)"
+        " VALUES ('2026-03-22', 'ocr', 'x', 1)"
+    )
+    entry_id = db_conn.execute("SELECT last_insert_rowid() AS id").fetchone()["id"]
+    db_conn.execute(
+        "INSERT INTO entry_chunks "
+        "(entry_id, chunk_index, chunk_text, char_start, char_end, token_count)"
+        " VALUES (?, 0, 'x', 0, 1, 1)",
+        (entry_id,),
+    )
+    db_conn.commit()
+    db_conn.execute("DELETE FROM entries WHERE id = ?", (entry_id,))
+    db_conn.commit()
+    count = db_conn.execute(
+        "SELECT COUNT(*) AS n FROM entry_chunks WHERE entry_id = ?", (entry_id,)
+    ).fetchone()["n"]
+    assert count == 0
+
+
+def test_migration_version_is_at_least_3(db_conn):
+    version = get_current_version(db_conn)
+    assert version >= 3

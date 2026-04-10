@@ -5,6 +5,7 @@ import sqlite3
 import pytest
 
 from journal.db.repository import SQLiteEntryRepository
+from journal.models import ChunkSpan
 
 
 @pytest.fixture
@@ -306,3 +307,57 @@ class TestEntryPages:
 
         with pytest.raises(sqlite3.IntegrityError):
             repo.add_entry_page(entry.id, 1, "Duplicate page one")
+
+
+class TestEntryChunks:
+    def _span(self, text: str, start: int, end: int, tokens: int = 3) -> ChunkSpan:
+        return ChunkSpan(text=text, char_start=start, char_end=end, token_count=tokens)
+
+    def test_replace_chunks_inserts_rows(self, repo):
+        entry = repo.create_entry("2026-03-22", "ocr", "Chunk me.", 2)
+        spans = [
+            self._span("First chunk.", 0, 12),
+            self._span("Second chunk.", 14, 27),
+        ]
+        repo.replace_chunks(entry.id, spans)
+
+        result = repo.get_chunks(entry.id)
+        assert len(result) == 2
+        assert result[0].text == "First chunk."
+        assert result[0].char_start == 0
+        assert result[0].char_end == 12
+        assert result[0].token_count == 3
+        assert result[1].text == "Second chunk."
+        assert result[1].char_start == 14
+
+    def test_replace_chunks_clears_previous_rows(self, repo):
+        entry = repo.create_entry("2026-03-22", "ocr", "Some text", 2)
+        repo.replace_chunks(entry.id, [self._span("old one", 0, 7)])
+        repo.replace_chunks(entry.id, [self._span("new one", 0, 7), self._span("new two", 8, 15)])
+
+        result = repo.get_chunks(entry.id)
+        assert [c.text for c in result] == ["new one", "new two"]
+
+    def test_replace_chunks_with_empty_list_clears_table(self, repo):
+        entry = repo.create_entry("2026-03-22", "ocr", "Text", 1)
+        repo.replace_chunks(entry.id, [self._span("only chunk", 0, 10)])
+        repo.replace_chunks(entry.id, [])
+        assert repo.get_chunks(entry.id) == []
+
+    def test_get_chunks_empty_for_entry_without_chunks(self, repo):
+        entry = repo.create_entry("2026-03-22", "ocr", "Text", 1)
+        assert repo.get_chunks(entry.id) == []
+
+    def test_get_chunks_returns_insertion_order(self, repo):
+        entry = repo.create_entry("2026-03-22", "ocr", "Text", 1)
+        spans = [self._span(f"chunk {i}", i * 10, i * 10 + 7) for i in range(5)]
+        repo.replace_chunks(entry.id, spans)
+
+        result = repo.get_chunks(entry.id)
+        assert [c.text for c in result] == [f"chunk {i}" for i in range(5)]
+
+    def test_delete_entry_cascades_to_chunks(self, repo):
+        entry = repo.create_entry("2026-03-22", "ocr", "Text", 1)
+        repo.replace_chunks(entry.id, [self._span("to be deleted", 0, 13)])
+        repo.delete_entry(entry.id)
+        assert repo.get_chunks(entry.id) == []

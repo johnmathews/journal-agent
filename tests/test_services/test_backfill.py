@@ -87,6 +87,34 @@ class TestBackfillChunkCounts:
         assert refreshed is not None
         assert refreshed.chunk_count == 0
 
+    def test_populates_entry_chunks_table(self, repo, chunker):
+        """Backfill must write chunks-with-offsets for legacy entries that
+        have no rows in the entry_chunks table (pre-migration-0003)."""
+        entry = _insert(
+            repo,
+            "Paragraph one with enough content.\n\nParagraph two with more words.",
+        )
+        # Sanity: no chunks persisted yet.
+        assert repo.get_chunks(entry.id) == []
+
+        backfill_chunk_counts(repo, chunker)
+
+        persisted = repo.get_chunks(entry.id)
+        assert len(persisted) >= 1
+        # Offsets must be within the entry's text.
+        entry_text = repo.get_entry(entry.id).final_text
+        for chunk in persisted:
+            assert 0 <= chunk.char_start <= chunk.char_end <= len(entry_text)
+            assert chunk.token_count > 0
+
+    def test_second_run_leaves_chunk_rows_unchanged(self, repo, chunker):
+        """If chunks are already populated and count matches, backfill skips."""
+        _insert(repo, "Short text.")
+        backfill_chunk_counts(repo, chunker)  # first run populates
+        result = backfill_chunk_counts(repo, chunker)  # second run should no-op
+        assert result.updated == 0
+        assert result.unchanged == 1
+
     def test_handles_long_text_producing_multiple_chunks(self, repo):
         long_paragraph = (
             "Sentence one with a few words. " * 60

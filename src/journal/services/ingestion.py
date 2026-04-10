@@ -191,7 +191,16 @@ class IngestionService:
         return data, media_type
 
     def _process_text(self, entry_id: int, text: str, date: str) -> int:
-        """Chunk text, generate embeddings, store in vector DB. Returns chunk count.
+        """Chunk text, persist chunks, generate embeddings, store vectors.
+
+        Returns the number of chunks produced.
+
+        Persistence order is deliberate: chunks are written to SQLite
+        (`entry_chunks` table via `replace_chunks`) BEFORE embeddings
+        are computed. If the embedding call fails, the entry still has
+        accurate offset information in SQLite, and the vector store is
+        updated last — this matches the existing rechunk flow and keeps
+        the failure modes contained.
 
         When `embed_metadata_prefix` is enabled, each chunk is embedded
         with a small date header prepended (e.g. "Date: 2026-02-15.
@@ -203,7 +212,16 @@ class IngestionService:
         chunks = self._chunker.chunk(text)
         if not chunks:
             log.warning("No chunks produced for entry %d", entry_id)
+            # Still clear any stale persisted chunks from a prior run.
+            self._repo.replace_chunks(entry_id, [])
             return 0
+
+        # Persist chunks (with offsets) to SQLite so the webapp overlay
+        # and any re-read path can recover them without re-running the
+        # chunker.
+        self._repo.replace_chunks(entry_id, chunks)
+
+        chunk_texts = [c.text for c in chunks]
 
         if self._embed_metadata_prefix:
             try:
@@ -214,14 +232,14 @@ class IngestionService:
                 # than dropping the context entirely.
                 log.warning("Entry %d has malformed date %r, skipping weekday", entry_id, date)
                 prefix = f"Date: {date}.\n\n"
-            embed_inputs = [f"{prefix}{c}" for c in chunks]
+            embed_inputs = [f"{prefix}{t}" for t in chunk_texts]
         else:
-            embed_inputs = chunks
+            embed_inputs = chunk_texts
 
         embeddings = self._embeddings.embed_texts(embed_inputs)
         self._vector_store.add_entry(
             entry_id=entry_id,
-            chunks=chunks,  # store un-prefixed text
+            chunks=chunk_texts,  # store un-prefixed text
             embeddings=embeddings,  # computed from prefixed text
             metadata={"entry_date": date},
         )

@@ -164,6 +164,7 @@ Note: only the semantic path calls an external AI model (the embedding model). K
 ### SQLite
 - `entries` — Core table (date, source_type, raw_text, final_text, word_count, chunk_count)
 - `entry_pages` — Per-page OCR text for multi-page entries (entry_id, page_number, raw_text, source_file_id)
+- `entry_chunks` — Per-chunk text with character offsets into the source (entry_id, chunk_index, chunk_text, char_start, char_end, token_count). Populated at ingestion time (migration 0003); used by the webapp chunk-overlay feature and by any client that needs to render chunk boundaries over the original entry text without re-running the chunker
 - `mood_scores` — Multi-dimensional mood tracking per entry
 - `people`, `places`, `tags` — Entity tables with junction tables for many-to-many
 - `source_files` — Original file metadata with SHA-256 dedup

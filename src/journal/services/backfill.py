@@ -44,15 +44,25 @@ def backfill_chunk_counts(
     repository: EntryRepository,
     chunker: ChunkingStrategy,
 ) -> BackfillResult:
-    """Recompute and persist `chunk_count` for every entry.
+    """Recompute and persist `chunk_count` AND `entry_chunks` rows.
 
     Uses `final_text` when present, otherwise falls back to `raw_text`.
-    Entries with no text at all are skipped. Entries whose stored count
-    already matches the recomputed value are left alone.
+    Entries with no text at all are skipped.
+
+    For every entry the chunker is re-run and the resulting `ChunkSpan`
+    list is written to the `entry_chunks` table via `replace_chunks` —
+    this populates chunks-with-offsets for entries that were ingested
+    before migration 0003 (when chunks only lived in ChromaDB). The
+    stored `chunk_count` column is also refreshed.
+
+    "Unchanged" here means both the stored count matches the recomputed
+    count AND the same number of chunk rows already exist in
+    `entry_chunks`; otherwise the row set is rewritten so offsets stay
+    in sync with the chunker's current output.
 
     Does not touch the vector store — search coverage is unaffected. If
-    you need to regenerate embeddings as well, use `rechunk_entries`
-    (added in WU-D) or re-ingest the entry.
+    you need to regenerate embeddings as well, use `rechunk_entries` or
+    re-ingest the entry.
     """
     result = BackfillResult()
     entries = repository.list_entries(limit=1_000_000)
@@ -70,10 +80,12 @@ def backfill_chunk_counts(
             result.errors.append(f"entry {entry.id}: {exc}")
             continue
 
-        if new_count == entry.chunk_count:
+        existing_rows = len(repository.get_chunks(entry.id))
+        if new_count == entry.chunk_count and existing_rows == new_count:
             result.unchanged += 1
             continue
 
+        repository.replace_chunks(entry.id, chunks)
         repository.update_chunk_count(entry.id, new_count)
         result.updated += 1
 
