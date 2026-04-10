@@ -58,3 +58,20 @@ And hitting the live REST API confirmed every entry now returns `chunk_count >= 
 ## Incidental fixup
 
 The `.venv` in journal-server had stale shebangs pointing at `/Users/john/projects/journal/.venv/bin/python3` (from when the project lived at the parent directory before the rename). Running `pytest` failed with `ModuleNotFoundError: 'journal.config'` until I deleted and re-created the venv with `uv sync`. Not committing anything for this — it's a developer-local artifact — but worth noting if the same error shows up again.
+
+## Post-deploy verification on the media VM
+
+After GitHub Actions built and pushed the new image, the backfill was run against the real production database:
+
+```bash
+docker exec journal-server uv run journal backfill-chunks
+# Updated:   2
+# Unchanged: 0
+# Skipped:   0 (no text)
+```
+
+So there were exactly 2 entries in the production DB with stale `chunk_count = 0`, both now correct. First attempt used `docker exec journal-server journal backfill-chunks` (no `uv run`), which failed with `executable file not found in $PATH` because the `journal` script lives in `/app/.venv/bin` and isn't on the image's system PATH. Documented the working pattern in `docs/development.md` under *Backfilling chunk_count → Running the backfill in production*.
+
+### Also noticed
+
+The repo's `docker-compose.yml` declares `container_name: journal`, but the actual production container on the media VM is `journal-server`. The VM is running a different compose file than what's checked into the repo. Worth aligning at some point — either update the repo to use `journal-server` (to match prod), or update the prod compose to use `journal` (and update the docs I just wrote). Not fixed in this commit — flagged for a follow-up.

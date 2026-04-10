@@ -136,6 +136,28 @@ Skipped:   0 (no text)
 
 If you need to rebuild embeddings as well, re-ingest the entry via the REST API or CLI — the PATCH path in `update_entry_text()` re-chunks and re-embeds in one call.
 
+#### Running the backfill in production (media VM)
+
+The production image (`ghcr.io/johnmathews/journal-server:latest`) runs the MCP server as its main process via `uv run python -m journal.mcp_server`. The `journal` CLI script is installed inside the venv at `/app/.venv/bin/journal` but is **not** on `PATH`, so `docker exec <container> journal ...` will fail with `executable file not found in $PATH`.
+
+Use `uv run` to invoke it through the venv resolver:
+
+```bash
+docker exec journal-server uv run journal backfill-chunks
+```
+
+(`journal-server` is the container name as configured on the media VM.)
+
+If `uv run` is unavailable for some reason, the direct-binary form also works:
+
+```bash
+docker exec journal-server /app/.venv/bin/journal backfill-chunks
+```
+
+Either command is safe to run against a live container — the backfill only issues one-row `UPDATE entries SET chunk_count = ?` statements on SQLite in WAL mode and never touches ChromaDB, so the MCP server keeps serving requests throughout.
+
+After running, hard-refresh the webapp — the entry list is cached in the Pinia store for the session, so the column may still show stale values until you reload.
+
 ## Local ChromaDB
 
 The `docker-compose.dev.yml` runs ChromaDB on port 8401 (matching `.env.example`):
