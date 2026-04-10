@@ -64,6 +64,14 @@ class Config:
     chunking_decisive_percentile: int = field(
         default_factory=lambda: int(os.environ.get("CHUNKING_DECISIVE_PERCENTILE", "10"))
     )
+    # If true, prepend a "Date: YYYY-MM-DD. Weekday." header to each chunk
+    # before embedding (but store the un-prefixed chunk as the ChromaDB
+    # document). Helps date-sensitive queries retrieve the right entries.
+    chunking_embed_metadata_prefix: bool = field(
+        default_factory=lambda: os.environ.get(
+            "CHUNKING_EMBED_METADATA_PREFIX", "true"
+        ).lower() in ("1", "true", "yes", "on")
+    )
 
     # MCP Server
     mcp_host: str = field(default_factory=lambda: os.environ.get("MCP_HOST", "0.0.0.0"))

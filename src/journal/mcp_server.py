@@ -85,6 +85,7 @@ def _init_services() -> dict:
             embeddings_provider=embeddings,
             chunker=chunker,
             slack_bot_token=config.slack_bot_token,
+            embed_metadata_prefix=config.chunking_embed_metadata_prefix,
         ),
         "query": QueryService(
             repository=repo,

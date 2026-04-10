@@ -194,3 +194,98 @@ class TestUpdateEntryText:
     def test_update_entry_text_not_found(self, ingestion_service):
         with pytest.raises(ValueError, match="not found"):
             ingestion_service.update_entry_text(999, "text")
+
+
+class TestMetadataPrefix:
+    """WU-E: chunks are embedded with a date prefix but stored as plain text."""
+
+    @pytest.fixture
+    def service_with_prefix(self, db_conn, mock_ocr, mock_transcription, mock_embeddings):
+        repo = SQLiteEntryRepository(db_conn)
+        vector_store = InMemoryVectorStore()
+        return IngestionService(
+            repository=repo,
+            vector_store=vector_store,
+            ocr_provider=mock_ocr,
+            transcription_provider=mock_transcription,
+            embeddings_provider=mock_embeddings,
+            chunker=FixedTokenChunker(max_tokens=150, overlap_tokens=40),
+            embed_metadata_prefix=True,
+        )
+
+    @pytest.fixture
+    def service_without_prefix(self, db_conn, mock_ocr, mock_transcription, mock_embeddings):
+        repo = SQLiteEntryRepository(db_conn)
+        vector_store = InMemoryVectorStore()
+        return IngestionService(
+            repository=repo,
+            vector_store=vector_store,
+            ocr_provider=mock_ocr,
+            transcription_provider=mock_transcription,
+            embeddings_provider=mock_embeddings,
+            chunker=FixedTokenChunker(max_tokens=150, overlap_tokens=40),
+            embed_metadata_prefix=False,
+        )
+
+    def test_embed_texts_receives_date_prefix_when_enabled(
+        self, service_with_prefix, mock_embeddings
+    ):
+        service_with_prefix.ingest_image(b"fake image", "image/jpeg", "2026-02-15")
+
+        # Inspect the actual text passed to embed_texts.
+        call_args = mock_embeddings.embed_texts.call_args
+        embed_inputs = call_args.args[0] if call_args.args else call_args.kwargs["texts"]
+        # Every input should start with the date header.
+        for text in embed_inputs:
+            assert text.startswith("Date: 2026-02-15. Sunday.\n\n")
+
+    def test_embed_texts_has_no_prefix_when_disabled(
+        self, service_without_prefix, mock_embeddings
+    ):
+        service_without_prefix.ingest_image(b"fake image", "image/jpeg", "2026-02-15")
+
+        call_args = mock_embeddings.embed_texts.call_args
+        embed_inputs = call_args.args[0] if call_args.args else call_args.kwargs["texts"]
+        for text in embed_inputs:
+            assert not text.startswith("Date:")
+
+    def test_vector_store_receives_unprefixed_chunks(
+        self, service_with_prefix, mock_ocr
+    ):
+        # OCR returns a deterministic string so we can compare exactly.
+        mock_ocr.extract_text.return_value = "This is the raw journal text."
+        service_with_prefix.ingest_image(b"fake image", "image/jpeg", "2026-02-15")
+
+        # Fetch what was stored in the vector store for this entry.
+        stored = service_with_prefix._vector_store.get_chunks_for_entry(1) \
+            if hasattr(service_with_prefix._vector_store, "get_chunks_for_entry") else None
+
+        # Fall back to searching — InMemoryVectorStore doesn't yet expose
+        # get_chunks_for_entry (that's added in WU-H). Assert via a search.
+        if stored is None:
+            results = service_with_prefix._vector_store.search(
+                query_embedding=[0.1, 0.2, 0.3], limit=10
+            )
+            assert len(results) >= 1
+            # The stored chunk text should be exactly what the OCR produced,
+            # NOT prefixed with "Date: ...".
+            assert results[0].chunk_text == "This is the raw journal text."
+            assert not results[0].chunk_text.startswith("Date:")
+
+    def test_weekday_calculation(self, service_with_prefix, mock_embeddings):
+        # 2026-02-15 is a Sunday.
+        service_with_prefix.ingest_image(b"fake image", "image/jpeg", "2026-02-15")
+        embed_inputs = mock_embeddings.embed_texts.call_args.args[0]
+        assert "Sunday" in embed_inputs[0]
+
+    def test_malformed_date_falls_back_gracefully(
+        self, service_with_prefix, mock_embeddings
+    ):
+        # An invalid date shouldn't crash ingestion — fall back to a
+        # prefix without a weekday.
+        service_with_prefix.ingest_image(b"fake image", "image/jpeg", "not-a-date")
+        embed_inputs = mock_embeddings.embed_texts.call_args.args[0]
+        assert embed_inputs[0].startswith("Date: not-a-date.\n\n")
+        # No weekday component when the date can't be parsed.
+        assert "Monday" not in embed_inputs[0]
+        assert "Sunday" not in embed_inputs[0]

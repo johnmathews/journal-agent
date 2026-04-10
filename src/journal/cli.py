@@ -55,6 +55,7 @@ def _build_services(config):
         transcription_provider=transcription,
         embeddings_provider=embeddings,
         chunker=chunker,
+        embed_metadata_prefix=config.chunking_embed_metadata_prefix,
     )
     query = QueryService(
         repository=repo,

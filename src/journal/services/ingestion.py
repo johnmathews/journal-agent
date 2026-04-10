@@ -1,5 +1,6 @@
 """Ingestion service — orchestrates OCR/transcription, chunking, embedding, and storage."""
 
+import datetime
 import hashlib
 import logging
 from urllib.error import HTTPError, URLError
@@ -26,6 +27,7 @@ class IngestionService:
         embeddings_provider: EmbeddingsProvider,
         chunker: ChunkingStrategy,
         slack_bot_token: str = "",
+        embed_metadata_prefix: bool = True,
     ) -> None:
         self._repo = repository
         self._vector_store = vector_store
@@ -34,6 +36,7 @@ class IngestionService:
         self._embeddings = embeddings_provider
         self._chunker = chunker
         self._slack_bot_token = slack_bot_token
+        self._embed_metadata_prefix = embed_metadata_prefix
 
     def ingest_image(
         self, image_data: bytes, media_type: str, date: str
@@ -152,17 +155,38 @@ class IngestionService:
         return data, media_type
 
     def _process_text(self, entry_id: int, text: str, date: str) -> int:
-        """Chunk text, generate embeddings, store in vector DB. Returns chunk count."""
+        """Chunk text, generate embeddings, store in vector DB. Returns chunk count.
+
+        When `embed_metadata_prefix` is enabled, each chunk is embedded
+        with a small date header prepended (e.g. "Date: 2026-02-15.
+        Sunday.\\n\\n<chunk>"), but the un-prefixed chunk text is stored
+        as the ChromaDB document so downstream consumers get clean text
+        back. This helps date-sensitive semantic queries match the right
+        entries without polluting the stored content.
+        """
         chunks = self._chunker.chunk(text)
         if not chunks:
             log.warning("No chunks produced for entry %d", entry_id)
             return 0
 
-        embeddings = self._embeddings.embed_texts(chunks)
+        if self._embed_metadata_prefix:
+            try:
+                weekday = datetime.date.fromisoformat(date).strftime("%A")
+                prefix = f"Date: {date}. {weekday}.\n\n"
+            except ValueError:
+                # Malformed date — fall back to a no-weekday prefix rather
+                # than dropping the context entirely.
+                log.warning("Entry %d has malformed date %r, skipping weekday", entry_id, date)
+                prefix = f"Date: {date}.\n\n"
+            embed_inputs = [f"{prefix}{c}" for c in chunks]
+        else:
+            embed_inputs = chunks
+
+        embeddings = self._embeddings.embed_texts(embed_inputs)
         self._vector_store.add_entry(
             entry_id=entry_id,
-            chunks=chunks,
-            embeddings=embeddings,
+            chunks=chunks,  # store un-prefixed text
+            embeddings=embeddings,  # computed from prefixed text
             metadata={"entry_date": date},
         )
         log.info("Stored %d chunks with embeddings for entry %d", len(chunks), entry_id)
