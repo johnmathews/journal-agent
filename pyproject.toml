@@ -9,6 +9,7 @@ dependencies = [
     "chromadb-client>=1.5,<2",
     "mcp[cli]>=1.26,<2",
     "tiktoken>=0.9,<1",
+    "pysbd>=0.3,<1",
 ]
 
 [project.scripts]

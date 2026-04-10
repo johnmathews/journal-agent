@@ -2,15 +2,37 @@
 
 import logging
 
+import pysbd
 import tiktoken
 
 log = logging.getLogger(__name__)
 
 _encoder = tiktoken.get_encoding("cl100k_base")
 
+# pysbd.Segmenter is stateful but thread-safe for read-only use. Build it
+# once at import time to amortise construction cost across many calls.
+# clean=False preserves the user's exact whitespace and punctuation in the
+# returned sentences — we don't want the segmenter "helpfully" normalising
+# input that will later be compared against raw_text/final_text.
+_segmenter = pysbd.Segmenter(language="en", clean=False)
+
 
 def count_tokens(text: str) -> int:
     return len(_encoder.encode(text))
+
+
+def split_sentences(text: str) -> list[str]:
+    """Split text into sentences using pysbd.
+
+    Handles abbreviations (Dr., a.m., i.e.), decimals ($3.14), ellipses,
+    and em-dashes correctly — unlike a naive `.!?` scan. Returns an empty
+    list for empty/whitespace-only input.
+    """
+    if not text or not text.strip():
+        return []
+    # pysbd can return empty strings or whitespace-only fragments for
+    # pathological inputs; filter them out.
+    return [s.strip() for s in _segmenter.segment(text) if s and s.strip()]
 
 
 def chunk_text(
@@ -81,17 +103,7 @@ def _split_long_paragraph(
     paragraph: str, max_tokens: int, overlap_tokens: int
 ) -> list[str]:
     """Split a long paragraph by sentences with overlap."""
-    # Simple sentence splitting on '. ', '! ', '? '
-    sentences: list[str] = []
-    current = ""
-    for char in paragraph:
-        current += char
-        if char in ".!?" and len(current) > 1:
-            sentences.append(current.strip())
-            current = ""
-    if current.strip():
-        sentences.append(current.strip())
-
+    sentences = split_sentences(paragraph)
     if not sentences:
         return [paragraph]
 
