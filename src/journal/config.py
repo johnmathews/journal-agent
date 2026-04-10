@@ -37,7 +37,7 @@ class Config:
 
     # Chunking
     chunking_strategy: str = field(
-        default_factory=lambda: os.environ.get("CHUNKING_STRATEGY", "fixed")
+        default_factory=lambda: os.environ.get("CHUNKING_STRATEGY", "semantic")
     )
     chunking_max_tokens: int = field(
         default_factory=lambda: int(os.environ.get("CHUNKING_MAX_TOKENS", "150"))
