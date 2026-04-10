@@ -202,8 +202,8 @@ Count how often a topic, person, or place appears.
 
 ### journal_ingest_from_url
 
-Ingest a journal entry by downloading an image or voice note from a URL. This is the
-preferred ingestion method for MCP clients like Nanoclaw, since it avoids base64-encoding
+Ingest a **single** journal page image or voice note by downloading it from a URL. This is
+the preferred ingestion method for MCP clients like Nanoclaw, since it avoids base64-encoding
 large files as tool parameters.
 
 | Parameter     | Type   | Required | Default | Description                                       |
@@ -221,6 +221,27 @@ pass the raw `url_private` or `url_private_download` URL from Slack.
 For other URLs, the server makes a plain HTTP GET with no authentication. The URL must be
 accessible from the journal server's network.
 
+> **Multi-page entries:** If a single journal entry spans multiple photos, do NOT call this
+> tool once per page — each call creates a separate entry. Use
+> [`journal_ingest_multi_page_from_url`](#journal_ingest_multi_page_from_url) instead.
+
+### journal_ingest_multi_page_from_url
+
+Ingest multiple page images (by URL) as a **single** multi-page journal entry. All images
+are downloaded, OCR'd page-by-page, and combined into one entry with one page record per
+image. This is the preferred way to ingest multi-page entries from URL-based clients (e.g.
+Slack-driven agents).
+
+| Parameter     | Type         | Required | Default | Description                                                |
+|---------------|--------------|----------|---------|------------------------------------------------------------|
+| `urls`        | list[string] | yes      |         | Ordered list of page image URLs, one per page              |
+| `media_types` | list[string] | no       |         | Per-URL MIME type overrides (same length as `urls`)        |
+| `date`        | string       | no       | today   | Entry date (ISO 8601)                                      |
+
+Slack file URLs are authenticated the same way as in `journal_ingest_from_url`. If a page
+within the batch matches an already-ingested file hash, ingestion fails with an
+"already ingested" error before any entry is created.
+
 ### journal_ingest_entry
 
 Ingest a journal entry from base64-encoded data. Use `journal_ingest_from_url` instead when
@@ -236,13 +257,15 @@ the file is available at a URL — this avoids MCP tool parameter size limits.
 
 ### journal_ingest_multi_page
 
-Ingest multiple images as pages of a single journal entry, or add pages to an existing entry. Images are OCR'd individually and combined into one entry.
+Ingest multiple images as pages of a single journal entry from base64-encoded data. Images
+are OCR'd individually and combined into one entry. Prefer
+`journal_ingest_multi_page_from_url` when the images are available at URLs.
 
-| Parameter | Type | Required | Default | Description |
-|-----------|------|----------|---------|-------------|
-| `urls` | list[string] | yes | | URLs of page images (ordered) |
-| `date` | string | no | today | Entry date (ISO 8601) |
-| `entry_id` | int | no | | Existing entry ID to add pages to |
+| Parameter       | Type         | Required | Default | Description                                   |
+|-----------------|--------------|----------|---------|-----------------------------------------------|
+| `images_base64` | list[string] | yes      |         | Base64-encoded page images (ordered)          |
+| `media_types`   | list[string] | yes      |         | Per-image MIME types (same length as images)  |
+| `date`          | string       | no       | today   | Entry date (ISO 8601)                         |
 
 ### journal_update_entry_text
 

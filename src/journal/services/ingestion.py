@@ -110,6 +110,42 @@ class IngestionService:
         data, resolved_type = self._download(url, media_type)
         return self.ingest_image(data, resolved_type, date)
 
+    def ingest_multi_page_entry_from_urls(
+        self,
+        urls: list[str],
+        date: str,
+        media_types: list[str | None] | None = None,
+    ) -> Entry:
+        """Download a list of page images from URLs and ingest them as one entry.
+
+        Each URL is downloaded (with Slack bearer auth where applicable),
+        then the raw bytes are handed to `ingest_multi_page_entry` which
+        OCRs each page individually and combines them into a single
+        entry with one page record per image.
+
+        Args:
+            urls: Ordered list of image URLs, one per page.
+            date: Journal entry date (ISO 8601).
+            media_types: Optional per-URL MIME type overrides. If provided,
+                must have the same length as `urls`; `None` entries fall
+                back to the Content-Type returned by the server.
+        """
+        if not urls:
+            raise ValueError("At least one URL is required")
+        if media_types is not None and len(media_types) != len(urls):
+            raise ValueError(
+                "media_types must have the same length as urls when provided"
+            )
+
+        log.info("Downloading %d pages for multi-page entry (date=%s)", len(urls), date)
+        images: list[tuple[bytes, str]] = []
+        for i, url in enumerate(urls):
+            override = media_types[i] if media_types is not None else None
+            data, resolved_type = self._download(url, override)
+            images.append((data, resolved_type))
+
+        return self.ingest_multi_page_entry(images, date)
+
     def ingest_voice_from_url(
         self,
         url: str,

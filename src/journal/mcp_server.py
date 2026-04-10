@@ -328,10 +328,16 @@ def journal_ingest_from_url(
     language: str = "en",
     ctx: Context = None,  # type: ignore[assignment]
 ) -> str:
-    """Ingest a journal entry by downloading an image or voice note from a URL.
+    """Ingest a SINGLE journal page image or voice note by URL.
 
     Preferred over journal_ingest_entry when the file is available at a URL,
     since it avoids base64-encoding large files as tool parameters.
+
+    IMPORTANT: If you have multiple photos that are pages of the *same* journal
+    entry (e.g. a two-page handwritten entry split across two images), do NOT
+    call this tool once per image — that creates a separate entry per photo.
+    Use `journal_ingest_multi_page_from_url` instead so all pages are combined
+    into one entry.
 
     Args:
         source_type: Either "image" (for handwritten page OCR) or "voice" (for audio).
@@ -455,6 +461,66 @@ def journal_ingest_multi_page(
         f"  ID: {entry.id}\n"
         f"  Date: {entry.entry_date}\n"
         f"  Pages: {len(images)}\n"
+        f"  Words: {entry.word_count}\n"
+        f"  Chunks: {entry.chunk_count}\n"
+        f"  Preview: {entry.final_text[:200]}..."
+    )
+
+
+@mcp.tool()
+def journal_ingest_multi_page_from_url(
+    urls: list[str],
+    media_types: list[str] | None = None,
+    date: str | None = None,
+    ctx: Context = None,  # type: ignore[assignment]
+) -> str:
+    """Ingest multiple page images (by URL) as a single multi-page journal entry.
+
+    Use this tool when a single journal entry spans multiple photos — for
+    example, a two-page handwritten entry where each page was photographed
+    separately. All images are downloaded, OCR'd page-by-page, and combined
+    into ONE entry with one page record per image. This is the preferred
+    way to ingest multi-page entries from MCP clients like Slack-driven
+    agents, since it avoids base64-encoding large files.
+
+    Slack file URLs (files.slack.com) are automatically authenticated via
+    the server's SLACK_BOT_TOKEN.
+
+    Args:
+        urls: Ordered list of page image URLs, one per page.
+        media_types: Optional per-URL MIME type overrides. If provided,
+            must be the same length as `urls`. Omit entirely to infer
+            each page's MIME type from the response Content-Type header
+            (usually correct for Slack and most CDNs).
+        date: Date of the journal entry (ISO 8601, e.g. "2026-03-22").
+            Defaults to today.
+    """
+    from datetime import date as date_type
+
+    log.info(
+        "Tool call: journal_ingest_multi_page_from_url(pages=%d, date=%s)",
+        len(urls), date,
+    )
+    service = _get_ingestion(ctx)
+    entry_date = date or date_type.today().isoformat()
+
+    if media_types is not None and len(media_types) != len(urls):
+        return "Error: media_types and urls must have the same length when media_types is provided."
+
+    # Service layer accepts list[str | None] | None; list[str] is a valid
+    # instance of that type, so no conversion is needed.
+    try:
+        entry = service.ingest_multi_page_entry_from_urls(
+            urls, entry_date, media_types,  # type: ignore[arg-type]
+        )
+    except ValueError as e:
+        return f"Error: {e}"
+
+    return (
+        f"Multi-page entry ingested successfully.\n"
+        f"  ID: {entry.id}\n"
+        f"  Date: {entry.entry_date}\n"
+        f"  Pages: {len(urls)}\n"
         f"  Words: {entry.word_count}\n"
         f"  Chunks: {entry.chunk_count}\n"
         f"  Preview: {entry.final_text[:200]}..."

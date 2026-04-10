@@ -146,6 +146,10 @@ class TestMCPToolModuleImports:
         from journal.mcp_server import journal_ingest_multi_page
         assert callable(journal_ingest_multi_page)
 
+    def test_ingest_multi_page_from_url_tool_exists(self):
+        from journal.mcp_server import journal_ingest_multi_page_from_url
+        assert callable(journal_ingest_multi_page_from_url)
+
     def test_update_entry_text_tool_exists(self):
         from journal.mcp_server import journal_update_entry_text
         assert callable(journal_update_entry_text)

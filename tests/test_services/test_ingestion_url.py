@@ -199,6 +199,130 @@ class TestSlackUrlAuth:
         assert req.get_header("Authorization") is None
 
 
+class TestIngestMultiPageFromUrls:
+    @patch("journal.services.ingestion.urlopen")
+    def test_downloads_all_pages_and_creates_single_entry(
+        self, mock_url, ingestion_service, mock_ocr,
+    ):
+        # Each call to urlopen returns a different mock response so the
+        # duplicate-hash check (which hashes raw bytes) passes for all pages.
+        mock_url.side_effect = [
+            _mock_urlopen(b"page one bytes"),
+            _mock_urlopen(b"page two bytes"),
+        ]
+        mock_ocr.extract_text.side_effect = [
+            "First page text about Vienna.",
+            "Second page text about Atlas.",
+        ]
+
+        entry = ingestion_service.ingest_multi_page_entry_from_urls(
+            urls=[
+                "https://example.com/page1.jpg",
+                "https://example.com/page2.jpg",
+            ],
+            date="2026-04-10",
+        )
+
+        assert entry.entry_date == "2026-04-10"
+        assert entry.source_type == "ocr"
+        # Both page texts should be present in the combined entry.
+        assert "First page text about Vienna." in entry.raw_text
+        assert "Second page text about Atlas." in entry.raw_text
+        assert mock_ocr.extract_text.call_count == 2
+        assert mock_url.call_count == 2
+
+    @patch("journal.services.ingestion.urlopen")
+    def test_respects_per_url_media_type_override(
+        self, mock_url, ingestion_service, mock_ocr,
+    ):
+        mock_url.side_effect = [
+            _mock_urlopen(b"first", content_type="application/octet-stream"),
+            _mock_urlopen(b"second", content_type="image/jpeg"),
+        ]
+
+        ingestion_service.ingest_multi_page_entry_from_urls(
+            urls=["https://example.com/p1", "https://example.com/p2.jpg"],
+            date="2026-04-10",
+            media_types=["image/png", None],
+        )
+
+        # First call: explicit override wins.
+        first_call = mock_ocr.extract_text.call_args_list[0]
+        assert first_call[0][1] == "image/png"
+        # Second call: inferred from response Content-Type.
+        second_call = mock_ocr.extract_text.call_args_list[1]
+        assert second_call[0][1] == "image/jpeg"
+
+    @patch("journal.services.ingestion.urlopen")
+    def test_empty_urls_raises(self, mock_url, ingestion_service):
+        with pytest.raises(ValueError, match="At least one URL"):
+            ingestion_service.ingest_multi_page_entry_from_urls(
+                urls=[], date="2026-04-10",
+            )
+        mock_url.assert_not_called()
+
+    @patch("journal.services.ingestion.urlopen")
+    def test_mismatched_media_types_length_raises(
+        self, mock_url, ingestion_service,
+    ):
+        with pytest.raises(ValueError, match="same length"):
+            ingestion_service.ingest_multi_page_entry_from_urls(
+                urls=["https://example.com/p1", "https://example.com/p2"],
+                date="2026-04-10",
+                media_types=["image/jpeg"],
+            )
+        mock_url.assert_not_called()
+
+    @patch("journal.services.ingestion.urlopen")
+    def test_previously_ingested_page_raises(
+        self, mock_url, ingestion_service,
+    ):
+        # Ingest a single image first so its hash is recorded in source_files.
+        mock_url.return_value = _mock_urlopen(b"page one bytes")
+        ingestion_service.ingest_image_from_url(
+            url="https://example.com/first.jpg",
+            date="2026-04-09",
+        )
+
+        # Now a multi-page batch that includes the same bytes should fail
+        # because the hash is already in source_files.
+        mock_url.return_value = None
+        mock_url.side_effect = [
+            _mock_urlopen(b"page one bytes"),
+            _mock_urlopen(b"page two bytes"),
+        ]
+
+        with pytest.raises(ValueError, match="already ingested"):
+            ingestion_service.ingest_multi_page_entry_from_urls(
+                urls=[
+                    "https://example.com/p1.jpg",
+                    "https://example.com/p2.jpg",
+                ],
+                date="2026-04-10",
+            )
+
+    @patch("journal.services.ingestion.urlopen")
+    def test_slack_urls_get_bearer_header(
+        self, mock_url, ingestion_service_with_slack,
+    ):
+        mock_url.side_effect = [
+            _mock_urlopen(b"slack page one"),
+            _mock_urlopen(b"slack page two"),
+        ]
+
+        ingestion_service_with_slack.ingest_multi_page_entry_from_urls(
+            urls=[
+                "https://files.slack.com/files-pri/T0X-F0X/p1.jpg",
+                "https://files.slack.com/files-pri/T0X-F0X/p2.jpg",
+            ],
+            date="2026-04-10",
+        )
+
+        for call in mock_url.call_args_list:
+            req = call[0][0]
+            assert req.get_header("Authorization") == "Bearer xoxb-test-token-123"
+
+
 class TestIngestVoiceFromUrl:
     @patch("journal.services.ingestion.urlopen")
     def test_downloads_and_transcribes(self, mock_url, ingestion_service, mock_transcription):
