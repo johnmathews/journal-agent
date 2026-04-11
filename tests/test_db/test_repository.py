@@ -156,6 +156,81 @@ class TestFTSSnippets:
         )
 
 
+class TestIngestionStats:
+    """T1.2.b — get_ingestion_stats aggregates everything /health shows."""
+
+    def test_empty_corpus(self, repo):
+        from datetime import UTC, datetime
+
+        stats = repo.get_ingestion_stats(now=datetime(2026, 4, 11, tzinfo=UTC))
+        assert stats.total_entries == 0
+        assert stats.entries_last_7d == 0
+        assert stats.entries_last_30d == 0
+        assert stats.by_source_type == {}
+        assert stats.avg_words_per_entry == 0.0
+        assert stats.avg_chunks_per_entry == 0.0
+        assert stats.last_ingestion_at is None
+        assert stats.total_chunks == 0
+        # row_counts surfaces every whitelisted table even when empty.
+        for table in (
+            "entries",
+            "entry_pages",
+            "entry_chunks",
+            "mood_scores",
+            "source_files",
+            "entities",
+            "entity_aliases",
+            "entity_mentions",
+            "entity_relationships",
+        ):
+            assert stats.row_counts[table] == 0
+
+    def test_counts_by_source_and_date_windows(self, repo):
+        from datetime import UTC, datetime
+
+        now = datetime(2026, 4, 11, 12, 0, 0, tzinfo=UTC)
+        # Three entries within the last 7 days.
+        repo.create_entry("2026-04-05", "ocr", "recent one two three", 4)
+        repo.create_entry("2026-04-08", "voice", "recent voice note here", 4)
+        repo.create_entry("2026-04-10", "ocr", "also recent entry body", 4)
+        # One entry in last 30 days but NOT last 7.
+        repo.create_entry("2026-03-20", "ocr", "medium age entry text", 4)
+        # One entry beyond 30 days.
+        repo.create_entry("2026-02-01", "voice", "old voice entry longer text", 5)
+
+        stats = repo.get_ingestion_stats(now=now)
+
+        assert stats.total_entries == 5
+        assert stats.entries_last_7d == 3
+        assert stats.entries_last_30d == 4  # 3 recent + 1 March 20
+        assert stats.by_source_type == {"ocr": 3, "voice": 2}
+        assert stats.avg_words_per_entry == 4.2
+        assert stats.row_counts["entries"] == 5
+        assert stats.last_ingestion_at is not None
+
+    def test_avg_chunks_reflects_update_chunk_count(self, repo):
+        from datetime import UTC, datetime
+
+        e = repo.create_entry("2026-04-01", "ocr", "body body body", 3)
+        repo.update_chunk_count(e.id, 4)
+        stats = repo.get_ingestion_stats(
+            now=datetime(2026, 4, 11, tzinfo=UTC)
+        )
+        assert stats.total_chunks == 4
+        assert stats.avg_chunks_per_entry == 4.0
+
+    def test_row_counts_include_entity_tables(self, repo):
+        from datetime import UTC, datetime
+
+        # Row counts are computed directly from COUNT(*) on the table
+        # names in `_HEALTH_ROW_COUNT_TABLES`, so the entity tables
+        # should show zero on a fresh schema without any entity
+        # extraction having been run.
+        stats = repo.get_ingestion_stats(now=datetime(2026, 4, 11, tzinfo=UTC))
+        assert "entity_mentions" in stats.row_counts
+        assert "entity_relationships" in stats.row_counts
+
+
 class TestStatistics:
     def test_get_statistics(self, repo):
         repo.create_entry("2026-01-15", "ocr", "January entry", 2)

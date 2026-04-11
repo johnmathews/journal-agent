@@ -63,41 +63,51 @@ empty or 5-entity corpus is a toy.
 
 ---
 
-### 2. `/health` endpoint `[server]`
+### 2. `/health` endpoint `[server]` — ✅ shipped 2026-04-11
 
 A single `GET /health` endpoint on the MCP server exposing
-operational stats. Bearer-authenticated (same middleware as the
-rest of `/api/*`).
+operational stats. **Unauthenticated** (decided against bearer
+auth — loopback bind means anyone who can reach it already has
+a shell on the box, and we scrub any field that would leak
+query content). See `journal/260411-health-endpoint.md` for the
+full session notes and `docs/api.md` for the endpoint contract.
 
-Fields:
+**Shipped:**
 
-**Ingestion stats**
-1. Total entries (all time, last 7d, last 30d)
-2. Entries by source type (`ocr` vs `voice`)
-3. Average words per entry
-4. Last ingestion timestamp
-5. Chunking stats: total chunks, average chunks per entry, average
-   tokens per chunk
-6. ChromaDB collection size and last-update timestamp
-7. SQLite database size and row counts per table
+1. ✅ `InMemoryStatsCollector` — `src/journal/services/stats.py`,
+   bounded per-type histogram with `record_query` + `snapshot`,
+   wired into `QueryService` behind an optional dependency.
+2. ✅ `get_ingestion_stats(now)` — repository method aggregating
+   total/last-7d/last-30d counts, by-source-type, avg words/chunks,
+   last-ingestion timestamp, per-table row counts.
+3. ✅ Provider liveness — `src/journal/services/liveness.py`
+   pings SQLite and ChromaDB and sanity-checks Anthropic/OpenAI
+   API keys without burning tokens.
+4. ✅ `GET /health` route in `api.py`, exempt from the bearer
+   middleware via a new `exempt_paths` kwarg on
+   `BearerTokenMiddleware`.
+5. ✅ `journal health [--compact]` CLI subcommand emitting the
+   same payload as JSON for scripted use.
 
-**Query & usage stats**
-1. Total queries served (all time, last 7d, last 30d)
-2. Queries by type (semantic search, date lookup, statistics, mood,
-   topic frequency)
-3. Latency percentiles (p50, p95, p99) — needs a lightweight
-   in-process histogram wrapper around the query service
-4. Most frequent search terms
-5. Uptime and last restart timestamp
+**Deliberately NOT shipped** (plan items that were cut on
+review):
 
-**Status block**
-1. `status`: `ok` / `degraded` / `error`
-2. Per-check results for SQLite connectivity, ChromaDB connectivity,
-   embeddings-provider credential validity, OCR-provider credential
-   validity.
-
-**Consumers:** the health response also feeds the dashboard (Tier 1,
-item 3) so both surfaces can read from one source.
+1. **Most frequent search terms.** The plan listed this as an
+   optional "Query & usage stat". It would leak what the user
+   was searching for from an unauthenticated endpoint, and
+   adding it would push us toward tracking raw query strings
+   in memory. Omitted — the query stats block carries
+   counts-by-type only.
+2. **ChromaDB last-update timestamp** and **SQLite database
+   size (bytes)**. Both are operationally interesting but
+   Chroma does not expose a cheap "last write" timestamp and
+   DB bytes requires a separate stat() call. The `row_counts`
+   block is the closest proxy and good enough.
+3. **Dashboard consumer.** The plan noted that the dashboard
+   (Tier 1 item 3) could reuse the health payload as a data
+   source. Not pursued yet — when 3a lands it will add its
+   own dashboard-specific endpoint, and the shared-source
+   idea can be revisited if it turns out to duplicate work.
 
 **Source:** `docs/phase-2-brief.md` "Health & Stats Endpoint".
 
@@ -579,6 +589,10 @@ Included so we don't accidentally re-surface these as TODOs.
     semantic + keyword modes, FTS5 `snippet()` highlights, chunk
     offsets on `ChunkMatch`, and the webapp `/search` view with
     `?chunk=N` deep-link scroll-into-view
+14. `/health` endpoint (Tier 1 item 2) — `GET /health` with
+    ingestion stats, in-process query latency histogram, and
+    per-component liveness checks; bearer-auth-exempt on loopback;
+    `journal health` CLI prints the same payload
 
 ---
 

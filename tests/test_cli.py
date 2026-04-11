@@ -81,8 +81,86 @@ def test_cli_all_commands_registered(capsys):
         "search",
         "list",
         "stats",
+        "health",
         "backfill-chunks",
         "rechunk",
         "eval-chunking",
     ):
         assert cmd in captured.out, f"Command '{cmd}' not found in help output"
+
+
+def test_cli_health_help(capsys):
+    """`journal health --help` documents the --compact flag."""
+    with pytest.raises(SystemExit) as exc_info:
+        sys.argv = ["journal", "health", "--help"]
+        main()
+    assert exc_info.value.code == 0
+    captured = capsys.readouterr()
+    assert "health" in captured.out
+    assert "--compact" in captured.out
+
+
+def test_cmd_health_emits_json_without_a_running_server(
+    tmp_path, monkeypatch, capsys
+):
+    """`cmd_health` should build services locally, run the checks,
+    and print a JSON payload — without needing the MCP server or
+    any live providers. ChromaDB is mocked out because the CLI
+    still constructs a real ChromaVectorStore."""
+    from unittest.mock import MagicMock, patch
+
+    from journal.cli import cmd_health
+    from journal.config import Config
+
+    db_path = tmp_path / "cli_health.db"
+    config = Config(
+        db_path=db_path,
+        anthropic_api_key="a" * 40,
+        openai_api_key="o" * 40,
+    )
+
+    # Patch the ChromaVectorStore constructor used by cmd_health to
+    # return a MagicMock whose `count()` returns 0 — avoids needing
+    # a running ChromaDB container.
+    fake_store = MagicMock()
+    fake_store.count.return_value = 0
+    with patch("journal.cli.ChromaVectorStore", return_value=fake_store):
+        args = MagicMock(compact=False)
+        cmd_health(args, config)
+
+    captured = capsys.readouterr()
+    # The output is pretty-printed JSON.
+    import json
+
+    payload = json.loads(captured.out)
+    assert payload["status"] == "ok"
+    assert "ingestion" in payload
+    assert "checks" in payload
+    # Four checks: sqlite, chromadb, anthropic, openai.
+    assert len(payload["checks"]) == 4
+
+
+def test_cmd_health_compact_mode(tmp_path, capsys):
+    """`--compact` emits single-line JSON for piping."""
+    from unittest.mock import MagicMock, patch
+
+    from journal.cli import cmd_health
+    from journal.config import Config
+
+    config = Config(
+        db_path=tmp_path / "compact.db",
+        anthropic_api_key="a" * 40,
+        openai_api_key="o" * 40,
+    )
+    fake_store = MagicMock()
+    fake_store.count.return_value = 0
+    with patch("journal.cli.ChromaVectorStore", return_value=fake_store):
+        cmd_health(MagicMock(compact=True), config)
+
+    out = capsys.readouterr().out.strip()
+    # One line, no pretty-print whitespace.
+    assert "\n" not in out
+    import json
+
+    payload = json.loads(out)
+    assert payload["status"] == "ok"

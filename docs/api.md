@@ -211,6 +211,97 @@ model sees the text.
 }
 ```
 
+### GET /health
+
+Operational health endpoint. **Unauthenticated** — the server
+binds to loopback only (see `docs/security.md`), so any caller
+that can reach `/health` already has a shell on the box. The
+field that would worry us most — most-frequent search terms — is
+deliberately **not** exposed. The query stats block carries
+counts-by-type only, not query strings.
+
+If you ever front this server with a reverse proxy, exclude
+`/health` from the public route or scrub the `queries.by_type`
+block before serving it outside loopback.
+
+**Response (200):**
+
+```json
+{
+  "status": "ok",
+  "checks": [
+    {"name": "sqlite",    "status": "ok",       "detail": "SELECT 1 succeeded",                              "error": null},
+    {"name": "chromadb",  "status": "ok",       "detail": "collection count = 0",                            "error": null},
+    {"name": "anthropic", "status": "ok",       "detail": "anthropic API key is configured (51 chars)",      "error": null},
+    {"name": "openai",    "status": "degraded", "detail": "openai API key is not configured",                "error": null}
+  ],
+  "ingestion": {
+    "total_entries": 42,
+    "entries_last_7d": 3,
+    "entries_last_30d": 12,
+    "by_source_type": {"ocr": 30, "voice": 12},
+    "avg_words_per_entry": 187.5,
+    "avg_chunks_per_entry": 2.3,
+    "last_ingestion_at": "2026-04-11T08:12:33Z",
+    "total_chunks": 98,
+    "row_counts": {
+      "entries": 42,
+      "entry_pages": 53,
+      "entry_chunks": 98,
+      "mood_scores": 0,
+      "source_files": 45,
+      "entities": 0,
+      "entity_aliases": 0,
+      "entity_mentions": 0,
+      "entity_relationships": 0
+    }
+  },
+  "queries": {
+    "total_queries": 17,
+    "uptime_seconds": 3821.42,
+    "started_at": "2026-04-11T07:30:00+00:00",
+    "by_type": {
+      "semantic_search": {"count": 12, "latency": {"p50_ms": 41.2, "p95_ms": 89.7, "p99_ms": 102.3}},
+      "keyword_search":  {"count":  5, "latency": {"p50_ms":  4.1, "p95_ms":  9.8, "p99_ms":  12.1}}
+    }
+  }
+}
+```
+
+**Status semantics:**
+
+- `"status": "ok"` — every component check returned `ok`.
+- `"status": "degraded"` — at least one component is degraded
+  (missing API key, short API key). The server is still serving
+  requests. The endpoint still returns HTTP 200 so a probe can
+  distinguish "config is wrong" from "container is not listening".
+- `"status": "error"` — at least one component check failed
+  outright (e.g. SQLite unreachable, ChromaDB connection refused).
+  Still HTTP 200; callers should inspect the `status` field
+  rather than relying on status codes.
+
+**Component checks:**
+
+| Component   | What it checks                                                           |
+|-------------|--------------------------------------------------------------------------|
+| `sqlite`    | `SELECT 1` against the connection                                        |
+| `chromadb`  | `collection.count()` against the vector store                            |
+| `anthropic` | API key is set and has a plausible length — **no LLM call is made**      |
+| `openai`    | API key is set and has a plausible length — **no API call is made**     |
+
+**Privacy:** The payload intentionally omits any field that would
+surface query *content* — only counts and latency percentiles per
+query type. Adding a "most frequent search terms" field was
+proposed and rejected per the Tier 1 plan open question on
+privacy.
+
+**CLI equivalent:** `uv run journal health` prints the same
+payload as pretty JSON. Add `--compact` for single-line output
+suitable for piping to `jq`. The CLI exits non-zero only when
+the rolled-up `status` is `error`.
+
+---
+
 ### GET /api/search
 
 Full-text search across journal entries. Supports two modes:

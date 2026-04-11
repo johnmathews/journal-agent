@@ -1,0 +1,140 @@
+"""Per-component liveness checks used by the `/health` endpoint.
+
+Each check returns a `ComponentCheck` carrying:
+
+- `name`: identifier the caller expects ("sqlite", "chromadb", etc.).
+- `status`: `"ok"`, `"degraded"`, or `"error"`.
+- `detail`: short human-readable string — what was checked, not
+  what went wrong (error messages go in `error`).
+- `error`: exception message if the check raised, else `None`.
+
+The overall server status returned from `/health` is the worst of
+the component statuses: any `"error"` → `"error"`, else any
+`"degraded"` → `"degraded"`, else `"ok"`.
+
+**Credential checks do NOT burn tokens.** Anthropic and OpenAI
+checks only verify that the API key is set and has a plausible
+shape. Making a real call on every `/health` hit would cost
+money and rate-limit budget; anyone who wants deeper probes can
+run the CLI equivalent of an ingestion or search and look at
+the latencies in the query stats block.
+"""
+
+from __future__ import annotations
+
+import logging
+import sqlite3
+from dataclasses import dataclass
+from typing import Any
+
+log = logging.getLogger(__name__)
+
+
+StatusLevel = str  # "ok" | "degraded" | "error"
+
+
+@dataclass
+class ComponentCheck:
+    name: str
+    status: StatusLevel
+    detail: str
+    error: str | None = None
+
+
+def check_sqlite(conn: sqlite3.Connection) -> ComponentCheck:
+    """Ping the SQLite connection with a trivial query."""
+    try:
+        row = conn.execute("SELECT 1 AS ok").fetchone()
+        if row is None or row[0] != 1:
+            return ComponentCheck(
+                name="sqlite",
+                status="error",
+                detail="SELECT 1 returned unexpected result",
+            )
+        return ComponentCheck(
+            name="sqlite",
+            status="ok",
+            detail="SELECT 1 succeeded",
+        )
+    except sqlite3.Error as e:
+        log.warning("SQLite liveness check failed: %s", e)
+        return ComponentCheck(
+            name="sqlite",
+            status="error",
+            detail="SELECT 1 failed",
+            error=str(e),
+        )
+
+
+def check_chromadb(vector_store: Any) -> ComponentCheck:
+    """Ping the vector store by calling its `count()` method.
+
+    Accepts anything duck-typed to the `VectorStore` Protocol so
+    tests can pass an `InMemoryVectorStore` or a mock without
+    pulling in the concrete `ChromaVectorStore`.
+    """
+    try:
+        count = int(vector_store.count())
+        return ComponentCheck(
+            name="chromadb",
+            status="ok",
+            detail=f"collection count = {count}",
+        )
+    except Exception as e:
+        log.warning("ChromaDB liveness check failed: %s", e)
+        return ComponentCheck(
+            name="chromadb",
+            status="error",
+            detail="collection.count() failed",
+            error=str(e),
+        )
+
+
+def check_api_key(
+    name: str,
+    api_key: str | None,
+    min_length: int = 20,
+) -> ComponentCheck:
+    """Static credential check — does NOT call out.
+
+    A missing or obviously malformed key returns `degraded` rather
+    than `error` because the *service* is up; the credential
+    problem is a config issue the operator can see and fix. An
+    `error` status is reserved for components that are actually
+    broken (SQLite unreachable, ChromaDB not responding).
+    """
+    if not api_key:
+        return ComponentCheck(
+            name=name,
+            status="degraded",
+            detail=f"{name} API key is not configured",
+        )
+    if len(api_key) < min_length:
+        return ComponentCheck(
+            name=name,
+            status="degraded",
+            detail=(
+                f"{name} API key is shorter than {min_length} characters — "
+                "likely malformed or a placeholder"
+            ),
+        )
+    return ComponentCheck(
+        name=name,
+        status="ok",
+        detail=f"{name} API key is configured ({len(api_key)} chars)",
+    )
+
+
+def overall_status(checks: list[ComponentCheck]) -> StatusLevel:
+    """Worst of the component statuses.
+
+    - Any `error` → `error`
+    - Else any `degraded` → `degraded`
+    - Else `ok` (including the empty list, which should never
+      happen in practice but is a defensible default).
+    """
+    if any(c.status == "error" for c in checks):
+        return "error"
+    if any(c.status == "degraded" for c in checks):
+        return "degraded"
+    return "ok"

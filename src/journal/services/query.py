@@ -1,6 +1,9 @@
 """Query service — combines SQLite and vector search for answering queries."""
 
 import logging
+import time
+from collections.abc import Callable
+from typing import TypeVar
 
 from journal.db.repository import EntryRepository
 from journal.models import (
@@ -13,9 +16,12 @@ from journal.models import (
     TopicFrequency,
 )
 from journal.providers.embeddings import EmbeddingsProvider
+from journal.services.stats import StatsCollector
 from journal.vectorstore.store import VectorStore
 
 log = logging.getLogger(__name__)
+
+T = TypeVar("T")
 
 
 class QueryService:
@@ -24,10 +30,32 @@ class QueryService:
         repository: EntryRepository,
         vector_store: VectorStore,
         embeddings_provider: EmbeddingsProvider,
+        stats: StatsCollector | None = None,
     ) -> None:
         self._repo = repository
         self._vector_store = vector_store
         self._embeddings = embeddings_provider
+        # Optional stats collector. When `None`, the timed wrapper
+        # below is a straight passthrough — zero extra clock reads
+        # and no locks. The `/health` endpoint passes in an
+        # `InMemoryStatsCollector`; everything else keeps working
+        # unchanged.
+        self._stats = stats
+
+    def _timed(self, query_type: str, fn: Callable[[], T]) -> T:
+        """Run `fn()` and record its latency under `query_type`.
+
+        If no stats collector is configured, this is a direct call
+        with no clock reads.
+        """
+        if self._stats is None:
+            return fn()
+        start = time.monotonic()
+        try:
+            return fn()
+        finally:
+            latency_ms = (time.monotonic() - start) * 1000.0
+            self._stats.record_query(query_type, latency_ms)
 
     # When the caller asks for `limit` entries, we over-fetch chunks from
     # the vector store so that after grouping by entry_id we still have a
@@ -51,6 +79,21 @@ class QueryService:
         the query. The `SearchResult.score` is the max chunk score for
         that entry, and the outer list is sorted by score descending.
         """
+        return self._timed(
+            "semantic_search",
+            lambda: self._search_entries_impl(
+                query, start_date, end_date, limit, offset
+            ),
+        )
+
+    def _search_entries_impl(
+        self,
+        query: str,
+        start_date: str | None,
+        end_date: str | None,
+        limit: int,
+        offset: int,
+    ) -> list[SearchResult]:
         log.info("Semantic search: '%s' (limit=%d, offset=%d)", query, limit, offset)
 
         query_embedding = self._embeddings.embed_query(query)
@@ -154,6 +197,21 @@ class QueryService:
         to semantic mode scores — it only keeps the list ordering
         stable when the frontend re-sorts.
         """
+        return self._timed(
+            "keyword_search",
+            lambda: self._keyword_search_impl(
+                query, start_date, end_date, limit, offset
+            ),
+        )
+
+    def _keyword_search_impl(
+        self,
+        query: str,
+        start_date: str | None,
+        end_date: str | None,
+        limit: int,
+        offset: int,
+    ) -> list[SearchResult]:
         log.info(
             "Keyword search: '%s' (limit=%d, offset=%d)", query, limit, offset
         )
@@ -199,7 +257,10 @@ class QueryService:
     def get_statistics(
         self, start_date: str | None = None, end_date: str | None = None
     ) -> Statistics:
-        return self._repo.get_statistics(start_date, end_date)
+        return self._timed(
+            "statistics",
+            lambda: self._repo.get_statistics(start_date, end_date),
+        )
 
     def get_mood_trends(
         self,
@@ -207,12 +268,18 @@ class QueryService:
         end_date: str | None = None,
         granularity: str = "week",
     ) -> list[MoodTrend]:
-        return self._repo.get_mood_trends(start_date, end_date, granularity)
+        return self._timed(
+            "mood_trends",
+            lambda: self._repo.get_mood_trends(start_date, end_date, granularity),
+        )
 
     def get_topic_frequency(
         self, topic: str, start_date: str | None = None, end_date: str | None = None
     ) -> TopicFrequency:
-        return self._repo.get_topic_frequency(topic, start_date, end_date)
+        return self._timed(
+            "topic_frequency",
+            lambda: self._repo.get_topic_frequency(topic, start_date, end_date),
+        )
 
     def get_entry_pages(self, entry_id: int) -> list[EntryPage]:
         return self._repo.get_entry_pages(entry_id)

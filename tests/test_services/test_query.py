@@ -355,3 +355,78 @@ class TestKeywordSearch:
         results = svc.keyword_search("Atlas", limit=10)
         scores = [r.score for r in results]
         assert scores == sorted(scores, reverse=True)
+
+
+class TestStatsCollectorIntegration:
+    """T1.2.a — QueryService forwards latency samples to the collector."""
+
+    def test_stats_records_semantic_search(
+        self, repo, vector_store, mock_embeddings
+    ):
+        from journal.services.stats import InMemoryStatsCollector
+
+        stats = InMemoryStatsCollector()
+        repo.create_entry("2026-03-22", "ocr", "Vienna trip", 2)
+        svc = QueryService(
+            repository=repo,
+            vector_store=vector_store,
+            embeddings_provider=mock_embeddings,
+            stats=stats,
+        )
+        svc.search_entries("vienna")
+        snap = stats.snapshot()
+        assert snap.total_queries == 1
+        assert "semantic_search" in snap.by_type
+        assert snap.by_type["semantic_search"].count == 1
+
+    def test_stats_records_keyword_search(
+        self, repo, vector_store, mock_embeddings
+    ):
+        from journal.services.stats import InMemoryStatsCollector
+
+        stats = InMemoryStatsCollector()
+        repo.create_entry("2026-03-22", "ocr", "Vienna trip", 2)
+        svc = QueryService(
+            repository=repo,
+            vector_store=vector_store,
+            embeddings_provider=mock_embeddings,
+            stats=stats,
+        )
+        svc.keyword_search("vienna")
+        snap = stats.snapshot()
+        assert snap.by_type["keyword_search"].count == 1
+
+    def test_stats_records_statistics_mood_topic(
+        self, repo, vector_store, mock_embeddings
+    ):
+        from journal.services.stats import InMemoryStatsCollector
+
+        stats = InMemoryStatsCollector()
+        repo.create_entry("2026-03-22", "ocr", "Vienna trip", 2)
+        svc = QueryService(
+            repository=repo,
+            vector_store=vector_store,
+            embeddings_provider=mock_embeddings,
+            stats=stats,
+        )
+        svc.get_statistics()
+        svc.get_mood_trends()
+        svc.get_topic_frequency("Vienna")
+        snap = stats.snapshot()
+        assert snap.by_type["statistics"].count == 1
+        assert snap.by_type["mood_trends"].count == 1
+        assert snap.by_type["topic_frequency"].count == 1
+        assert snap.total_queries == 3
+
+    def test_no_stats_is_passthrough(
+        self, repo, vector_store, mock_embeddings
+    ):
+        """When stats is None, methods behave identically — no wrapper
+        errors, no side effects."""
+        svc = QueryService(
+            repository=repo,
+            vector_store=vector_store,
+            embeddings_provider=mock_embeddings,
+        )
+        assert svc.search_entries("anything") == []
+        assert svc.keyword_search("anything") == []

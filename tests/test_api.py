@@ -706,6 +706,188 @@ class TestSearch:
         assert response.json()["mode"] == "semantic"
 
 
+class TestHealth:
+    """T1.2.d — GET /health route."""
+
+    @pytest.fixture
+    def health_client(
+        self, repo: SQLiteEntryRepository, mock_embeddings: MagicMock
+    ) -> Generator[tuple[TestClient, dict]]:
+        """Health client with real InMemoryVectorStore and a live
+        stats collector, so the snapshot-shaped payload matches
+        what the production route would return."""
+        from mcp.server.fastmcp import FastMCP
+
+        from journal.api import register_api_routes
+        from journal.config import Config
+        from journal.services.chunking import FixedTokenChunker
+        from journal.services.stats import InMemoryStatsCollector
+        from journal.vectorstore.store import InMemoryVectorStore
+
+        real_vector_store = InMemoryVectorStore()
+        stats_collector = InMemoryStatsCollector()
+        mock_ocr = MagicMock()
+        mock_transcription = MagicMock()
+        ingestion = IngestionService(
+            repository=repo,
+            vector_store=real_vector_store,
+            ocr_provider=mock_ocr,
+            transcription_provider=mock_transcription,
+            embeddings_provider=mock_embeddings,
+            chunker=FixedTokenChunker(max_tokens=150, overlap_tokens=40),
+        )
+        query = QueryService(
+            repository=repo,
+            vector_store=real_vector_store,
+            embeddings_provider=mock_embeddings,
+            stats=stats_collector,
+        )
+        # Config stub with plausible API key lengths so the liveness
+        # block reports "ok" for both by default.
+        config = Config(
+            anthropic_api_key="a" * 40,
+            openai_api_key="o" * 40,
+        )
+        services = {
+            "ingestion": ingestion,
+            "query": query,
+            "config": config,
+            "stats": stats_collector,
+        }
+        test_mcp = FastMCP("test-journal")
+        register_api_routes(test_mcp, lambda: services)
+        app = test_mcp.streamable_http_app()
+        with TestClient(app, raise_server_exceptions=False) as tc:
+            yield tc, services
+
+    def test_health_empty_server(
+        self, health_client: tuple[TestClient, dict]
+    ) -> None:
+        client, _ = health_client
+        response = client.get("/health")
+        assert response.status_code == 200
+        data = response.json()
+        assert data["status"] == "ok"
+        assert data["ingestion"]["total_entries"] == 0
+        assert data["queries"]["total_queries"] == 0
+        assert isinstance(data["checks"], list)
+        # sqlite + chromadb + anthropic + openai = 4.
+        assert len(data["checks"]) == 4
+
+    def test_health_reflects_populated_corpus(
+        self,
+        health_client: tuple[TestClient, dict],
+        repo: SQLiteEntryRepository,
+    ) -> None:
+        client, _ = health_client
+        repo.create_entry("2026-03-22", "ocr", "Vienna today", 2)
+        repo.create_entry("2026-03-23", "voice", "a voice note", 3)
+        data = client.get("/health").json()
+        assert data["ingestion"]["total_entries"] == 2
+        assert data["ingestion"]["by_source_type"] == {"ocr": 1, "voice": 1}
+        assert data["ingestion"]["row_counts"]["entries"] == 2
+
+    def test_health_reflects_query_stats_after_searches(
+        self,
+        health_client: tuple[TestClient, dict],
+        repo: SQLiteEntryRepository,
+    ) -> None:
+        client, services = health_client
+        query_svc: QueryService = services["query"]
+        repo.create_entry("2026-03-22", "ocr", "Vienna today", 2)
+
+        # Fire a semantic + keyword search, then snapshot via /health.
+        query_svc.search_entries("vienna")
+        query_svc.keyword_search("vienna")
+
+        data = client.get("/health").json()
+        assert data["queries"]["total_queries"] == 2
+        by_type = data["queries"]["by_type"]
+        assert by_type["semantic_search"]["count"] == 1
+        assert by_type["keyword_search"]["count"] == 1
+
+    def test_health_degraded_on_missing_api_key(
+        self, repo: SQLiteEntryRepository, mock_embeddings: MagicMock
+    ) -> None:
+        """When api keys are empty the liveness block rolls up to
+        `degraded` but the endpoint still returns 200 so a healthcheck
+        probe can tell "wrong config" from "container not listening"."""
+        from mcp.server.fastmcp import FastMCP
+
+        from journal.api import register_api_routes
+        from journal.config import Config
+        from journal.services.chunking import FixedTokenChunker
+        from journal.services.stats import InMemoryStatsCollector
+        from journal.vectorstore.store import InMemoryVectorStore
+
+        vs = InMemoryVectorStore()
+        stats = InMemoryStatsCollector()
+        ingestion = IngestionService(
+            repository=repo,
+            vector_store=vs,
+            ocr_provider=MagicMock(),
+            transcription_provider=MagicMock(),
+            embeddings_provider=mock_embeddings,
+            chunker=FixedTokenChunker(max_tokens=150, overlap_tokens=40),
+        )
+        query = QueryService(
+            repository=repo,
+            vector_store=vs,
+            embeddings_provider=mock_embeddings,
+            stats=stats,
+        )
+        config = Config(anthropic_api_key="", openai_api_key="")
+        services = {
+            "ingestion": ingestion,
+            "query": query,
+            "config": config,
+            "stats": stats,
+        }
+        test_mcp = FastMCP("test-journal")
+        register_api_routes(test_mcp, lambda: services)
+        app = test_mcp.streamable_http_app()
+        with TestClient(app, raise_server_exceptions=False) as tc:
+            resp = tc.get("/health")
+            assert resp.status_code == 200
+            data = resp.json()
+            assert data["status"] == "degraded"
+            by_name = {c["name"]: c for c in data["checks"]}
+            assert by_name["anthropic"]["status"] == "degraded"
+            assert by_name["openai"]["status"] == "degraded"
+
+    def test_health_503_when_services_not_initialized(self) -> None:
+        from mcp.server.fastmcp import FastMCP
+
+        from journal.api import register_api_routes
+
+        test_mcp = FastMCP("test-journal")
+        register_api_routes(test_mcp, lambda: None)
+        with TestClient(
+            test_mcp.streamable_http_app(), raise_server_exceptions=False
+        ) as tc:
+            resp = tc.get("/health")
+            assert resp.status_code == 503
+
+    def test_health_payload_never_includes_search_terms(
+        self,
+        health_client: tuple[TestClient, dict],
+        repo: SQLiteEntryRepository,
+    ) -> None:
+        """Privacy guard: the payload must not carry a field that
+        would surface what the user was searching for."""
+        import json as _json
+
+        client, services = health_client
+        query_svc: QueryService = services["query"]
+        repo.create_entry("2026-03-22", "ocr", "sensitive marker word", 3)
+        query_svc.keyword_search("sensitive")
+        data = client.get("/health").json()
+        dumped = _json.dumps(data)
+        # Assert the search term does not appear anywhere in the
+        # serialized envelope — query stats are counts-only.
+        assert "sensitive" not in dumped
+
+
 class TestRepositoryHelpers:
     """Test the new count_entries and get_page_count repository methods."""
 

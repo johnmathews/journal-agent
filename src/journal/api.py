@@ -6,10 +6,18 @@ import json
 import logging
 import sqlite3
 from dataclasses import asdict
+from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any
 
 import tiktoken
 from starlette.responses import JSONResponse
+
+from journal.services.liveness import (
+    check_api_key,
+    check_chromadb,
+    check_sqlite,
+    overall_status,
+)
 
 # Cache the encoding at module load — tiktoken.get_encoding is not free
 # and the tokens endpoint may be called repeatedly as the user switches
@@ -428,6 +436,102 @@ def register_api_routes(
                 "model_hint": _TOKEN_MODEL_HINT,
                 "token_count": len(tokens),
                 "tokens": tokens,
+            }
+        )
+
+    @mcp.custom_route("/health", methods=["GET"], name="api_health")
+    async def get_health(request: Request) -> JSONResponse:
+        """Operational health endpoint. Bypasses bearer auth.
+
+        Returns three blocks:
+
+        - `ingestion`: corpus stats (total/last-7d/last-30d counts,
+          by source type, avg words/chunks, last ingestion timestamp,
+          per-table row counts).
+        - `queries`: per-query-type counts and p50/p95/p99 latency,
+          plus server uptime and start timestamp.
+        - `status`: per-component check list (sqlite, chromadb,
+          anthropic, openai) plus the worst-of rollup.
+
+        Most-frequent search terms are deliberately NOT exposed —
+        they'd leak what the user was curious about and `/health`
+        is unauthenticated on loopback-only deployments. The query
+        stats block carries counts-by-type only.
+        """
+        services = services_getter()
+        if services is None:
+            return JSONResponse(
+                {
+                    "status": "error",
+                    "message": "Server not initialized",
+                },
+                status_code=503,
+            )
+
+        query_svc: QueryService = services["query"]
+        config = services.get("config")
+        stats_collector = services.get("stats")
+
+        # Ingestion stats block — pure SQL aggregation.
+        try:
+            ingestion = query_svc._repo.get_ingestion_stats(
+                now=datetime.now(UTC)
+            )
+            ingestion_dict: dict[str, Any] = asdict(ingestion)
+        except sqlite3.Error as e:
+            log.warning("GET /health — ingestion stats failed: %s", e)
+            ingestion_dict = {"error": str(e)}
+
+        # Query stats block — from the in-memory collector.
+        if stats_collector is not None:
+            snap = stats_collector.snapshot()
+            queries_dict: dict[str, Any] = {
+                "total_queries": snap.total_queries,
+                "uptime_seconds": snap.uptime_seconds,
+                "started_at": snap.started_at,
+                "by_type": {
+                    name: {
+                        "count": ts.count,
+                        "latency": asdict(ts.latency),
+                    }
+                    for name, ts in snap.by_type.items()
+                },
+            }
+        else:
+            queries_dict = {
+                "total_queries": 0,
+                "uptime_seconds": 0.0,
+                "started_at": None,
+                "by_type": {},
+            }
+
+        # Liveness checks. Each is independent and returns a
+        # ComponentCheck so the overall rollup can be computed at the end.
+        checks = [
+            check_sqlite(query_svc._repo._conn),
+            check_chromadb(query_svc._vector_store),
+        ]
+        if config is not None:
+            checks.append(
+                check_api_key("anthropic", config.anthropic_api_key)
+            )
+            checks.append(
+                check_api_key("openai", config.openai_api_key)
+            )
+
+        status = overall_status(checks)
+        log.info(
+            "GET /health — status=%s total_queries=%d total_entries=%s",
+            status,
+            queries_dict.get("total_queries", 0),
+            ingestion_dict.get("total_entries", "n/a"),
+        )
+        return JSONResponse(
+            {
+                "status": status,
+                "checks": [asdict(c) for c in checks],
+                "ingestion": ingestion_dict,
+                "queries": queries_dict,
             }
         )
 

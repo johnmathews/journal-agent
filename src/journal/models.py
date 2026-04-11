@@ -47,6 +47,27 @@ class Statistics:
 
 
 @dataclass
+class IngestionStats:
+    """Operational stats about the ingestion corpus, used by `/health`.
+
+    All "last N days" windows are inclusive of the current day. Row
+    counts are a mapping of table name → row count so the endpoint
+    can surface schema growth without hardcoding a list on the
+    caller side.
+    """
+
+    total_entries: int
+    entries_last_7d: int
+    entries_last_30d: int
+    by_source_type: dict[str, int]
+    avg_words_per_entry: float
+    avg_chunks_per_entry: float
+    last_ingestion_at: str | None
+    total_chunks: int
+    row_counts: dict[str, int]
+
+
+@dataclass
 class MoodTrend:
     period: str
     dimension: str

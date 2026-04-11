@@ -2,9 +2,18 @@
 
 import logging
 import sqlite3
+from datetime import datetime
 from typing import Protocol, runtime_checkable
 
-from journal.models import ChunkSpan, Entry, EntryPage, MoodTrend, Statistics, TopicFrequency
+from journal.models import (
+    ChunkSpan,
+    Entry,
+    EntryPage,
+    IngestionStats,
+    MoodTrend,
+    Statistics,
+    TopicFrequency,
+)
 
 log = logging.getLogger(__name__)
 
@@ -90,6 +99,8 @@ class EntryRepository(Protocol):
     def count_entries(
         self, start_date: str | None = None, end_date: str | None = None
     ) -> int: ...
+
+    def get_ingestion_stats(self, now: datetime) -> IngestionStats: ...
 
     def get_page_count(self, entry_id: int) -> int: ...
 
@@ -522,6 +533,89 @@ class SQLiteEntryRepository:
             (entry_id,),
         ).fetchone()
         return row["cnt"]
+
+    # Fixed set of tables surfaced in `get_ingestion_stats().row_counts`.
+    # Kept as an explicit contract so `/health` output is stable across
+    # schema additions — when a new migration adds a table, add it here
+    # deliberately rather than having it silently appear.
+    _HEALTH_ROW_COUNT_TABLES: tuple[str, ...] = (
+        "entries",
+        "entry_pages",
+        "entry_chunks",
+        "mood_scores",
+        "source_files",
+        "entities",
+        "entity_aliases",
+        "entity_mentions",
+        "entity_relationships",
+    )
+
+    def get_ingestion_stats(self, now: datetime) -> IngestionStats:
+        """Aggregate corpus stats for the `/health` endpoint.
+
+        `now` is injected rather than read from `datetime.now()` so
+        tests can control the clock and assert on the 7d/30d windows
+        deterministically. Windows are computed on `entry_date`, which
+        is stored as a `YYYY-MM-DD` string — date arithmetic in Python
+        is simpler and more portable than SQLite `date('now', '-7 days')`
+        would be.
+        """
+        from datetime import timedelta
+
+        cutoff_7d = (now.date() - timedelta(days=7)).isoformat()
+        cutoff_30d = (now.date() - timedelta(days=30)).isoformat()
+
+        total_row = self._conn.execute(
+            "SELECT COUNT(*) AS cnt, "
+            "COALESCE(AVG(word_count), 0.0) AS avg_words, "
+            "COALESCE(AVG(chunk_count), 0.0) AS avg_chunks, "
+            "MAX(created_at) AS last_ingest "
+            "FROM entries"
+        ).fetchone()
+
+        last_7d = self._conn.execute(
+            "SELECT COUNT(*) AS cnt FROM entries WHERE entry_date >= ?",
+            (cutoff_7d,),
+        ).fetchone()["cnt"]
+        last_30d = self._conn.execute(
+            "SELECT COUNT(*) AS cnt FROM entries WHERE entry_date >= ?",
+            (cutoff_30d,),
+        ).fetchone()["cnt"]
+
+        by_source: dict[str, int] = {}
+        for row in self._conn.execute(
+            "SELECT source_type, COUNT(*) AS cnt FROM entries "
+            "GROUP BY source_type"
+        ).fetchall():
+            by_source[row["source_type"]] = row["cnt"]
+
+        total_chunks_row = self._conn.execute(
+            "SELECT COALESCE(SUM(chunk_count), 0) AS total FROM entries"
+        ).fetchone()
+        total_chunks = int(total_chunks_row["total"] or 0)
+
+        row_counts: dict[str, int] = {}
+        for table in self._HEALTH_ROW_COUNT_TABLES:
+            # Table names come from a hardcoded tuple — not user input —
+            # so interpolation here is safe. SQLite rejects placeholders
+            # for identifiers, so a PRAGMA or prepared statement would
+            # not work even if we wanted one.
+            cnt_row = self._conn.execute(
+                f"SELECT COUNT(*) AS cnt FROM {table}"
+            ).fetchone()
+            row_counts[table] = int(cnt_row["cnt"])
+
+        return IngestionStats(
+            total_entries=int(total_row["cnt"]),
+            entries_last_7d=int(last_7d),
+            entries_last_30d=int(last_30d),
+            by_source_type=by_source,
+            avg_words_per_entry=round(float(total_row["avg_words"]), 2),
+            avg_chunks_per_entry=round(float(total_row["avg_chunks"]), 2),
+            last_ingestion_at=total_row["last_ingest"],
+            total_chunks=total_chunks,
+            row_counts=row_counts,
+        )
 
     def get_topic_frequency(
         self, topic: str, start_date: str | None = None, end_date: str | None = None

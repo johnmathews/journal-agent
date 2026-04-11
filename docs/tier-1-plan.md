@@ -148,60 +148,58 @@ pick up the coding tracks while Anthropic is processing.
 
 ---
 
-### Item 2 — `/health` endpoint `[server]`
+### Item 2 — `/health` endpoint `[server]` — ✅ shipped 2026-04-11
 
-Backend-only. Builds two new things plus a route.
+Backend-only. See `journal/260411-health-endpoint.md` for the
+session notes and `docs/api.md` for the endpoint contract.
 
-- **T1.2.a** `[M]` — **In-process stats collector.** New module,
-  probably `src/journal/services/stats.py`. Public surface:
-  ```python
-  class StatsCollector(Protocol):
-      def record_query(self, query_type: str, latency_ms: float) -> None: ...
-      def snapshot(self) -> StatsSnapshot: ...
-  ```
-  Concrete implementation keeps per-query-type counts and a
-  lightweight latency histogram (HDR histogram would be overkill;
-  just a sorted bounded buffer of the last N=1000 durations per
-  type so p50/p95/p99 computation is O(log n) on snapshot).
-  Wrapped transparently around `QueryService` methods — the
-  service accepts an optional `stats` dependency and records on
-  every method call. Zero-overhead when `stats=None`.
-  Tests: unit tests for histogram correctness, percentile edge
-  cases, thread safety of the counter.
-- **T1.2.b** `[S]` — **Ingestion stats aggregator.** New repository
-  method `get_ingestion_stats(now: datetime) -> IngestionStats`
-  that returns a dataclass with total / last-7d / last-30d counts
-  by source type, average word count, average chunk count,
-  average tokens-per-chunk, last ingestion timestamp, table row
-  counts. Pure SQL aggregation; tests mock the clock.
-- **T1.2.c** `[S]` — **Provider liveness checks.** New module
-  `src/journal/services/liveness.py` with per-provider ping
-  functions:
-  1. SQLite: `SELECT 1` through the connection.
-  2. ChromaDB: `collection.count()`.
-  3. Anthropic: **do not** burn a real token — just check
-     `api_key` is set, valid length, and optionally verify the
-     client constructs without error.
-  4. OpenAI: same non-burning check for the embeddings provider.
-  Each returns `(name, status, detail)`. Overall status is the
-  worst of the components.
-- **T1.2.d** `[S]` — **Route.** `GET /health` registered via
-  `mcp.custom_route` on the MCP server, bearer-authenticated (the
-  existing middleware already covers `/health` if we add it
-  under the same mount — verify, don't assume). Returns a JSON
-  envelope combining snapshots from T1.2.a, T1.2.b, and T1.2.c.
-- **T1.2.e** `[S]` — **Dev CLI surface.** `journal health` as a
-  thin CLI wrapper that prints the same payload, for scripted
-  use and for sanity checks during development.
-- **T1.2.f** `[M]` — **Tests for the route.** Bearer auth
-  positive/negative, payload schema, status=degraded when a
-  component ping fails (use a fake provider that raises).
+- **T1.2.a** `[M]` ✅ **In-process stats collector.** Shipped as
+  `src/journal/services/stats.py`. `InMemoryStatsCollector` has
+  bounded per-type `deque(maxlen=1000)` of recent latency
+  samples, exact counters, `threading.Lock`-protected record +
+  snapshot, nearest-rank p50/p95/p99 percentiles computed on
+  snapshot. Wired into `QueryService` behind an optional
+  `stats: StatsCollector | None = None` dependency with a
+  `_timed` helper that is a pure passthrough when `stats=None`.
+- **T1.2.b** `[S]` ✅ **Ingestion stats aggregator.** Shipped as
+  `SQLiteEntryRepository.get_ingestion_stats(now)` returning an
+  `IngestionStats` dataclass. Window cutoffs (`last_7d`,
+  `last_30d`) are computed in Python from the injected `now`
+  parameter so the tests can drive the clock deterministically.
+  Row counts surface from a hardcoded `_HEALTH_ROW_COUNT_TABLES`
+  tuple rather than dynamic enumeration, so the `/health`
+  contract is stable across schema additions.
+- **T1.2.c** `[S]` ✅ **Provider liveness checks.** Shipped as
+  `src/journal/services/liveness.py` with `check_sqlite`,
+  `check_chromadb`, `check_api_key`, and `overall_status`. API
+  key checks never burn tokens — they only verify presence and
+  plausible length and return `degraded` (not `error`) for
+  missing keys, because the *server* is still up.
+- **T1.2.d** `[S]` ✅ **Route.** `GET /health` in `api.py`,
+  registered via `mcp.custom_route`. **Not** bearer-authed —
+  `BearerTokenMiddleware` gained an `exempt_paths` kwarg and
+  `main()` passes `{"/health"}`. Decision rationale: the server
+  binds to loopback only, so any caller that can reach
+  `/health` already has a shell on the box, and the payload is
+  scrubbed of anything that would leak query content.
+- **T1.2.e** `[S]` ✅ **Dev CLI surface.** `journal health
+  [--compact]` subcommand shipped. Builds services locally and
+  prints the same JSON payload as the HTTP endpoint. Exits
+  non-zero when the rolled-up status is `error`.
+- **T1.2.f** `[M]` ✅ **Tests.** 44 new tests across stats (10),
+  liveness (12), ingestion stats (4), query service stats
+  integration (4), auth exempt paths (5), `/health` route (6),
+  and CLI (3). All pass. Ruff clean.
 
-**Open questions** (see bottom of doc for the full list):
-- Should `/health` be bearer-authed? Recommendation: yes.
-- Do we want Prometheus text format as an alternate content-type?
-  Recommendation: no, not yet. Ship JSON only; add Prometheus if
-  real monitoring consumers ever appear.
+**Open questions — resolved:**
+
+1. Should `/health` be bearer-authed? **No.** See rationale in
+   T1.2.d and the privacy guardrails in the payload (no search
+   terms, counts-only query stats).
+2. Prometheus text format as an alternate content-type? **Not
+   shipped.** JSON only. Revisit if a real monitoring consumer
+   appears.
+3. Most-frequent search terms? **Not shipped** — privacy concern.
 
 ---
 

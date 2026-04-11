@@ -458,6 +458,71 @@ def cmd_stats(args, config):
     print(f"  Entries per month:      {stats.entries_per_month:.1f}")
 
 
+def cmd_health(args, config):
+    """Print the same payload served by the `/health` HTTP endpoint.
+
+    Builds the services locally, runs the ingestion stats query
+    and all liveness checks, and emits the result as pretty JSON
+    (default) or a compact single-line JSON blob (`--compact`).
+
+    Exit code is 0 when the overall status is `ok` or `degraded`,
+    non-zero when it is `error`. Docker / cron consumers can pipe
+    the output to `jq` or `grep` without caring about the format.
+    """
+    import json
+    from dataclasses import asdict
+    from datetime import UTC, datetime
+
+    from journal.services.liveness import (
+        check_api_key,
+        check_chromadb,
+        check_sqlite,
+        overall_status,
+    )
+
+    conn = get_connection(config.db_path)
+    run_migrations(conn)
+    repo = SQLiteEntryRepository(conn)
+    vector_store = ChromaVectorStore(
+        host=config.chromadb_host,
+        port=config.chromadb_port,
+        collection_name=config.chromadb_collection,
+    )
+
+    ingestion = repo.get_ingestion_stats(now=datetime.now(UTC))
+    checks = [
+        check_sqlite(conn),
+        check_chromadb(vector_store),
+        check_api_key("anthropic", config.anthropic_api_key),
+        check_api_key("openai", config.openai_api_key),
+    ]
+    status = overall_status(checks)
+
+    payload = {
+        "status": status,
+        "checks": [asdict(c) for c in checks],
+        "ingestion": asdict(ingestion),
+        # The CLI builds its services fresh, so there are no query
+        # stats to show — the in-process stats collector is only
+        # populated by the long-running server. Surface an explicit
+        # zero rather than pretending.
+        "queries": {
+            "total_queries": 0,
+            "uptime_seconds": 0.0,
+            "started_at": None,
+            "by_type": {},
+        },
+    }
+
+    if args.compact:
+        print(json.dumps(payload, separators=(",", ":")))
+    else:
+        print(json.dumps(payload, indent=2, sort_keys=True))
+
+    if status == "error":
+        sys.exit(2)
+
+
 def main():
     parser = argparse.ArgumentParser(
         prog="journal",
@@ -496,6 +561,17 @@ def main():
     p_stats = subparsers.add_parser("stats", help="Show statistics")
     p_stats.add_argument("--start-date", help="Filter from date")
     p_stats.add_argument("--end-date", help="Filter until date")
+
+    # health
+    p_health = subparsers.add_parser(
+        "health",
+        help="Print the operational health payload (same shape as GET /health)",
+    )
+    p_health.add_argument(
+        "--compact",
+        action="store_true",
+        help="Emit compact single-line JSON instead of the default indented form",
+    )
 
     # backfill-chunks
     subparsers.add_parser(
@@ -555,6 +631,7 @@ def main():
         "search": cmd_search,
         "list": cmd_list,
         "stats": cmd_stats,
+        "health": cmd_health,
         "backfill-chunks": cmd_backfill_chunks,
         "rechunk": cmd_rechunk,
         "eval-chunking": cmd_eval_chunking,

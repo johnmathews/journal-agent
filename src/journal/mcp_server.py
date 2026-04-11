@@ -88,6 +88,13 @@ def _init_services() -> dict:
         max_tokens=config.entity_extraction_max_tokens,
     )
 
+    # One in-process stats collector for the lifetime of the server.
+    # `QueryService` methods record a sample on every call; `/health`
+    # reads a snapshot on demand.
+    from journal.services.stats import InMemoryStatsCollector
+
+    stats_collector = InMemoryStatsCollector()
+
     _services = {
         "ingestion": IngestionService(
             repository=repo,
@@ -103,6 +110,7 @@ def _init_services() -> dict:
             repository=repo,
             vector_store=vector_store,
             embeddings_provider=embeddings,
+            stats=stats_collector,
         ),
         "entity_store": entity_store,
         "entity_extraction": EntityExtractionService(
@@ -113,6 +121,11 @@ def _init_services() -> dict:
             author_name=config.journal_author_name,
             dedup_similarity_threshold=config.entity_dedup_similarity_threshold,
         ),
+        # `/health` reads these to build its payload. Keeping them on
+        # the services dict avoids a separate getter and matches the
+        # existing lookup style the api.py routes use.
+        "config": config,
+        "stats": stats_collector,
     }
 
     entry_count = repo.count_entries()
@@ -825,8 +838,19 @@ def main() -> None:
             allow_headers=["Content-Type", "Authorization"],
         )
 
-    app.add_middleware(BearerTokenMiddleware, token=config.api_bearer_token)
-    log.info("Bearer token auth middleware installed")
+    # `/health` is intentionally unauthenticated. The server binds to
+    # loopback only (see docs/security.md), so any caller that can reach
+    # it already has a shell on the box; the field we'd worry about
+    # leaking — most-frequent search terms — is deliberately not
+    # surfaced in the payload. See docs/api.md.
+    app.add_middleware(
+        BearerTokenMiddleware,
+        token=config.api_bearer_token,
+        exempt_paths={"/health"},
+    )
+    log.info(
+        "Bearer token auth middleware installed (exempt paths: /health)"
+    )
 
     async def _serve() -> None:
         uvi_config = uvicorn.Config(

@@ -36,15 +36,31 @@ class BearerTokenMiddleware(BaseHTTPMiddleware):
     `mcp_server.main()`, which the tests do not invoke. Tests that need
     to exercise the auth path install the middleware explicitly on a
     fresh test app (see `tests/test_auth.py`).
+
+    An optional `exempt_paths` set lets specific paths bypass auth
+    entirely — used for `/health` so a loopback operator can poll
+    the endpoint without sharing the bearer token with whatever
+    external process (docker healthcheck, shell cron, etc.) is
+    doing the polling. The server binds to loopback only (see
+    `docs/security.md`), so any caller that can reach `/health`
+    already has a shell on the box. Exemption is path-matched
+    exactly, not by prefix, to avoid accidentally exempting
+    `/health/private` or similar.
     """
 
-    def __init__(self, app: object, token: str) -> None:
+    def __init__(
+        self,
+        app: object,
+        token: str,
+        exempt_paths: set[str] | None = None,
+    ) -> None:
         super().__init__(app)  # type: ignore[arg-type]
         if not token:
             raise ValueError(
                 "BearerTokenMiddleware requires a non-empty token"
             )
         self._token = token
+        self._exempt_paths: frozenset[str] = frozenset(exempt_paths or ())
 
     async def dispatch(
         self,
@@ -56,6 +72,11 @@ class BearerTokenMiddleware(BaseHTTPMiddleware):
         # does not need a token; forcing auth on preflight would break
         # the webapp before it ever gets to the real request.
         if request.method == "OPTIONS":
+            return await call_next(request)
+
+        # Exact-path exemptions (e.g. `/health`). Note: we match on
+        # `request.url.path` so query strings do not affect the check.
+        if request.url.path in self._exempt_paths:
             return await call_next(request)
 
         header = request.headers.get("authorization", "")
