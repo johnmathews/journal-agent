@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import logging
+import sqlite3
 from dataclasses import asdict
 from typing import TYPE_CHECKING, Any
 
@@ -124,6 +125,27 @@ def _entry_summary(entry: Any, page_count: int = 0) -> dict[str, Any]:
         "chunk_count": entry.chunk_count,
         "page_count": page_count,
         "created_at": entry.created_at,
+    }
+
+
+def _chunk_match_dict(cm: Any) -> dict[str, Any]:
+    return {
+        "text": cm.text,
+        "score": cm.score,
+        "chunk_index": cm.chunk_index,
+        "char_start": cm.char_start,
+        "char_end": cm.char_end,
+    }
+
+
+def _search_result_dict(result: Any) -> dict[str, Any]:
+    return {
+        "entry_id": result.entry_id,
+        "entry_date": result.entry_date,
+        "text": result.text,
+        "score": result.score,
+        "snippet": result.snippet,
+        "matching_chunks": [_chunk_match_dict(c) for c in result.matching_chunks],
     }
 
 
@@ -426,6 +448,109 @@ def register_api_routes(
         stats = query_svc.get_statistics(start_date, end_date)
         log.info("GET /api/stats — %d entries, %d words", stats.total_entries, stats.total_words)
         return JSONResponse(asdict(stats))
+
+    @mcp.custom_route("/api/search", methods=["GET"], name="api_search")
+    async def search(request: Request) -> JSONResponse:
+        """Full-text search across journal entries.
+
+        Two modes, both bearer-authenticated via the app-wide auth
+        middleware:
+
+        - `semantic` (default): vector similarity over persisted chunk
+          embeddings. Each result's `matching_chunks` list carries
+          `char_start`/`char_end`/`chunk_index` so the client can
+          render in-place highlights.
+        - `keyword`: SQLite FTS5 over `final_text`. Each result has a
+          `snippet` string with `\\x02`/`\\x03` control chars wrapping
+          matched terms; `matching_chunks` is empty.
+        """
+        services = services_getter()
+        if services is None:
+            return JSONResponse(
+                {"error": "Server not initialized"}, status_code=503
+            )
+
+        query_svc: QueryService = services["query"]
+
+        q = (request.query_params.get("q") or "").strip()
+        if not q:
+            return JSONResponse(
+                {
+                    "error": "missing_query",
+                    "message": "'q' query parameter is required",
+                },
+                status_code=400,
+            )
+
+        mode = request.query_params.get("mode", "semantic")
+        if mode not in ("semantic", "keyword"):
+            return JSONResponse(
+                {
+                    "error": "invalid_mode",
+                    "message": "'mode' must be 'semantic' or 'keyword'",
+                },
+                status_code=400,
+            )
+
+        start_date = request.query_params.get("start_date")
+        end_date = request.query_params.get("end_date")
+
+        try:
+            limit = min(max(int(request.query_params.get("limit", "10")), 1), 50)
+        except ValueError:
+            limit = 10
+        try:
+            offset = max(int(request.query_params.get("offset", "0")), 0)
+        except ValueError:
+            offset = 0
+
+        try:
+            if mode == "semantic":
+                results = query_svc.search_entries(
+                    query=q,
+                    start_date=start_date,
+                    end_date=end_date,
+                    limit=limit,
+                    offset=offset,
+                )
+            else:
+                results = query_svc.keyword_search(
+                    query=q,
+                    start_date=start_date,
+                    end_date=end_date,
+                    limit=limit,
+                    offset=offset,
+                )
+        except sqlite3.OperationalError as e:
+            # FTS5 raises this on malformed queries (unterminated
+            # quotes, bare operators like `AND`, etc.). Surface as a
+            # 400 rather than a 500 so clients can tell the user.
+            log.info(
+                "GET /api/search — invalid FTS5 query %r: %s", q, e
+            )
+            return JSONResponse(
+                {
+                    "error": "invalid_query",
+                    "message": f"Query could not be parsed: {e}",
+                },
+                status_code=400,
+            )
+
+        log.info(
+            "GET /api/search — mode=%s q=%r returned %d results",
+            mode,
+            q,
+            len(results),
+        )
+        return JSONResponse(
+            {
+                "query": q,
+                "mode": mode,
+                "limit": limit,
+                "offset": offset,
+                "items": [_search_result_dict(r) for r in results],
+            }
+        )
 
     # -----------------------------------------------------------------
     # Entity routes

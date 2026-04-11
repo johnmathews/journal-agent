@@ -325,27 +325,29 @@ is complete.
 
 ### Item 4 — Search UI `[both]`
 
-- **T1.4.a** `[S]` — **Backend: expose FTS5 search via service.**
-  Thin wrapper on `QueryService`:
-  ```python
-  def keyword_search(
-      self, query: str, start_date, end_date, limit, offset
-  ) -> list[SearchResult]: ...
-  ```
-  Delegates to `repository.search_text()`, wraps results in
-  `SearchResult` with `matching_chunks=[]` (keyword search doesn't
-  produce per-chunk scores — the entry itself is the match).
-- **T1.4.b** `[M]` — **Backend: extend `SearchResult` with chunk
-  offsets.** Current `ChunkMatch` carries `text` and `score` but
-  not `(char_start, char_end)`. For the webapp to render
-  highlights without a second round-trip, add offsets. Source:
-  `entry_chunks` table already stores them — just JOIN in
-  `search_entries()` after the vector store call and fill the
-  offsets in.
-- **T1.4.c** `[S]` — **Backend: REST endpoint.** `GET /api/search`
-  with params `q`, `mode` (`semantic`|`keyword`, default
-  `semantic`), `from`, `to`, `limit`, `offset`. Returns the
-  `SearchResult` list with offsets.
+**Backend shipped 2026-04-11** — see
+`journal/260411-search-backend.md`. T1.4.a/b/c and their tests are
+done; frontend units T1.4.d/e/f remain for a later webapp session.
+
+- **T1.4.a** `[S]` ✅ **Backend: expose FTS5 search via service.**
+  `QueryService.keyword_search()` delegates to a new
+  `EntryRepository.search_text_with_snippets()` method. Results
+  carry a `snippet` string (FTS5 `snippet()` output with
+  `\x02`/`\x03` marker chars wrapping matched terms) and leave
+  `matching_chunks=[]`. Decided to add the snippet generator per
+  open question 8 — response shape is independent of frontend
+  markup choice.
+- **T1.4.b** `[M]` ✅ **Backend: extend `SearchResult` with chunk
+  offsets.** `ChunkMatch` now carries optional `chunk_index`,
+  `char_start`, `char_end` fields (all `None` for legacy entries
+  without persisted chunks). `QueryService.search_entries()`
+  enriches each match by JOINing `entry_chunks` on `chunk_index`
+  from Chroma metadata.
+- **T1.4.c** `[S]` ✅ **Backend: REST endpoint.** `GET /api/search`
+  shipped with params `q`, `mode` (default `semantic` per open
+  question 7), `start_date`, `end_date`, `limit` (clamped
+  `[1, 50]`), `offset`. Bearer-authenticated via the existing
+  middleware. Full contract in `docs/api.md`.
 - **T1.4.d** `[M]` — **Webapp: `/search` route and SearchView
   shell.** New route, input box, mode toggle (radio),
   date-range filter (reuse whatever EntryListView uses, or

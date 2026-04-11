@@ -171,27 +171,28 @@ doesn't silently burn tokens on users who don't want it.
 
 ---
 
-### 4. Search UI `[both]`
+### 4. Search UI `[both]` — backend shipped 2026-04-11
 
-Dedicated webapp `/search` view. The backend already has
-`QueryService.search_entries()` (semantic) and `search_text()`
-(FTS5 keyword) — this is mostly a webapp task plus two thin REST
-wrappers.
+Dedicated webapp `/search` view.
 
-**Frontend**
+**Backend — shipped 2026-04-11** (see
+`journal/260411-search-backend.md`):
+1. ✅ `GET /api/search?q=...&mode=semantic|keyword&start_date=...&end_date=...&limit=...&offset=...`
+2. ✅ `ChunkMatch` now carries `chunk_index`, `char_start`,
+   `char_end` for semantic hits so the frontend can render chunk
+   highlights without a second round-trip.
+3. ✅ Keyword mode returns FTS5 `snippet()` output with `\x02`/`\x03`
+   marker chars wrapping matched terms.
+
+**Frontend — still outstanding**
 1. Text input + mode toggle (semantic / keyword)
 2. Results list with relevance scores
-3. Matching chunk highlights per result (the chunker already emits
-   char offsets — reuse the overlay highlight mechanism from
-   `EntryDetailView.vue`)
+3. Matching chunk highlights per result (reuse the overlay
+   highlight mechanism from `EntryDetailView.vue` — the backend
+   now serves char offsets directly)
 4. Date range filter
 5. Click-through to `EntryDetailView` with the matching chunk
    pre-scrolled into view
-
-**Backend endpoints**
-1. `GET /api/search?q=...&mode=semantic|keyword&from=...&to=...&limit=20`
-2. Return chunk highlights with char offsets so the frontend can
-   render them without re-fetching the entry
 
 **Source:** `journal-webapp/docs/future-features.md` "Phase 3: Search UI".
 

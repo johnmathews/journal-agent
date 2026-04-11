@@ -79,21 +79,42 @@ class QueryService:
 
         # Group chunk matches by entry_id, preserving the order from the
         # vector store (which is already sorted by ascending distance, i.e.
-        # descending similarity).
+        # descending similarity). Track the chunk_index from Chroma
+        # metadata so we can JOIN back to `entry_chunks` for char offsets
+        # after the grouping pass.
         chunks_by_entry: dict[int, list[ChunkMatch]] = {}
         for vr in vector_results:
+            chunk_index = vr.metadata.get("chunk_index")
             chunks_by_entry.setdefault(vr.entry_id, []).append(
-                ChunkMatch(text=vr.chunk_text, score=1.0 - vr.distance)
+                ChunkMatch(
+                    text=vr.chunk_text,
+                    score=1.0 - vr.distance,
+                    chunk_index=chunk_index,
+                )
             )
 
         # Build one SearchResult per entry, enriching with the full parent
-        # text. Entries whose row has been deleted from SQLite (stale
-        # chromadb data) are skipped.
+        # text and char offsets pulled from `entry_chunks` by chunk_index.
+        # Entries whose row has been deleted from SQLite (stale chromadb
+        # data) are skipped. Entries that were ingested before migration
+        # 0003 have no persisted chunks — we still return them but leave
+        # char_start/char_end as None on each ChunkMatch.
         results: list[SearchResult] = []
         for entry_id, chunks in chunks_by_entry.items():
             entry = self._repo.get_entry(entry_id)
             if entry is None:
                 continue
+
+            persisted_chunks = self._repo.get_chunks(entry_id)
+            if persisted_chunks:
+                for cm in chunks:
+                    if cm.chunk_index is None:
+                        continue
+                    if 0 <= cm.chunk_index < len(persisted_chunks):
+                        span = persisted_chunks[cm.chunk_index]
+                        cm.char_start = span.char_start
+                        cm.char_end = span.char_end
+
             # Sort chunks within the entry by score descending.
             chunks.sort(key=lambda c: c.score, reverse=True)
             results.append(
@@ -110,6 +131,58 @@ class QueryService:
         # pagination.
         results.sort(key=lambda r: r.score, reverse=True)
         return results[offset : offset + limit]
+
+    def keyword_search(
+        self,
+        query: str,
+        start_date: str | None = None,
+        end_date: str | None = None,
+        limit: int = 10,
+        offset: int = 0,
+    ) -> list[SearchResult]:
+        """FTS5 keyword search across journal entries.
+
+        Thin wrapper on `EntryRepository.search_text_with_snippets`.
+        Returns one `SearchResult` per matching entry, with `snippet`
+        populated (FTS5 `snippet()` output wrapping matched terms in
+        `\\x02`/`\\x03`) and `matching_chunks` intentionally empty —
+        FTS5 does not produce per-chunk scores.
+
+        The per-entry `score` is derived from the result's rank in the
+        FTS5 ORDER BY (1.0 for the best hit, decaying linearly across
+        the page). This is not a similarity score and is not comparable
+        to semantic mode scores — it only keeps the list ordering
+        stable when the frontend re-sorts.
+        """
+        log.info(
+            "Keyword search: '%s' (limit=%d, offset=%d)", query, limit, offset
+        )
+
+        rows = self._repo.search_text_with_snippets(
+            query=query,
+            start_date=start_date,
+            end_date=end_date,
+            limit=limit,
+            offset=offset,
+        )
+
+        results: list[SearchResult] = []
+        for rank, (entry, snippet) in enumerate(rows):
+            # Linear decay from 1.0 so clients that sort by `score`
+            # preserve the FTS5 rank ordering. The exact decay is not
+            # meaningful — only the ordering is.
+            score = 1.0 - (rank / max(len(rows), 1))
+            results.append(
+                SearchResult(
+                    entry_id=entry.id,
+                    entry_date=entry.entry_date,
+                    text=entry.final_text or entry.raw_text,
+                    score=score,
+                    matching_chunks=[],
+                    snippet=snippet,
+                )
+            )
+        return results
 
     def get_entries_by_date(self, date: str) -> list[Entry]:
         return self._repo.get_entries_by_date(date)

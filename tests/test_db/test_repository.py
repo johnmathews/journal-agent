@@ -90,6 +90,72 @@ class TestFTS:
         assert len(results) == 0
 
 
+class TestFTSSnippets:
+    def test_search_text_with_snippets_wraps_matches(self, repo):
+        repo.create_entry(
+            "2026-03-22",
+            "ocr",
+            "Walked through Vienna with Atlas and later met Robyn.",
+            10,
+        )
+        results = repo.search_text_with_snippets("Vienna")
+        assert len(results) == 1
+        entry, snippet = results[0]
+        assert entry.entry_date == "2026-03-22"
+        # STX/ETX should wrap the matched token (case-insensitive FTS5).
+        assert "\x02" in snippet
+        assert "\x03" in snippet
+        # Extracting the wrapped segment should equal the matched term.
+        start = snippet.index("\x02")
+        end = snippet.index("\x03")
+        assert snippet[start + 1 : end].lower() == "vienna"
+
+    def test_search_text_with_snippets_date_filter(self, repo):
+        repo.create_entry("2026-01-15", "ocr", "Vienna in January", 3)
+        repo.create_entry("2026-03-15", "ocr", "Vienna in March", 3)
+
+        results = repo.search_text_with_snippets(
+            "Vienna", start_date="2026-03-01"
+        )
+        assert len(results) == 1
+        entry, _ = results[0]
+        assert entry.entry_date == "2026-03-15"
+
+    def test_search_text_with_snippets_pagination(self, repo):
+        for i in range(5):
+            repo.create_entry(
+                f"2026-03-{10 + i:02d}",
+                "ocr",
+                f"Entry number {i} mentions Atlas in some form.",
+                8,
+            )
+        page_one = repo.search_text_with_snippets("Atlas", limit=2, offset=0)
+        page_two = repo.search_text_with_snippets("Atlas", limit=2, offset=2)
+        assert len(page_one) == 2
+        assert len(page_two) == 2
+        ids_one = {e.id for e, _ in page_one}
+        ids_two = {e.id for e, _ in page_two}
+        assert ids_one.isdisjoint(ids_two)
+
+    def test_search_text_with_snippets_no_match(self, repo):
+        repo.create_entry("2026-03-22", "ocr", "Nothing relevant here", 3)
+        results = repo.search_text_with_snippets("Vienna")
+        assert results == []
+
+    def test_count_text_matches(self, repo):
+        repo.create_entry("2026-03-01", "ocr", "Atlas the dog", 3)
+        repo.create_entry("2026-03-02", "ocr", "Atlas again", 2)
+        repo.create_entry("2026-03-03", "ocr", "No match here", 3)
+        assert repo.count_text_matches("Atlas") == 2
+
+    def test_count_text_matches_with_date_filter(self, repo):
+        repo.create_entry("2026-01-15", "ocr", "Vienna visit", 2)
+        repo.create_entry("2026-03-15", "ocr", "Vienna trip", 2)
+        assert (
+            repo.count_text_matches("Vienna", start_date="2026-03-01") == 1
+        )
+
+
 class TestStatistics:
     def test_get_statistics(self, repo):
         repo.create_entry("2026-01-15", "ocr", "January entry", 2)

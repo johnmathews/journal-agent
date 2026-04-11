@@ -495,6 +495,217 @@ class TestGetStats:
         assert data["total_words"] == 0
 
 
+class TestSearch:
+    """T1.4.c — GET /api/search endpoint."""
+
+    @pytest.fixture
+    def search_client(
+        self, repo: SQLiteEntryRepository, mock_embeddings: MagicMock
+    ) -> Generator[tuple[TestClient, object]]:
+        """Test client that uses a real InMemoryVectorStore so the
+        semantic path actually returns results. Yields (client, vector_store)
+        so tests can pre-seed the vector store directly."""
+        from mcp.server.fastmcp import FastMCP
+
+        from journal.api import register_api_routes
+        from journal.services.chunking import FixedTokenChunker
+        from journal.vectorstore.store import InMemoryVectorStore
+
+        real_vector_store = InMemoryVectorStore()
+        mock_ocr = MagicMock()
+        mock_transcription = MagicMock()
+        ingestion = IngestionService(
+            repository=repo,
+            vector_store=real_vector_store,
+            ocr_provider=mock_ocr,
+            transcription_provider=mock_transcription,
+            embeddings_provider=mock_embeddings,
+            chunker=FixedTokenChunker(max_tokens=150, overlap_tokens=40),
+        )
+        query = QueryService(
+            repository=repo,
+            vector_store=real_vector_store,
+            embeddings_provider=mock_embeddings,
+        )
+        services = {"ingestion": ingestion, "query": query}
+
+        test_mcp = FastMCP("test-journal")
+        register_api_routes(test_mcp, lambda: services)
+        app = test_mcp.streamable_http_app()
+        with TestClient(app, raise_server_exceptions=False) as tc:
+            yield tc, real_vector_store
+
+    def test_search_missing_query(self, client: TestClient) -> None:
+        response = client.get("/api/search")
+        assert response.status_code == 400
+        assert response.json()["error"] == "missing_query"
+
+    def test_search_empty_query(self, client: TestClient) -> None:
+        response = client.get("/api/search?q=%20%20")
+        assert response.status_code == 400
+        assert response.json()["error"] == "missing_query"
+
+    def test_search_invalid_mode(self, client: TestClient) -> None:
+        response = client.get("/api/search?q=vienna&mode=fuzzy")
+        assert response.status_code == 400
+        assert response.json()["error"] == "invalid_mode"
+
+    def test_search_keyword_returns_snippet(
+        self, client: TestClient, repo: SQLiteEntryRepository
+    ) -> None:
+        repo.create_entry(
+            "2026-03-22",
+            "ocr",
+            "Walked through Vienna with Atlas today.",
+            7,
+        )
+        repo.create_entry(
+            "2026-03-23", "voice", "Stayed home and read", 4
+        )
+        response = client.get("/api/search?q=Vienna&mode=keyword")
+        assert response.status_code == 200
+        data = response.json()
+        assert data["mode"] == "keyword"
+        assert data["query"] == "Vienna"
+        assert len(data["items"]) == 1
+        item = data["items"][0]
+        assert item["entry_date"] == "2026-03-22"
+        assert item["matching_chunks"] == []
+        assert item["snippet"] is not None
+        assert "\u0002" in item["snippet"]
+        assert "\u0003" in item["snippet"]
+
+    def test_search_keyword_date_filter(
+        self, client: TestClient, repo: SQLiteEntryRepository
+    ) -> None:
+        repo.create_entry("2026-01-15", "ocr", "Vienna in January", 3)
+        repo.create_entry("2026-03-15", "ocr", "Vienna in March", 3)
+        response = client.get(
+            "/api/search?q=Vienna&mode=keyword&start_date=2026-03-01"
+        )
+        assert response.status_code == 200
+        data = response.json()
+        assert len(data["items"]) == 1
+        assert data["items"][0]["entry_date"] == "2026-03-15"
+
+    def test_search_keyword_pagination(
+        self, client: TestClient, repo: SQLiteEntryRepository
+    ) -> None:
+        for i in range(5):
+            repo.create_entry(
+                f"2026-03-{10 + i:02d}",
+                "ocr",
+                f"Entry {i} mentions Atlas directly.",
+                5,
+            )
+        page_one = client.get(
+            "/api/search?q=Atlas&mode=keyword&limit=2&offset=0"
+        ).json()
+        page_two = client.get(
+            "/api/search?q=Atlas&mode=keyword&limit=2&offset=2"
+        ).json()
+        assert len(page_one["items"]) == 2
+        assert len(page_two["items"]) == 2
+        ids_one = {i["entry_id"] for i in page_one["items"]}
+        ids_two = {i["entry_id"] for i in page_two["items"]}
+        assert ids_one.isdisjoint(ids_two)
+        assert page_one["offset"] == 0
+        assert page_one["limit"] == 2
+        assert page_two["offset"] == 2
+
+    def test_search_keyword_no_results(self, client: TestClient) -> None:
+        response = client.get("/api/search?q=unicorn&mode=keyword")
+        assert response.status_code == 200
+        assert response.json()["items"] == []
+
+    def test_search_keyword_malformed_query_returns_400(
+        self, client: TestClient, repo: SQLiteEntryRepository
+    ) -> None:
+        """FTS5 parse errors (unterminated quote, bare operators) must
+        surface as a 400, not a 500."""
+        repo.create_entry("2026-03-22", "ocr", "Anything at all", 3)
+        response = client.get('/api/search?q="&mode=keyword')
+        assert response.status_code == 400
+        assert response.json()["error"] == "invalid_query"
+
+    def test_search_limit_clamped(
+        self, client: TestClient, repo: SQLiteEntryRepository
+    ) -> None:
+        repo.create_entry("2026-03-22", "ocr", "Vienna entry", 2)
+        # limit=500 should be clamped to 50; bad ints should fall back to 10.
+        response = client.get("/api/search?q=Vienna&mode=keyword&limit=500")
+        assert response.status_code == 200
+        assert response.json()["limit"] == 50
+
+        response = client.get("/api/search?q=Vienna&mode=keyword&limit=notanint")
+        assert response.status_code == 200
+        assert response.json()["limit"] == 10
+
+    def test_search_semantic_returns_chunk_offsets(
+        self,
+        search_client: tuple[TestClient, object],
+        repo: SQLiteEntryRepository,
+        mock_embeddings: MagicMock,
+    ) -> None:
+        """Semantic search returns matching_chunks with char offsets
+        filled in from entry_chunks."""
+        from journal.models import ChunkSpan
+
+        client, vector_store = search_client
+
+        entry_text = "Walked through Vienna with Atlas today."
+        entry = repo.create_entry("2026-03-22", "ocr", entry_text, 7)
+        repo.replace_chunks(
+            entry.id,
+            [
+                ChunkSpan(
+                    text=entry_text,
+                    char_start=0,
+                    char_end=len(entry_text),
+                    token_count=8,
+                )
+            ],
+        )
+        # Real InMemoryVectorStore — stores chunk_index on metadata.
+        vector_store.add_entry(  # type: ignore[attr-defined]
+            entry_id=entry.id,
+            chunks=[entry_text],
+            embeddings=[[0.1] * 1024],
+            metadata={"entry_date": "2026-03-22"},
+        )
+
+        response = client.get("/api/search?q=vienna&mode=semantic")
+        assert response.status_code == 200
+        data = response.json()
+        assert data["mode"] == "semantic"
+        assert len(data["items"]) == 1
+        item = data["items"][0]
+        assert item["snippet"] is None
+        assert len(item["matching_chunks"]) == 1
+        chunk = item["matching_chunks"][0]
+        assert chunk["chunk_index"] == 0
+        assert chunk["char_start"] == 0
+        assert chunk["char_end"] == len(entry_text)
+
+    def test_search_default_mode_is_semantic(
+        self,
+        search_client: tuple[TestClient, object],
+        repo: SQLiteEntryRepository,
+        mock_embeddings: MagicMock,
+    ) -> None:
+        client, vector_store = search_client
+        repo.create_entry("2026-03-22", "ocr", "Vienna trip", 2)
+        vector_store.add_entry(  # type: ignore[attr-defined]
+            entry_id=1,
+            chunks=["Vienna trip"],
+            embeddings=[[0.1] * 1024],
+            metadata={"entry_date": "2026-03-22"},
+        )
+        response = client.get("/api/search?q=vienna")
+        assert response.status_code == 200
+        assert response.json()["mode"] == "semantic"
+
+
 class TestRepositoryHelpers:
     """Test the new count_entries and get_page_count repository methods."""
 

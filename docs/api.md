@@ -211,6 +211,80 @@ model sees the text.
 }
 ```
 
+### GET /api/search
+
+Full-text search across journal entries. Supports two modes:
+
+- **`semantic`** (default): vector similarity over persisted chunk
+  embeddings. Results are ranked by cosine similarity and each matching
+  chunk carries its character offsets into the parent entry's
+  `final_text` so a client can render in-place highlights without a
+  second round-trip.
+- **`keyword`**: SQLite FTS5 over `final_text`. Ranked by FTS5's `rank`
+  score. Each hit includes a `snippet` string with ASCII `\x02`
+  (start) and `\x03` (end) control characters wrapping the matched
+  terms — the client replaces these with whatever highlight markup it
+  wants (for example `<mark>`).
+
+**Query parameters:**
+
+| Parameter    | Type   | Required | Default    | Description |
+|--------------|--------|----------|------------|-------------|
+| `q`          | string | yes      |            | Search query |
+| `mode`       | string | no       | `semantic` | `semantic` or `keyword` |
+| `start_date` | string | no       |            | Filter from date (ISO 8601) |
+| `end_date`   | string | no       |            | Filter until date (ISO 8601) |
+| `limit`      | int    | no       | 10         | Max entries returned (1–50) |
+| `offset`     | int    | no       | 0          | Pagination offset |
+
+**Response (200):**
+```json
+{
+  "query": "vienna with atlas",
+  "mode": "semantic",
+  "limit": 10,
+  "offset": 0,
+  "items": [
+    {
+      "entry_id": 42,
+      "entry_date": "2026-03-22",
+      "text": "Walked through Vienna with Atlas. Later we met Robyn...",
+      "score": 0.871,
+      "snippet": null,
+      "matching_chunks": [
+        {
+          "text": "Walked through Vienna with Atlas",
+          "score": 0.871,
+          "chunk_index": 0,
+          "char_start": 0,
+          "char_end": 32
+        }
+      ]
+    }
+  ]
+}
+```
+
+**Mode differences:**
+
+- In `semantic` mode, `snippet` is always `null` and `matching_chunks`
+  is populated with one entry per chunk that matched, sorted by score
+  descending. Each chunk has `char_start`/`char_end`/`chunk_index`
+  when the entry has persisted chunks in SQLite (entries ingested
+  before chunk persistence return `null` offsets).
+- In `keyword` mode, `matching_chunks` is an empty list and `snippet`
+  is a string like `"...walked through \x02Vienna\x03 with Atlas..."`.
+  The `score` field carries a small positive float derived from FTS5's
+  `rank` so rows sort by relevance; it is not comparable across modes.
+
+**Error responses:**
+
+- `400` — `q` missing or empty, or `mode` not one of `semantic` /
+  `keyword`
+- `503` — server not initialised
+
+---
+
 ### GET /api/stats
 
 Journal statistics with optional date filtering.

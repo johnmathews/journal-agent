@@ -78,10 +78,24 @@ class ChunkSpan:
 
 @dataclass
 class ChunkMatch:
-    """A single chunk that matched a query, with its relevance score."""
+    """A single chunk that matched a query, with its relevance score.
+
+    `chunk_index` is the chunk's position within its parent entry's
+    chunk list, as stored in `entry_chunks.chunk_index` and in the
+    ChromaDB metadata. `char_start`/`char_end` are offsets into the
+    parent entry's `final_text` (or `raw_text` fallback) — exactly the
+    values stored in `entry_chunks`. All three fields are `None` for
+    legacy entries that were ingested before chunk persistence shipped
+    (migration 0003) and therefore have no `entry_chunks` rows to
+    look up. Clients rendering overlays must be prepared for missing
+    offsets on such entries.
+    """
 
     text: str
     score: float
+    chunk_index: int | None = None
+    char_start: int | None = None
+    char_end: int | None = None
 
 
 @dataclass
@@ -93,6 +107,12 @@ class SearchResult:
     the vector store's similarity cutoff, sorted by score descending.
     `score` is the top (max) chunk score — used to rank entries against
     each other in the result list.
+
+    `snippet` is populated only in keyword search mode. It is a
+    substring of `final_text` with ASCII `\\x02` and `\\x03` control
+    characters wrapping matched terms (FTS5's `snippet()` aux
+    function). Semantic search leaves it as `None`; callers render
+    highlights from `matching_chunks` instead.
     """
 
     entry_id: int
@@ -100,6 +120,7 @@ class SearchResult:
     text: str
     score: float
     matching_chunks: list[ChunkMatch] = field(default_factory=list)
+    snippet: str | None = None
 
 
 @dataclass
