@@ -888,6 +888,98 @@ class TestHealth:
         assert "sensitive" not in dumped
 
 
+class TestDashboardWritingStats:
+    """T1.3a.ii — GET /api/dashboard/writing-stats."""
+
+    def test_default_bin_is_week(
+        self, client: TestClient, repo: SQLiteEntryRepository
+    ) -> None:
+        repo.create_entry("2026-03-02", "ocr", "hello world", 2)
+        resp = client.get("/api/dashboard/writing-stats")
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data["bin"] == "week"
+        assert len(data["bins"]) == 1
+        assert data["bins"][0]["bin_start"] == "2026-03-02"
+        assert data["bins"][0]["entry_count"] == 1
+        assert data["bins"][0]["total_words"] == 2
+
+    def test_month_bin(
+        self, client: TestClient, repo: SQLiteEntryRepository
+    ) -> None:
+        repo.create_entry("2026-03-15", "ocr", "march entry", 2)
+        repo.create_entry("2026-04-15", "ocr", "april entry", 2)
+        resp = client.get("/api/dashboard/writing-stats?bin=month")
+        data = resp.json()
+        starts = [b["bin_start"] for b in data["bins"]]
+        assert "2026-03-01" in starts
+        assert "2026-04-01" in starts
+
+    def test_quarter_bin(
+        self, client: TestClient, repo: SQLiteEntryRepository
+    ) -> None:
+        repo.create_entry("2026-02-15", "ocr", "q1", 2)
+        repo.create_entry("2026-08-15", "ocr", "q3", 2)
+        resp = client.get("/api/dashboard/writing-stats?bin=quarter")
+        data = resp.json()
+        starts = [b["bin_start"] for b in data["bins"]]
+        assert starts == ["2026-01-01", "2026-07-01"]
+
+    def test_year_bin(
+        self, client: TestClient, repo: SQLiteEntryRepository
+    ) -> None:
+        repo.create_entry("2025-06-15", "ocr", "2025", 2)
+        repo.create_entry("2026-06-15", "ocr", "2026", 2)
+        resp = client.get("/api/dashboard/writing-stats?bin=year")
+        data = resp.json()
+        starts = [b["bin_start"] for b in data["bins"]]
+        assert starts == ["2025-01-01", "2026-01-01"]
+
+    def test_invalid_bin_returns_400(
+        self, client: TestClient, repo: SQLiteEntryRepository
+    ) -> None:
+        resp = client.get("/api/dashboard/writing-stats?bin=fortnight")
+        assert resp.status_code == 400
+        body = resp.json()
+        assert body["error"] == "invalid_bin"
+
+    def test_date_filter(
+        self, client: TestClient, repo: SQLiteEntryRepository
+    ) -> None:
+        repo.create_entry("2026-01-15", "ocr", "january", 2)
+        repo.create_entry("2026-03-15", "ocr", "march", 2)
+        repo.create_entry("2026-06-15", "ocr", "june", 2)
+        resp = client.get(
+            "/api/dashboard/writing-stats"
+            "?bin=month&from=2026-02-01&to=2026-04-30"
+        )
+        data = resp.json()
+        assert data["from"] == "2026-02-01"
+        assert data["to"] == "2026-04-30"
+        assert len(data["bins"]) == 1
+        assert data["bins"][0]["bin_start"] == "2026-03-01"
+
+    def test_empty_corpus_returns_empty_bins(
+        self, client: TestClient
+    ) -> None:
+        resp = client.get("/api/dashboard/writing-stats")
+        assert resp.status_code == 200
+        assert resp.json()["bins"] == []
+
+    def test_503_when_services_not_initialized(self) -> None:
+        from mcp.server.fastmcp import FastMCP
+
+        from journal.api import register_api_routes
+
+        test_mcp = FastMCP("test-journal")
+        register_api_routes(test_mcp, lambda: None)
+        with TestClient(
+            test_mcp.streamable_http_app(), raise_server_exceptions=False
+        ) as tc:
+            resp = tc.get("/api/dashboard/writing-stats")
+            assert resp.status_code == 503
+
+
 class TestRepositoryHelpers:
     """Test the new count_entries and get_page_count repository methods."""
 

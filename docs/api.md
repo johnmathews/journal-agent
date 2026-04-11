@@ -376,6 +376,54 @@ Full-text search across journal entries. Supports two modes:
 
 ---
 
+### GET /api/dashboard/writing-stats
+
+Aggregated writing frequency and word count per time bucket,
+used by the webapp's `/dashboard` view. Bearer-authenticated via
+the app-wide middleware.
+
+**Query parameters:**
+
+| Parameter | Type   | Required | Default | Description                           |
+|-----------|--------|----------|---------|---------------------------------------|
+| `bin`     | string | no       | `week`  | `week`, `month`, `quarter`, or `year` |
+| `from`    | string | no       |         | Inclusive ISO-8601 start date         |
+| `to`      | string | no       |         | Inclusive ISO-8601 end date           |
+
+**Response (200):**
+
+```json
+{
+  "from": "2026-01-01",
+  "to": "2026-04-11",
+  "bin": "month",
+  "bins": [
+    {"bin_start": "2026-01-01", "entry_count": 5,  "total_words": 980},
+    {"bin_start": "2026-02-01", "entry_count": 3,  "total_words": 612},
+    {"bin_start": "2026-03-01", "entry_count": 12, "total_words": 2240},
+    {"bin_start": "2026-04-01", "entry_count": 2,  "total_words": 380}
+  ]
+}
+```
+
+**Bucket semantics:**
+
+- `week` bins start on the Monday of the ISO week (Sunday rolls
+  into the preceding Monday).
+- `month` bins start on the 1st of the month.
+- `quarter` bins start on the 1st of Jan/Apr/Jul/Oct.
+- `year` bins start on January 1st.
+- **Empty buckets are omitted.** A month with zero entries does
+  not appear in the `bins` array. Clients rendering a dense line
+  chart should fill gaps on the client side.
+
+**Error responses:**
+
+- `400` — `bin` is not one of `week`/`month`/`quarter`/`year`
+- `503` — server not initialised
+
+---
+
 ### GET /api/stats
 
 Journal statistics with optional date filtering.

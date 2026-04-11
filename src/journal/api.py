@@ -553,6 +553,76 @@ def register_api_routes(
         log.info("GET /api/stats — %d entries, %d words", stats.total_entries, stats.total_words)
         return JSONResponse(asdict(stats))
 
+    @mcp.custom_route(
+        "/api/dashboard/writing-stats",
+        methods=["GET"],
+        name="api_dashboard_writing_stats",
+    )
+    async def dashboard_writing_stats(request: Request) -> JSONResponse:
+        """Aggregate writing frequency + word count per time bucket.
+
+        Query params:
+
+        - `from` — ISO-8601 start date (optional)
+        - `to` — ISO-8601 end date (optional)
+        - `bin` — `week` (default), `month`, `quarter`, or `year`
+
+        Returns a `{from, to, bin, bins: [...]}` envelope where
+        each `bin` entry carries `bin_start`, `entry_count`, and
+        `total_words`. Empty buckets are NOT emitted — a month with
+        zero entries will simply not appear in the series, and the
+        frontend is expected to fill gaps client-side if it wants
+        a dense line chart.
+        """
+        services = services_getter()
+        if services is None:
+            return JSONResponse(
+                {"error": "Server not initialized"}, status_code=503
+            )
+
+        query_svc: QueryService = services["query"]
+
+        bin_param = request.query_params.get("bin", "week")
+        start_date = request.query_params.get("from")
+        end_date = request.query_params.get("to")
+
+        try:
+            bins = query_svc._repo.get_writing_frequency(
+                start_date=start_date,
+                end_date=end_date,
+                granularity=bin_param,
+            )
+        except ValueError as e:
+            log.info(
+                "GET /api/dashboard/writing-stats — invalid bin %r: %s",
+                bin_param,
+                e,
+            )
+            return JSONResponse(
+                {
+                    "error": "invalid_bin",
+                    "message": str(e),
+                },
+                status_code=400,
+            )
+
+        log.info(
+            "GET /api/dashboard/writing-stats — bin=%s from=%s to=%s "
+            "returned %d non-empty buckets",
+            bin_param,
+            start_date,
+            end_date,
+            len(bins),
+        )
+        return JSONResponse(
+            {
+                "from": start_date,
+                "to": end_date,
+                "bin": bin_param,
+                "bins": [asdict(b) for b in bins],
+            }
+        )
+
     @mcp.custom_route("/api/search", methods=["GET"], name="api_search")
     async def search(request: Request) -> JSONResponse:
         """Full-text search across journal entries.

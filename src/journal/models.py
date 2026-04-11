@@ -47,6 +47,22 @@ class Statistics:
 
 
 @dataclass
+class WritingFrequencyBin:
+    """One time-bucket in the writing-frequency / word-count series.
+
+    `bin_start` is the ISO-8601 date of the first day of the bucket
+    (Monday for weeks, the 1st of the month for months, the 1st of
+    Jan/Apr/Jul/Oct for quarters, Jan 1 for years). Callers render
+    the timeseries by plotting `entry_count` or `total_words`
+    against `bin_start`.
+    """
+
+    bin_start: str
+    entry_count: int
+    total_words: int
+
+
+@dataclass
 class IngestionStats:
     """Operational stats about the ingestion corpus, used by `/health`.
 

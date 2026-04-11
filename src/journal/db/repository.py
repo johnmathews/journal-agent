@@ -13,9 +13,16 @@ from journal.models import (
     MoodTrend,
     Statistics,
     TopicFrequency,
+    WritingFrequencyBin,
 )
 
 log = logging.getLogger(__name__)
+
+# Hardcoded set of supported dashboard bin widths. Callers validate
+# against this before any SQL runs. Adding a new granularity
+# requires updates in this tuple AND the `_bin_start_expr` helper
+# below — deliberately explicit so the contract never drifts.
+_SUPPORTED_BINS: tuple[str, ...] = ("week", "month", "quarter", "year")
 
 
 @runtime_checkable
@@ -101,6 +108,13 @@ class EntryRepository(Protocol):
     ) -> int: ...
 
     def get_ingestion_stats(self, now: datetime) -> IngestionStats: ...
+
+    def get_writing_frequency(
+        self,
+        start_date: str | None,
+        end_date: str | None,
+        granularity: str,
+    ) -> list[WritingFrequencyBin]: ...
 
     def get_page_count(self, entry_id: int) -> int: ...
 
@@ -616,6 +630,99 @@ class SQLiteEntryRepository:
             total_chunks=total_chunks,
             row_counts=row_counts,
         )
+
+    def get_writing_frequency(
+        self,
+        start_date: str | None,
+        end_date: str | None,
+        granularity: str,
+    ) -> list[WritingFrequencyBin]:
+        """Aggregate entries per time bucket for the dashboard charts.
+
+        Returns one `WritingFrequencyBin` per non-empty bucket in
+        the requested range, sorted by `bin_start` ascending. Empty
+        buckets are omitted — callers that need a dense series
+        (e.g. a continuous line chart over months with no entries)
+        fill gaps client-side.
+
+        `granularity` must be one of `week`, `month`, `quarter`,
+        `year`. Invalid values raise `ValueError` before any SQL
+        runs so the endpoint can surface a clean 400.
+
+        **Bin start semantics** (canonical dates the frontend plots):
+
+        - `week`:    the Monday of the ISO week. SQLite's
+          `strftime('%w', ...)` returns 0 for Sunday..6 for
+          Saturday, so we offset by `(weekday + 6) % 7` days to
+          land on the preceding Monday.
+        - `month`:   the 1st of the month.
+        - `quarter`: the 1st of Jan/Apr/Jul/Oct. Computed
+          explicitly because SQLite has no `%Q` format.
+        - `year`:    January 1st of the year.
+        """
+        if granularity not in _SUPPORTED_BINS:
+            raise ValueError(
+                f"Unsupported granularity {granularity!r}; "
+                f"must be one of {_SUPPORTED_BINS}"
+            )
+
+        # Compute the canonical bin-start date for an `entry_date`.
+        # Each branch returns a SQL expression, not a string literal,
+        # and is interpolated into the final query. This is safe
+        # because `granularity` was validated against the hardcoded
+        # tuple above — no user input reaches the SQL.
+        if granularity == "week":
+            # Monday of the week containing entry_date. SQLite's
+            # `date(..., 'weekday 1')` moves FORWARD to the next
+            # Monday (or stays put if already Monday), which is the
+            # wrong direction. We go back (weekday-1+6)%7 days from
+            # the current weekday to land on the preceding Monday.
+            # `strftime('%w')` returns 0..6 with Sunday=0.
+            bin_expr = (
+                "date(entry_date, "
+                "'-' || ((CAST(strftime('%w', entry_date) AS INT) + 6) % 7) "
+                "|| ' days')"
+            )
+        elif granularity == "month":
+            bin_expr = "date(entry_date, 'start of month')"
+        elif granularity == "quarter":
+            # First day of the quarter: January/April/July/October.
+            # Start from start of month, then subtract
+            # ((month - 1) % 3) months.
+            bin_expr = (
+                "date(entry_date, 'start of month', "
+                "'-' || ((CAST(strftime('%m', entry_date) AS INT) - 1) % 3) "
+                "|| ' months')"
+            )
+        else:  # "year"
+            bin_expr = "date(entry_date, 'start of year')"
+
+        sql = f"""
+            SELECT
+                {bin_expr} AS bin_start,
+                COUNT(*) AS entry_count,
+                COALESCE(SUM(word_count), 0) AS total_words
+            FROM entries
+            WHERE 1=1
+        """
+        params: list[str] = []
+        if start_date:
+            sql += " AND entry_date >= ?"
+            params.append(start_date)
+        if end_date:
+            sql += " AND entry_date <= ?"
+            params.append(end_date)
+        sql += " GROUP BY bin_start ORDER BY bin_start ASC"
+
+        rows = self._conn.execute(sql, params).fetchall()
+        return [
+            WritingFrequencyBin(
+                bin_start=row["bin_start"],
+                entry_count=int(row["entry_count"]),
+                total_words=int(row["total_words"]),
+            )
+            for row in rows
+        ]
 
     def get_topic_frequency(
         self, topic: str, start_date: str | None = None, end_date: str | None = None

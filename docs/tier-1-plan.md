@@ -207,44 +207,50 @@ session notes and `docs/api.md` for the endpoint contract.
 
 Three sub-epics in order: 3a (basic) → 3b (mood) → 3c (entities).
 
-#### Item 3a — Basic dashboard (no LLM cost)
+#### Item 3a — Basic dashboard (no LLM cost) — ✅ shipped 2026-04-11
 
-- **T1.3a.i** `[S]` — **Backend: writing-frequency repository
-  method.** `get_writing_frequency(start, end, granularity)
-  -> list[WritingFrequencyBin]`. Pure SQL `GROUP BY` on
-  `strftime('%Y-%W', entry_date)` (or day/month). Returns
-  `(bin_start, entry_count, total_words)` tuples.
-- **T1.3a.ii** `[S]` — **Backend: REST endpoints.**
-  1. `GET /api/dashboard/writing-frequency?from=&to=&bin=week`
-  2. `GET /api/dashboard/word-count-trend?from=&to=&bin=week`
-  The word-count endpoint reuses the writing-frequency result
-  and computes average per bin — one method, two response
-  shapes (or one combined response, see open question below).
-- **T1.3a.iii** `[M]` — **Webapp: dashboard shell.** New route
-  `/dashboard`, new `DashboardView.vue`. Page layout with a
-  header containing a date-range picker (reuse the Mosaic
-  components if present; otherwise plain `<input type="date">`)
-  and a bin-width picker (day/week/month radio). Pinia store
-  for dashboard state so picker changes trigger refetches
-  without re-creating the charts.
-- **T1.3a.iv** `[S]` — **Chart: writing frequency.** Line or bar
-  chart via Chart.js. Uses the existing `chartjs-config.ts`
-  styling. Empty-state handling: if the corpus has < N entries,
-  show a friendly "not enough data yet" message instead of an
-  embarrassing 1-point chart.
-- **T1.3a.v** `[S]` — **Chart: word-count trend.** Same shape,
-  different data source.
-- **T1.3a.vi** `[M]` — **Tests.** Backend: endpoint integration
-  tests + repository unit tests. Frontend: Vitest tests for the
-  store's refetch-on-picker-change, and a component smoke test
-  for DashboardView.
+Backend in `journal-server@HEAD`, webapp in
+`journal-webapp@HEAD`. See
+`journal/260411-dashboard-3a-backend.md` (this repo) and
+`journal-webapp/journal/260411-dashboard-3a.md` for the session
+notes.
 
-**Open question:** one combined `/api/dashboard/writing-stats`
-endpoint returning count and word count in a single response, or
-two endpoints? Two endpoints is more RESTful but the fetch-twice
-cost is real. Recommendation: single combined endpoint —
-frontend always wants both charts together on the same time
-range, and it matches the actual DB query.
+- **T1.3a.i** `[S]` ✅ **Backend: writing-frequency repository
+  method.** Shipped as `SQLiteEntryRepository.get_writing_frequency`.
+  Supports `week`, `month`, `quarter`, and `year` granularities.
+  `bin_start` is computed in SQL as the canonical bucket-start
+  date (Monday for weeks, first of month/quarter/year for the
+  others) so the frontend never has to parse `%Y-W%W`-style
+  strings. Empty buckets are omitted.
+- **T1.3a.ii** `[S]` ✅ **Backend: combined REST endpoint.**
+  `GET /api/dashboard/writing-stats?bin=&from=&to=` returns a
+  single envelope with both `entry_count` and `total_words` per
+  bin. One method, one response shape, matches the underlying
+  SQL. Open question #5 resolved in favour of the combined
+  endpoint.
+- **T1.3a.iii** `[M]` ✅ **Webapp: dashboard shell.** Shipped
+  as `/` route (Option B) → `DashboardView.vue` with
+  `useDashboardStore` (Pinia) holding date-range + bin state.
+  Entries list demoted to `/entries`.
+- **T1.3a.iv** `[S]` ✅ **Chart: writing frequency.** Chart.js 4
+  line chart styled via `src/utils/chartjs-config.ts`.
+  Friendly empty-state message when `entry_count < 5` per the
+  "explicit > implicit" decision on open question #9.
+- **T1.3a.v** `[S]` ✅ **Chart: word-count trend.** Second
+  series on the same data, rendered alongside.
+- **T1.3a.vi** `[M]` ✅ **Tests.** 10 repo unit tests + 8 API
+  integration tests (server), Vitest tests for store + view +
+  sidebar default-expanded behaviour (webapp), Playwright
+  verification at 375×812 / 768×1024 / 1920×1080.
+
+**Open questions resolved:**
+
+1. #5 (combined endpoint vs two) — **combined**, as above.
+2. #9 (empty-state threshold) — friendly message when
+   `entry_count < 5`, not hidden.
+3. Additional granularities (`quarter`, `year`) — shipped
+   alongside the original `week`/`month`; `day` dropped as
+   too noisy for the target corpus.
 
 #### Item 3b — Mood scoring + mood chart
 

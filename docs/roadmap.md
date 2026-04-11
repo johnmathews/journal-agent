@@ -113,29 +113,30 @@ review):
 
 ---
 
-### 3. Dashboard view `[both]`
+### 3. Dashboard view `[both]` — 3a shipped 2026-04-11, 3b/3c outstanding
 
-Scoped webapp view at `/dashboard` showing trends against the
-journal corpus. Uses Chart.js 4 (already in `journal-webapp`
-via `src/utils/chartjs-config.ts`) styled to match the Mosaic
-aesthetic.
+Scoped webapp view at `/` (Option B — Dashboard is now the
+home route; entries list moved to `/entries`). Uses Chart.js 4
+(already in `journal-webapp` via `src/utils/chartjs-config.ts`)
+styled to match the Mosaic aesthetic.
 
 **Charts**
 
-1. **Writing frequency** — entries per week/month over a selectable
-   date range. Pure SQL aggregation, no LLM. Immediately useful
-   even at 10 entries. This is the lowest-hanging chart — ship it
-   first.
-2. **Word count trend** — average words per entry over time. Same
-   data source as (1), free extra chart.
-3. **People mentions over time** — stacked area / multi-line,
-   top-N people. Depends on Tier 1 item 1 (real entity extraction)
-   before it's meaningful.
-4. **Mood dimensions** — 0–10 scores on energy, anxiety, gratitude,
-   productivity, happiness. Requires ingestion-time scoring (see
-   "New dependency" below).
-5. **Topic frequency heatmap or bar chart** — most-mentioned
-   entities of type `topic` over time. Feeds off entity extraction.
+1. ✅ **Writing frequency** — entries per bin (week / month /
+   quarter / year) over a selectable date range. Pure SQL
+   aggregation, no LLM. Shipped 2026-04-11 as sub-epic 3a.
+2. ✅ **Word count trend** — total words per bin, rendered
+   alongside writing frequency. Same endpoint, second series.
+   Shipped 2026-04-11 as sub-epic 3a.
+3. ⏳ **People mentions over time** — stacked area / multi-line,
+   top-N people. Depends on Tier 1 item 1 (real entity
+   extraction) before it's meaningful. **3c, not yet started.**
+4. ⏳ **Mood dimensions** — per-entry scoring via Claude Haiku,
+   opt-in via `JOURNAL_ENABLE_MOOD_SCORING`, mood-trends chart.
+   **3b, not yet started.**
+5. ⏳ **Topic frequency heatmap or bar chart** — most-mentioned
+   entities of type `topic` over time. Feeds off entity
+   extraction. **3c, blocked on item 1.**
 
 **Dashboard features**
 1. Date range selector (last month / 3 months / 6 months / 1 year / all)

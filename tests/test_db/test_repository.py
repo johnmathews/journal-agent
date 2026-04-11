@@ -156,6 +156,120 @@ class TestFTSSnippets:
         )
 
 
+class TestWritingFrequency:
+    """T1.3a.i — get_writing_frequency across the four granularities."""
+
+    def test_invalid_granularity_raises(self, repo):
+        import pytest
+
+        with pytest.raises(ValueError, match="Unsupported granularity"):
+            repo.get_writing_frequency(None, None, "fortnight")
+
+    def test_empty_returns_empty_list(self, repo):
+        assert repo.get_writing_frequency(None, None, "week") == []
+
+    def test_week_bins_start_on_monday(self, repo):
+        # 2026-03-22 is a Sunday, 2026-03-23 is a Monday,
+        # 2026-03-24 is a Tuesday. All three should fall into the
+        # week starting Monday 2026-03-23 — except the Sunday
+        # entry, which belongs to the PREVIOUS week starting
+        # 2026-03-16. Verify both.
+        repo.create_entry("2026-03-22", "ocr", "Sunday entry", 2)
+        repo.create_entry("2026-03-23", "ocr", "Monday entry", 2)
+        repo.create_entry("2026-03-24", "ocr", "Tuesday entry", 2)
+        repo.create_entry("2026-03-30", "ocr", "Next Monday", 2)
+
+        bins = repo.get_writing_frequency(None, None, "week")
+        by_start = {b.bin_start: b for b in bins}
+
+        assert "2026-03-16" in by_start  # Sunday rolled into prior Monday
+        assert by_start["2026-03-16"].entry_count == 1
+        assert "2026-03-23" in by_start
+        assert by_start["2026-03-23"].entry_count == 2
+        assert "2026-03-30" in by_start
+        assert by_start["2026-03-30"].entry_count == 1
+
+    def test_month_bins_start_on_first_of_month(self, repo):
+        repo.create_entry("2026-03-01", "ocr", "march start", 2)
+        repo.create_entry("2026-03-15", "ocr", "march mid", 2)
+        repo.create_entry("2026-03-31", "ocr", "march end", 2)
+        repo.create_entry("2026-04-01", "ocr", "april start", 2)
+
+        bins = repo.get_writing_frequency(None, None, "month")
+        by_start = {b.bin_start: b for b in bins}
+
+        assert by_start["2026-03-01"].entry_count == 3
+        assert by_start["2026-04-01"].entry_count == 1
+
+    def test_quarter_bins_start_on_jan_apr_jul_oct(self, repo):
+        repo.create_entry("2026-01-15", "ocr", "q1 mid", 2)
+        repo.create_entry("2026-02-28", "ocr", "q1 end", 2)
+        repo.create_entry("2026-04-01", "ocr", "q2 start", 2)
+        repo.create_entry("2026-07-15", "ocr", "q3 mid", 2)
+        repo.create_entry("2026-12-31", "ocr", "q4 end", 2)
+
+        bins = repo.get_writing_frequency(None, None, "quarter")
+        by_start = {b.bin_start: b for b in bins}
+
+        assert by_start["2026-01-01"].entry_count == 2
+        assert by_start["2026-04-01"].entry_count == 1
+        assert by_start["2026-07-01"].entry_count == 1
+        assert by_start["2026-10-01"].entry_count == 1
+
+    def test_year_bins_start_on_jan_first(self, repo):
+        repo.create_entry("2025-06-15", "ocr", "2025 entry", 2)
+        repo.create_entry("2026-01-01", "ocr", "2026 start", 2)
+        repo.create_entry("2026-12-31", "ocr", "2026 end", 2)
+
+        bins = repo.get_writing_frequency(None, None, "year")
+        by_start = {b.bin_start: b for b in bins}
+
+        assert by_start["2025-01-01"].entry_count == 1
+        assert by_start["2026-01-01"].entry_count == 2
+
+    def test_total_words_sums_per_bin(self, repo):
+        # 2026-03-02 is a Monday, 2026-03-03 is Tuesday. Both fall
+        # in the week starting 2026-03-02.
+        repo.create_entry("2026-03-02", "ocr", "a b c", 3)
+        repo.create_entry("2026-03-03", "ocr", "d e f g", 4)
+        bins = repo.get_writing_frequency(None, None, "week")
+        assert len(bins) == 1
+        assert bins[0].bin_start == "2026-03-02"
+        assert bins[0].entry_count == 2
+        assert bins[0].total_words == 7
+
+    def test_date_filter_clamps_bins(self, repo):
+        repo.create_entry("2026-01-15", "ocr", "january", 2)
+        repo.create_entry("2026-03-15", "ocr", "march", 2)
+        repo.create_entry("2026-06-15", "ocr", "june", 2)
+
+        bins = repo.get_writing_frequency(
+            start_date="2026-02-01",
+            end_date="2026-04-30",
+            granularity="month",
+        )
+        assert len(bins) == 1
+        assert bins[0].bin_start == "2026-03-01"
+
+    def test_empty_buckets_are_omitted(self, repo):
+        """March and May have entries; April has none. April must
+        NOT appear as a zero-count bin — callers that need dense
+        series fill gaps client-side."""
+        repo.create_entry("2026-03-01", "ocr", "march", 2)
+        repo.create_entry("2026-05-01", "ocr", "may", 2)
+        bins = repo.get_writing_frequency(None, None, "month")
+        starts = {b.bin_start for b in bins}
+        assert starts == {"2026-03-01", "2026-05-01"}
+
+    def test_results_sorted_ascending(self, repo):
+        repo.create_entry("2026-05-01", "ocr", "may", 2)
+        repo.create_entry("2026-01-01", "ocr", "jan", 2)
+        repo.create_entry("2026-03-01", "ocr", "march", 2)
+        bins = repo.get_writing_frequency(None, None, "month")
+        starts = [b.bin_start for b in bins]
+        assert starts == sorted(starts)
+
+
 class TestIngestionStats:
     """T1.2.b — get_ingestion_stats aggregates everything /health shows."""
 
