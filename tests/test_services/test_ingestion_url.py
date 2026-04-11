@@ -14,9 +14,14 @@ from urllib.error import HTTPError, URLError
 import pytest
 
 from journal.db.repository import SQLiteEntryRepository
+from journal.providers.ocr import OCRResult
 from journal.services.chunking import FixedTokenChunker
 from journal.services.ingestion import IngestionService
 from journal.vectorstore.store import InMemoryVectorStore
+
+
+def _ocr_result(text: str, spans: list[tuple[int, int]] | None = None) -> OCRResult:
+    return OCRResult(text=text, uncertain_spans=list(spans) if spans else [])
 
 
 @pytest.fixture(autouse=True)
@@ -28,7 +33,9 @@ def _skip_ssrf_validation():
 @pytest.fixture
 def mock_ocr():
     provider = MagicMock()
-    provider.extract_text.return_value = "Today I walked through Vienna and met Atlas for coffee."
+    provider.extract.return_value = _ocr_result(
+        "Today I walked through Vienna and met Atlas for coffee."
+    )
     return provider
 
 
@@ -100,7 +107,7 @@ class TestIngestImageFromUrl:
 
         assert entry.entry_date == "2026-03-22"
         assert entry.source_type == "ocr"
-        mock_ocr.extract_text.assert_called_once_with(b"fake image bytes", "image/jpeg")
+        mock_ocr.extract.assert_called_once_with(b"fake image bytes", "image/jpeg")
 
     @patch("journal.services.ingestion.urlopen")
     def test_uses_explicit_media_type(self, mock_url, ingestion_service, mock_ocr):
@@ -112,7 +119,7 @@ class TestIngestImageFromUrl:
             media_type="image/png",
         )
 
-        mock_ocr.extract_text.assert_called_once_with(b"png data", "image/png")
+        mock_ocr.extract.assert_called_once_with(b"png data", "image/png")
 
     @patch("journal.services.ingestion.urlopen")
     def test_infers_media_type_from_response(self, mock_url, ingestion_service, mock_ocr):
@@ -123,7 +130,7 @@ class TestIngestImageFromUrl:
             date="2026-03-22",
         )
 
-        mock_ocr.extract_text.assert_called_once_with(b"data", "image/webp")
+        mock_ocr.extract.assert_called_once_with(b"data", "image/webp")
 
     @patch("journal.services.ingestion.urlopen")
     def test_download_failure_raises(self, mock_url, ingestion_service):
@@ -224,9 +231,9 @@ class TestIngestMultiPageFromUrls:
             _mock_urlopen(b"page one bytes"),
             _mock_urlopen(b"page two bytes"),
         ]
-        mock_ocr.extract_text.side_effect = [
-            "First page text about Vienna.",
-            "Second page text about Atlas.",
+        mock_ocr.extract.side_effect = [
+            _ocr_result("First page text about Vienna."),
+            _ocr_result("Second page text about Atlas."),
         ]
 
         entry = ingestion_service.ingest_multi_page_entry_from_urls(
@@ -242,7 +249,7 @@ class TestIngestMultiPageFromUrls:
         # Both page texts should be present in the combined entry.
         assert "First page text about Vienna." in entry.raw_text
         assert "Second page text about Atlas." in entry.raw_text
-        assert mock_ocr.extract_text.call_count == 2
+        assert mock_ocr.extract.call_count == 2
         assert mock_url.call_count == 2
 
     @patch("journal.services.ingestion.urlopen")
@@ -261,10 +268,10 @@ class TestIngestMultiPageFromUrls:
         )
 
         # First call: explicit override wins.
-        first_call = mock_ocr.extract_text.call_args_list[0]
+        first_call = mock_ocr.extract.call_args_list[0]
         assert first_call[0][1] == "image/png"
         # Second call: inferred from response Content-Type.
-        second_call = mock_ocr.extract_text.call_args_list[1]
+        second_call = mock_ocr.extract.call_args_list[1]
         assert second_call[0][1] == "image/jpeg"
 
     @patch("journal.services.ingestion.urlopen")

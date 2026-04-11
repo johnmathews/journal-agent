@@ -56,9 +56,25 @@ Get a single entry with full text.
   "chunk_count": 5,
   "language": "en",
   "created_at": "2026-04-09T10:30:00",
-  "updated_at": "2026-04-09T11:00:00"
+  "updated_at": "2026-04-09T11:00:00",
+  "uncertain_spans": [
+    { "char_start": 6, "char_end": 12 },
+    { "char_start": 18, "char_end": 24 }
+  ]
 }
 ```
+
+`uncertain_spans` is a list of half-open `[char_start, char_end)`
+character ranges into `raw_text` — each pair covers one word or short
+phrase the OCR model flagged as uncertain at ingestion time. Entries
+ingested before migration `0005` return an empty array. The field is
+always present; callers never need to check for its existence. See
+[`ocr-context.md`](ocr-context.md) for the sentinel protocol and the
+webapp's Review toggle for the consumer UI.
+
+`uncertain_spans` is preserved across `PATCH /api/entries/{id}` —
+edits change `final_text` but leave `raw_text` and its span list
+untouched.
 
 **Response (404):**
 ```json

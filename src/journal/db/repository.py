@@ -107,6 +107,12 @@ class EntryRepository(Protocol):
 
     def get_chunks(self, entry_id: int) -> list[ChunkSpan]: ...
 
+    def add_uncertain_spans(
+        self, entry_id: int, spans: list[tuple[int, int]]
+    ) -> None: ...
+
+    def get_uncertain_spans(self, entry_id: int) -> list[tuple[int, int]]: ...
+
     def get_entries_by_date(self, date: str) -> list[Entry]: ...
 
     def list_entries(
@@ -453,6 +459,46 @@ class SQLiteEntryRepository:
             )
             for row in rows
         ]
+
+    def add_uncertain_spans(
+        self, entry_id: int, spans: list[tuple[int, int]]
+    ) -> None:
+        """Insert uncertain character spans for an entry.
+
+        `spans` is a list of `(char_start, char_end)` half-open offsets
+        into the entry's `raw_text`. A no-op when `spans` is empty.
+        Intended to be called once during ingestion — the repo does
+        not clear existing rows first, because `raw_text` is immutable
+        and there is no re-OCR path in the codebase today. If that
+        ever changes, the caller (ingestion service) is responsible
+        for deleting stale spans before re-inserting.
+        """
+        if not spans:
+            return
+        with self._conn:
+            self._conn.executemany(
+                "INSERT INTO entry_uncertain_spans "
+                "(entry_id, char_start, char_end) VALUES (?, ?, ?)",
+                [(entry_id, start, end) for start, end in spans],
+            )
+        log.debug(
+            "Stored %d uncertain spans for entry %d", len(spans), entry_id
+        )
+
+    def get_uncertain_spans(self, entry_id: int) -> list[tuple[int, int]]:
+        """Return uncertain spans for an entry, sorted by char_start.
+
+        Returns an empty list for entries with no recorded spans. No
+        distinction between "the ingestion never ran the uncertainty
+        pass" and "it ran and found zero uncertain words" — the webapp
+        simply renders no highlight in either case.
+        """
+        rows = self._conn.execute(
+            "SELECT char_start, char_end FROM entry_uncertain_spans "
+            "WHERE entry_id = ? ORDER BY char_start ASC",
+            (entry_id,),
+        ).fetchall()
+        return [(int(r["char_start"]), int(r["char_end"])) for r in rows]
 
     def get_statistics(
         self, start_date: str | None = None, end_date: str | None = None

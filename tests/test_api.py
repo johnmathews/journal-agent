@@ -231,6 +231,50 @@ class TestGetEntry:
         data = response.json()
         assert data["page_count"] == 2
 
+    def test_get_entry_includes_empty_uncertain_spans_by_default(
+        self, client: TestClient, repo: SQLiteEntryRepository
+    ) -> None:
+        entry = repo.create_entry("2026-03-22", "ocr", "Hello world", 2)
+        response = client.get(f"/api/entries/{entry.id}")
+        data = response.json()
+        # The field is always present, even for entries with no spans —
+        # this keeps the webapp's type contract clean (no branching on
+        # "spans missing" vs "spans empty").
+        assert "uncertain_spans" in data
+        assert data["uncertain_spans"] == []
+
+    def test_get_entry_returns_uncertain_spans_when_present(
+        self, client: TestClient, repo: SQLiteEntryRepository
+    ) -> None:
+        entry = repo.create_entry(
+            "2026-03-22", "ocr", "Hello Ritsya from Vienna.", 4
+        )
+        repo.add_uncertain_spans(entry.id, [(6, 12), (18, 24)])
+        response = client.get(f"/api/entries/{entry.id}")
+        data = response.json()
+        assert data["uncertain_spans"] == [
+            {"char_start": 6, "char_end": 12},
+            {"char_start": 18, "char_end": 24},
+        ]
+        # Sanity-check that the offsets land on the right words in raw_text.
+        assert data["raw_text"][6:12] == "Ritsya"
+        assert data["raw_text"][18:24] == "Vienna"
+
+    def test_list_entries_does_not_include_uncertain_spans(
+        self, client: TestClient, repo: SQLiteEntryRepository
+    ) -> None:
+        """The list endpoint serves a summary shape — uncertain_spans
+        belong on the detail endpoint only, so we don't pay the extra
+        query per row."""
+        entry = repo.create_entry(
+            "2026-03-22", "ocr", "Hello Ritsya", 2
+        )
+        repo.add_uncertain_spans(entry.id, [(6, 12)])
+        response = client.get("/api/entries")
+        item = response.json()["items"][0]
+        assert entry.id == item["id"]
+        assert "uncertain_spans" not in item
+
 
 class TestUpdateEntry:
     def test_patch_entry_updates_final_text(
@@ -246,6 +290,25 @@ class TestUpdateEntry:
         assert data["final_text"] == "corrected text"
         assert data["raw_text"] == "raw OCR output"  # unchanged
         assert data["word_count"] == 2  # re-counted
+
+    def test_patch_entry_preserves_uncertain_spans(
+        self, client: TestClient, repo: SQLiteEntryRepository
+    ) -> None:
+        """Uncertainty is anchored to raw_text, which PATCH never
+        touches — so the PATCH response must still carry the spans
+        the entry was ingested with."""
+        entry = repo.create_entry("2026-03-22", "ocr", "Hello Ritsya.", 2)
+        repo.add_uncertain_spans(entry.id, [(6, 12)])
+
+        response = client.patch(
+            f"/api/entries/{entry.id}",
+            json={"final_text": "Completely different corrected text."},
+        )
+        assert response.status_code == 200
+        data = response.json()
+        assert data["uncertain_spans"] == [{"char_start": 6, "char_end": 12}]
+        # Raw text still carries the original letters at that offset.
+        assert data["raw_text"][6:12] == "Ritsya"
 
     def test_patch_entry_not_found(self, client: TestClient) -> None:
         response = client.patch(

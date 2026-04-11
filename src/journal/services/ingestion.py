@@ -13,7 +13,7 @@ from urllib.request import Request, urlopen
 from journal.db.repository import EntryRepository
 from journal.models import Entry
 from journal.providers.embeddings import EmbeddingsProvider
-from journal.providers.ocr import OCRProvider
+from journal.providers.ocr import OCRProvider, OCRResult
 from journal.providers.transcription import TranscriptionProvider
 from journal.services.chunking import ChunkingStrategy
 from journal.vectorstore.store import VectorStore
@@ -22,6 +22,39 @@ if TYPE_CHECKING:
     from journal.services.mood_scoring import MoodScoringService
 
 log = logging.getLogger(__name__)
+
+
+def _strip_and_shift_page_spans(
+    page_text: str,
+    page_spans: list[tuple[int, int]],
+    cumulative_offset: int,
+) -> tuple[str, list[tuple[int, int]]]:
+    """Strip whitespace from `page_text` and shift spans into entry-level coords.
+
+    Multi-page ingestion combines per-page OCR results with
+    ``"\\n".join(p.strip() for p in pages)``. The sentinel parser
+    returns spans in the *pre-strip* page coordinates; this helper
+    applies the same strip, discards spans that land fully in the
+    trimmed whitespace, clips spans that partially overlap the kept
+    region, and shifts the surviving spans by ``cumulative_offset``
+    so they address positions in the combined entry text.
+
+    Returns ``(stripped_text, shifted_spans)``.
+    """
+    lstripped = page_text.lstrip()
+    leading = len(page_text) - len(lstripped)
+    stripped = lstripped.rstrip()
+    stripped_len = len(stripped)
+
+    shifted: list[tuple[int, int]] = []
+    for start, end in page_spans:
+        new_start = max(0, start - leading)
+        new_end = min(stripped_len, end - leading)
+        if new_end > new_start:
+            shifted.append(
+                (cumulative_offset + new_start, cumulative_offset + new_end)
+            )
+    return stripped, shifted
 
 
 def _validate_public_url(url: str) -> None:
@@ -123,8 +156,12 @@ class IngestionService:
         if self._is_duplicate(file_hash):
             raise ValueError(f"Image already ingested (hash: {file_hash[:12]}...)")
 
-        # Extract text via OCR
-        raw_text = self._ocr.extract_text(image_data, media_type)
+        # Extract text + uncertainty spans via OCR. Spans are in
+        # ocr_result.text coordinates; since we store that text as-is
+        # in entries.raw_text (no stripping in the single-page path),
+        # no offset shifting is needed here.
+        ocr_result = self._ocr.extract(image_data, media_type)
+        raw_text = ocr_result.text
         if not raw_text.strip():
             raise ValueError("OCR extracted no text from image")
 
@@ -137,6 +174,9 @@ class IngestionService:
 
         # Add page record
         self._repo.add_entry_page(entry.id, 1, raw_text, source_file_id)
+
+        # Record uncertain spans anchored to raw_text.
+        self._repo.add_uncertain_spans(entry.id, ocr_result.uncertain_spans)
 
         # Chunk, embed, and store in vector DB
         chunk_count = self._process_text(entry.id, entry.final_text, date)
@@ -360,7 +400,7 @@ class IngestionService:
         log.info("Ingesting multi-page entry for date %s (%d pages)", date, len(images))
 
         # OCR each page and check for duplicates
-        page_texts: list[str] = []
+        page_results: list[OCRResult] = []
         page_hashes: list[str] = []
         page_media_types: list[str] = []
         for i, (image_data, media_type) in enumerate(images):
@@ -369,10 +409,10 @@ class IngestionService:
                 raise ValueError(
                     f"Page {i + 1} already ingested (hash: {file_hash[:12]}...)"
                 )
-            raw_text = self._ocr.extract_text(image_data, media_type)
-            if not raw_text.strip():
+            ocr_result = self._ocr.extract(image_data, media_type)
+            if not ocr_result.text.strip():
                 raise ValueError(f"OCR extracted no text from page {i + 1}")
-            page_texts.append(raw_text)
+            page_results.append(ocr_result)
             page_hashes.append(file_hash)
             page_media_types.append(media_type)
 
@@ -391,7 +431,24 @@ class IngestionService:
         # page boundaries, letting the packer combine pages up to the
         # real budget. The verbatim per-page OCR output is still stored
         # in `entry_pages.raw_text` below.
-        combined_text = "\n".join(p.strip() for p in page_texts)
+        #
+        # Uncertain spans come back per-page in pre-strip coordinates.
+        # `_strip_and_shift_page_spans` re-anchors them to the combined
+        # entry text so the API can serve them without any further
+        # coordinate arithmetic.
+        stripped_parts: list[str] = []
+        combined_spans: list[tuple[int, int]] = []
+        cumulative_offset = 0
+        for i, r in enumerate(page_results):
+            stripped, shifted = _strip_and_shift_page_spans(
+                r.text, r.uncertain_spans, cumulative_offset
+            )
+            stripped_parts.append(stripped)
+            combined_spans.extend(shifted)
+            cumulative_offset += len(stripped)
+            if i < len(page_results) - 1:
+                cumulative_offset += 1  # the "\n" separator between pages
+        combined_text = "\n".join(stripped_parts)
         word_count = len(combined_text.split())
 
         # Create single entry
@@ -402,7 +459,15 @@ class IngestionService:
             source_file_id = self._store_source_file(
                 entry.id, f"image_{date}_p{i + 1}", page_media_types[i], page_hashes[i],
             )
-            self._repo.add_entry_page(entry.id, i + 1, page_texts[i], source_file_id)
+            # Per-page raw_text preserves the verbatim extracted text
+            # (after sentinel stripping) — what the model gave us for
+            # that image, un-stripped. Useful for per-page review.
+            self._repo.add_entry_page(
+                entry.id, i + 1, page_results[i].text, source_file_id
+            )
+
+        # Record uncertain spans anchored to entries.raw_text.
+        self._repo.add_uncertain_spans(entry.id, combined_spans)
 
         # Chunk, embed, and store
         chunk_count = self._process_text(entry.id, entry.final_text, date)

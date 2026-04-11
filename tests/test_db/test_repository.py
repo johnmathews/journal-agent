@@ -793,3 +793,50 @@ class TestEntryChunks:
         repo.replace_chunks(entry.id, [self._span("to be deleted", 0, 13)])
         repo.delete_entry(entry.id)
         assert repo.get_chunks(entry.id) == []
+
+
+class TestUncertainSpans:
+    def test_get_uncertain_spans_empty_for_new_entry(self, repo):
+        entry = repo.create_entry("2026-03-22", "ocr", "hello world", 2)
+        assert repo.get_uncertain_spans(entry.id) == []
+
+    def test_add_and_get_uncertain_spans_round_trip(self, repo):
+        entry = repo.create_entry("2026-03-22", "ocr", "hello beautiful world", 3)
+        repo.add_uncertain_spans(entry.id, [(0, 5), (6, 15)])
+        spans = repo.get_uncertain_spans(entry.id)
+        assert spans == [(0, 5), (6, 15)]
+
+    def test_get_uncertain_spans_sorted_by_start(self, repo):
+        entry = repo.create_entry("2026-03-22", "ocr", "a b c d e f g", 7)
+        # Insert out of order on purpose; the getter sorts by char_start.
+        repo.add_uncertain_spans(entry.id, [(10, 11), (0, 1), (4, 5)])
+        assert repo.get_uncertain_spans(entry.id) == [(0, 1), (4, 5), (10, 11)]
+
+    def test_add_uncertain_spans_empty_list_is_noop(self, repo):
+        entry = repo.create_entry("2026-03-22", "ocr", "hello", 1)
+        repo.add_uncertain_spans(entry.id, [])
+        assert repo.get_uncertain_spans(entry.id) == []
+
+    def test_get_uncertain_spans_isolated_per_entry(self, repo):
+        e1 = repo.create_entry("2026-03-22", "ocr", "first entry", 2)
+        e2 = repo.create_entry("2026-03-23", "ocr", "second entry", 2)
+        repo.add_uncertain_spans(e1.id, [(0, 5)])
+        repo.add_uncertain_spans(e2.id, [(7, 12)])
+        assert repo.get_uncertain_spans(e1.id) == [(0, 5)]
+        assert repo.get_uncertain_spans(e2.id) == [(7, 12)]
+
+    def test_delete_entry_cascades_to_uncertain_spans(self, repo):
+        entry = repo.create_entry("2026-03-22", "ocr", "hello world", 2)
+        repo.add_uncertain_spans(entry.id, [(0, 5), (6, 11)])
+        repo.delete_entry(entry.id)
+        assert repo.get_uncertain_spans(entry.id) == []
+
+    def test_add_uncertain_spans_rejects_invalid_range(self, repo):
+        entry = repo.create_entry("2026-03-22", "ocr", "hello", 1)
+        with pytest.raises(sqlite3.IntegrityError):
+            repo.add_uncertain_spans(entry.id, [(5, 5)])  # char_end > char_start
+
+    def test_add_uncertain_spans_rejects_negative_start(self, repo):
+        entry = repo.create_entry("2026-03-22", "ocr", "hello", 1)
+        with pytest.raises(sqlite3.IntegrityError):
+            repo.add_uncertain_spans(entry.id, [(-1, 5)])

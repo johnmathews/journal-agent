@@ -41,8 +41,20 @@ if TYPE_CHECKING:
 log = logging.getLogger(__name__)
 
 
-def _entry_to_dict(entry: Any, page_count: int = 0) -> dict[str, Any]:
-    """Convert an Entry to a JSON-serializable dict."""
+def _entry_to_dict(
+    entry: Any,
+    page_count: int = 0,
+    uncertain_spans: list[tuple[int, int]] | None = None,
+) -> dict[str, Any]:
+    """Convert an Entry to a JSON-serializable dict.
+
+    `uncertain_spans` is a list of `(char_start, char_end)` pairs in
+    ``entries.raw_text`` coordinates, flagged by the OCR model at
+    ingestion time. They power the webapp's Review toggle. Callers
+    that don't have the span list (or don't need it — e.g. the list
+    endpoint) omit the argument; the serializer then emits an empty
+    array so the field is always present in the response shape.
+    """
     return {
         "id": entry.id,
         "entry_date": entry.entry_date,
@@ -55,6 +67,10 @@ def _entry_to_dict(entry: Any, page_count: int = 0) -> dict[str, Any]:
         "language": entry.language,
         "created_at": entry.created_at,
         "updated_at": entry.updated_at,
+        "uncertain_spans": [
+            {"char_start": start, "char_end": end}
+            for start, end in (uncertain_spans or [])
+        ],
     }
 
 
@@ -244,8 +260,9 @@ def register_api_routes(
                 {"error": f"Entry {entry_id} not found"}, status_code=404
             )
         page_count = query_svc._repo.get_page_count(entry_id)
+        uncertain_spans = query_svc._repo.get_uncertain_spans(entry_id)
         log.info("GET /api/entries/%d — %s, %d words", entry_id, entry.entry_date, entry.word_count)
-        return JSONResponse(_entry_to_dict(entry, page_count))
+        return JSONResponse(_entry_to_dict(entry, page_count, uncertain_spans))
 
     async def _patch_entry(
         request: Request, services: dict, entry_id: int
@@ -288,8 +305,9 @@ def register_api_routes(
             return JSONResponse({"error": str(e)}, status_code=400)
 
         page_count = query_svc._repo.get_page_count(entry_id)
+        uncertain_spans = query_svc._repo.get_uncertain_spans(entry_id)
         log.info("PATCH /api/entries/%d — updated, %d words", entry_id, updated.word_count)
-        return JSONResponse(_entry_to_dict(updated, page_count))
+        return JSONResponse(_entry_to_dict(updated, page_count, uncertain_spans))
 
     async def _delete_entry(services: dict, entry_id: int) -> JSONResponse:
         ingestion_svc: IngestionService = services["ingestion"]

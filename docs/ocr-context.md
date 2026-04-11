@@ -176,6 +176,104 @@ ground truth is your eyes on the pages.
   and restarts frequently, cache writes (2× multiplier) dominate.
   At ~$0.04 per cold start this is negligible but worth knowing.
 
+## Uncertainty spans (the "Review" feature)
+
+Glossary priming raises the ceiling on proper-noun accuracy but doesn't
+solve the deeper problem: **the user doesn't know which words to
+double-check**. Uncertainty spans address that directly — the OCR
+model is asked to mark the words it isn't confident about, and the
+webapp surfaces those marks behind a "Review" toggle so the author
+can spot-check them against the photo of the page.
+
+### Sentinel protocol
+
+The system prompt instructs the model to wrap uncertain words or
+phrases with Unicode sentinels:
+
+- `⟪` (U+27EA, MATHEMATICAL LEFT DOUBLE ANGLE BRACKET)
+- `⟫` (U+27EB, MATHEMATICAL RIGHT DOUBLE ANGLE BRACKET)
+
+These characters are used because they are extraordinarily unlikely
+to appear in handwritten English journal text. Picking ASCII-adjacent
+markers like `[?foo?]` or `<<foo>>` would conflict with legitimate
+writing; the math-bracket code points effectively never do.
+
+The model is instructed to use the sentinels **sparingly** and **only
+around the uncertain span** — not around whole sentences or
+paragraphs. A single span may cover one word or several consecutive
+words if the doubt applies to the whole phrase (e.g. a muddled
+proper-noun pair like "Emily Carr").
+
+### Parser
+
+`parse_uncertain_markers(raw)` in `providers/ocr.py` strips the
+sentinels from the model response and returns a `(clean_text, spans)`
+tuple where `spans` is a list of half-open `(char_start, char_end)`
+offsets into `clean_text`. The parser is deliberately forgiving:
+
+- **Unmatched opens** and **unmatched closes** are dropped silently;
+  the surrounding text is preserved verbatim.
+- **Nested sentinels** collapse to the outermost pair.
+- **Empty pairs** (`⟪⟫`) and **whitespace-only pairs** are dropped.
+- **Whitespace immediately inside** an open/close pair is trimmed out
+  of the recorded span — the span points at letters, not padding.
+
+A single warning is logged per call if any markers were dropped, so
+malformed output is visible without being noisy.
+
+### Storage & API
+
+Per-entry spans live in the `entry_uncertain_spans` table
+(introduced by migration `0005`), keyed on `entry_id` with
+`(char_start, char_end)` offsets into `entries.raw_text`. For
+multi-page entries, the ingestion service shifts per-page spans by
+the cumulative length of prior pages (plus the `\n` page separator)
+so a single flat list addresses positions in the combined
+`entries.raw_text`.
+
+The spans are exposed on `GET /api/entries/{id}` as the
+`uncertain_spans` field (always present, empty for old entries).
+Entries ingested before migration `0005` simply return an empty
+array; the webapp renders no highlight in that case.
+
+### Edit behaviour
+
+`raw_text` is immutable. `PATCH /api/entries/{id}` only updates
+`final_text`, so uncertainty spans persist unchanged through every
+edit. This is deliberate — the Review toggle is a history of "here's
+what the model was unsure about when it read the page", not a
+dynamic signal that drifts as the user corrects things.
+
+### Relationship to glossary priming
+
+Glossary priming and uncertainty flagging are **independent** for
+now. The glossary instructs the model to prefer known candidates
+over hallucinated typos; the uncertainty instruction asks it to
+flag words it can't confidently read. In practice they should work
+well together — glossary-primed words are less likely to be
+flagged as uncertain, and uncertain spans become the user's audit
+surface for "did the model pick a glossary entry, or did it
+genuinely read what I wrote?"
+
+A future iteration could tie the two together more tightly (e.g.
+"if you substituted a glossary entry for an ambiguous scribble,
+flag the substituted word"), but that's out of scope for the
+initial release.
+
+### Files to read if you change this
+
+- `src/journal/providers/ocr.py` — `parse_uncertain_markers`,
+  `OCRResult`, sentinel constants, `SYSTEM_PROMPT`
+- `src/journal/services/ingestion.py` — `_strip_and_shift_page_spans`
+  and the single- and multi-page flows
+- `src/journal/db/migrations/0005_uncertain_spans.sql` — schema
+- `src/journal/db/repository.py` — `add_uncertain_spans`,
+  `get_uncertain_spans`
+- `tests/test_providers/test_ocr.py::TestParseUncertainMarkers` —
+  exhaustive parser tests
+- `tests/test_services/test_ingestion.py::TestUncertainSpansIngestion`
+  — end-to-end coverage including multi-page offset arithmetic
+
 ## Files to read if you change this
 
 - `src/journal/providers/ocr.py` — the adapter and `load_context_files`

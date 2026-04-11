@@ -1,5 +1,6 @@
 """Tests for database migrations."""
 
+import pytest
 
 from journal.db.connection import get_connection
 from journal.db.migrations import get_current_version, run_migrations
@@ -108,3 +109,89 @@ def test_entry_chunks_cascade_delete(db_conn):
 def test_migration_version_is_at_least_3(db_conn):
     version = get_current_version(db_conn)
     assert version >= 3
+
+
+def test_migration_version_is_at_least_5(db_conn):
+    version = get_current_version(db_conn)
+    assert version >= 5
+
+
+def test_entry_uncertain_spans_table_exists(db_conn):
+    row = db_conn.execute(
+        "SELECT name FROM sqlite_master "
+        "WHERE type='table' AND name='entry_uncertain_spans'"
+    ).fetchone()
+    assert row is not None
+
+
+def test_entry_uncertain_spans_has_expected_columns(db_conn):
+    columns = db_conn.execute(
+        "PRAGMA table_info(entry_uncertain_spans)"
+    ).fetchall()
+    column_names = {col["name"] for col in columns}
+    assert {
+        "id",
+        "entry_id",
+        "char_start",
+        "char_end",
+        "created_at",
+    } <= column_names
+
+
+def test_entry_uncertain_spans_index_exists(db_conn):
+    row = db_conn.execute(
+        "SELECT name FROM sqlite_master "
+        "WHERE type='index' AND name='idx_uncertain_spans_entry_id'"
+    ).fetchone()
+    assert row is not None
+
+
+def test_entry_uncertain_spans_cascade_delete(db_conn):
+    db_conn.execute(
+        "INSERT INTO entries (entry_date, source_type, raw_text, word_count)"
+        " VALUES ('2026-03-22', 'ocr', 'hello world', 2)"
+    )
+    entry_id = db_conn.execute("SELECT last_insert_rowid() AS id").fetchone()["id"]
+    db_conn.execute(
+        "INSERT INTO entry_uncertain_spans (entry_id, char_start, char_end)"
+        " VALUES (?, 0, 5)",
+        (entry_id,),
+    )
+    db_conn.commit()
+    db_conn.execute("DELETE FROM entries WHERE id = ?", (entry_id,))
+    db_conn.commit()
+    count = db_conn.execute(
+        "SELECT COUNT(*) AS n FROM entry_uncertain_spans WHERE entry_id = ?",
+        (entry_id,),
+    ).fetchone()["n"]
+    assert count == 0
+
+
+def test_entry_uncertain_spans_check_constraints(db_conn):
+    db_conn.execute(
+        "INSERT INTO entries (entry_date, source_type, raw_text, word_count)"
+        " VALUES ('2026-03-22', 'ocr', 'hello world', 2)"
+    )
+    entry_id = db_conn.execute("SELECT last_insert_rowid() AS id").fetchone()["id"]
+    db_conn.commit()
+
+    # char_start must be >= 0
+    import sqlite3 as _sqlite3
+    with pytest.raises(_sqlite3.IntegrityError):
+        db_conn.execute(
+            "INSERT INTO entry_uncertain_spans (entry_id, char_start, char_end)"
+            " VALUES (?, -1, 5)",
+            (entry_id,),
+        )
+        db_conn.commit()
+    db_conn.rollback()
+
+    # char_end must be > char_start
+    with pytest.raises(_sqlite3.IntegrityError):
+        db_conn.execute(
+            "INSERT INTO entry_uncertain_spans (entry_id, char_start, char_end)"
+            " VALUES (?, 5, 5)",
+            (entry_id,),
+        )
+        db_conn.commit()
+    db_conn.rollback()

@@ -5,15 +5,23 @@ from unittest.mock import MagicMock
 import pytest
 
 from journal.db.repository import SQLiteEntryRepository
+from journal.providers.ocr import OCRResult
 from journal.services.chunking import FixedTokenChunker
 from journal.services.ingestion import IngestionService
 from journal.vectorstore.store import InMemoryVectorStore
 
 
+def _ocr_result(text: str, spans: list[tuple[int, int]] | None = None) -> OCRResult:
+    """Helper for ingestion tests — build an OCRResult fixture tersely."""
+    return OCRResult(text=text, uncertain_spans=list(spans) if spans else [])
+
+
 @pytest.fixture
 def mock_ocr():
     provider = MagicMock()
-    provider.extract_text.return_value = "Today I walked through Vienna and met Atlas for coffee."
+    provider.extract.return_value = _ocr_result(
+        "Today I walked through Vienna and met Atlas for coffee."
+    )
     return provider
 
 
@@ -59,7 +67,7 @@ class TestIngestImage:
         assert "Vienna" in entry.raw_text
         assert entry.word_count == 10
 
-        mock_ocr.extract_text.assert_called_once_with(b"fake image data", "image/jpeg")
+        mock_ocr.extract.assert_called_once_with(b"fake image data", "image/jpeg")
         mock_embeddings.embed_texts.assert_called_once()
 
     def test_ingest_image_duplicate(self, ingestion_service):
@@ -69,7 +77,7 @@ class TestIngestImage:
             ingestion_service.ingest_image(b"same data", "image/jpeg", "2026-03-23")
 
     def test_ingest_image_empty_text(self, ingestion_service, mock_ocr):
-        mock_ocr.extract_text.return_value = "   "
+        mock_ocr.extract.return_value = _ocr_result("   ")
 
         with pytest.raises(ValueError, match="no text"):
             ingestion_service.ingest_image(b"blank page", "image/jpeg", "2026-03-22")
@@ -173,9 +181,161 @@ class TestChunkPersistence:
         assert ingestion_service._repo.get_chunks(entry.id) == []
 
 
+class TestUncertainSpansIngestion:
+    """Uncertainty spans produced by the OCR provider must land in the
+    repository at the right offsets into the stored raw_text. These tests
+    are the feature's contract — if they go red, the Review toggle in the
+    webapp will highlight the wrong characters (or nothing at all)."""
+
+    def test_single_page_persists_uncertain_spans(
+        self, ingestion_service, mock_ocr
+    ):
+        mock_ocr.extract.return_value = _ocr_result(
+            "Hello Ritsya from Vienna.",
+            [(6, 12), (18, 24)],  # "Ritsya" and "Vienna"
+        )
+        entry = ingestion_service.ingest_image(
+            b"page data", "image/jpeg", "2026-03-22"
+        )
+        spans = ingestion_service._repo.get_uncertain_spans(entry.id)
+        assert spans == [(6, 12), (18, 24)]
+        # Verify that the stored offsets actually land on the right words.
+        assert entry.raw_text[6:12] == "Ritsya"
+        assert entry.raw_text[18:24] == "Vienna"
+
+    def test_single_page_no_uncertain_spans(self, ingestion_service, mock_ocr):
+        mock_ocr.extract.return_value = _ocr_result("All confident.", [])
+        entry = ingestion_service.ingest_image(
+            b"clean data", "image/jpeg", "2026-03-22"
+        )
+        assert ingestion_service._repo.get_uncertain_spans(entry.id) == []
+
+    def test_multi_page_shifts_spans_into_entry_coordinates(
+        self, ingestion_service, mock_ocr
+    ):
+        """The parser gives us per-page spans. After the join, spans
+        from page 2 must be offset by len(page1_stripped) + 1 (the
+        "\\n" separator) so they address the right characters in the
+        combined entry.raw_text."""
+        mock_ocr.extract.side_effect = [
+            _ocr_result("First Ritsya line.", [(6, 12)]),       # "Ritsya" on page 1
+            _ocr_result("Second Vienna line.", [(7, 13)]),      # "Vienna" on page 2
+        ]
+        entry = ingestion_service.ingest_multi_page_entry(
+            images=[(b"img1", "image/jpeg"), (b"img2", "image/jpeg")],
+            date="2026-03-22",
+        )
+        # Combined text: "First Ritsya line.\nSecond Vienna line."
+        expected_text = "First Ritsya line.\nSecond Vienna line."
+        assert entry.raw_text == expected_text
+
+        spans = ingestion_service._repo.get_uncertain_spans(entry.id)
+        # Page 1 span unshifted: still at (6, 12) → "Ritsya"
+        # Page 2 span shifted: original (7, 13), offset = len("First Ritsya line.") + 1 = 19
+        #   new start = 7 + 19 = 26, new end = 13 + 19 = 32 → "Vienna"
+        assert spans == [(6, 12), (26, 32)]
+        # Cross-check that the shifted offsets land on the right words
+        # in the combined raw_text.
+        assert entry.raw_text[6:12] == "Ritsya"
+        assert entry.raw_text[26:32] == "Vienna"
+
+    def test_multi_page_strips_leading_whitespace_and_clips_spans(
+        self, ingestion_service, mock_ocr
+    ):
+        """An OCR page that starts with whitespace gets lstripped
+        before joining. A span that was in the leading whitespace
+        must be discarded (or clipped) — not silently offset into
+        the wrong word."""
+        mock_ocr.extract.side_effect = [
+            # Page 1 has 3 leading spaces. A span at (4, 9) in the
+            # pre-strip coordinates covers "world" — after lstripping
+            # 3 chars, it should land at (1, 6) in the stripped page,
+            # which equals (1, 6) in the combined text (page 1 is at
+            # cumulative_offset=0).
+            _ocr_result("   hello world", [(4, 9)]),
+            _ocr_result("second", []),
+        ]
+        entry = ingestion_service.ingest_multi_page_entry(
+            images=[(b"img1", "image/jpeg"), (b"img2", "image/jpeg")],
+            date="2026-03-22",
+        )
+        # The combined text is "hello world\nsecond" (page 1 stripped).
+        assert entry.raw_text == "hello world\nsecond"
+        spans = ingestion_service._repo.get_uncertain_spans(entry.id)
+        # Wait — (4, 9) in "   hello world" is "ello ". After stripping
+        # 3 leading chars, that's (1, 6) = "ello ". So the span shifts,
+        # not the word it points at.
+        assert spans == [(1, 6)]
+        assert entry.raw_text[1:6] == "ello "
+
+    def test_multi_page_drops_span_entirely_in_trimmed_whitespace(
+        self, ingestion_service, mock_ocr
+    ):
+        """A span that falls within whitespace stripped from the page
+        edges must be discarded. The `_strip_and_shift_page_spans`
+        helper returns an empty list for such spans."""
+        mock_ocr.extract.side_effect = [
+            # Span (0, 2) is inside the leading whitespace and should
+            # be dropped entirely. Span (6, 11) covers "world".
+            _ocr_result("  hello world  ", [(0, 2), (8, 13)]),
+            _ocr_result("next", []),
+        ]
+        entry = ingestion_service.ingest_multi_page_entry(
+            images=[(b"img1", "image/jpeg"), (b"img2", "image/jpeg")],
+            date="2026-03-22",
+        )
+        assert entry.raw_text == "hello world\nnext"
+        spans = ingestion_service._repo.get_uncertain_spans(entry.id)
+        # Only the second span survives; shifted by -2 (leading strip).
+        assert spans == [(6, 11)]
+        assert entry.raw_text[6:11] == "world"
+
+    def test_multi_page_only_one_page_has_uncertainty(
+        self, ingestion_service, mock_ocr
+    ):
+        mock_ocr.extract.side_effect = [
+            _ocr_result("All clean page one.", []),
+            _ocr_result("Page two Atlas here.", [(9, 14)]),  # "Atlas"
+        ]
+        entry = ingestion_service.ingest_multi_page_entry(
+            images=[(b"img1", "image/jpeg"), (b"img2", "image/jpeg")],
+            date="2026-03-22",
+        )
+        expected_text = "All clean page one.\nPage two Atlas here."
+        assert entry.raw_text == expected_text
+        spans = ingestion_service._repo.get_uncertain_spans(entry.id)
+        # Page 2 offset = len("All clean page one.") + 1 = 20
+        # Shifted span: (9 + 20, 14 + 20) = (29, 34)
+        assert spans == [(29, 34)]
+        assert entry.raw_text[29:34] == "Atlas"
+
+    def test_patch_does_not_touch_uncertain_spans(
+        self, ingestion_service, mock_ocr
+    ):
+        """Editing final_text must not clear or modify the uncertainty
+        spans, because they live in raw_text coordinates and raw_text
+        is immutable."""
+        mock_ocr.extract.return_value = _ocr_result(
+            "Hello Ritsya.", [(6, 12)]
+        )
+        entry = ingestion_service.ingest_image(
+            b"page data", "image/jpeg", "2026-03-22"
+        )
+        spans_before = ingestion_service._repo.get_uncertain_spans(entry.id)
+        assert spans_before == [(6, 12)]
+
+        ingestion_service.update_entry_text(entry.id, "Completely different text.")
+
+        spans_after = ingestion_service._repo.get_uncertain_spans(entry.id)
+        assert spans_after == [(6, 12)]
+
+
 class TestMultiPageIngestion:
     def test_ingest_multi_page(self, ingestion_service, mock_ocr, mock_embeddings):
-        mock_ocr.extract_text.side_effect = ["Page one text.", "Page two text."]
+        mock_ocr.extract.side_effect = [
+            _ocr_result("Page one text."),
+            _ocr_result("Page two text."),
+        ]
         entry = ingestion_service.ingest_multi_page_entry(
             images=[(b"img1", "image/jpeg"), (b"img2", "image/jpeg")],
             date="2026-03-22",
@@ -194,7 +354,10 @@ class TestMultiPageIngestion:
         assert entry.chunk_count > 0
 
     def test_ingest_multi_page_creates_pages(self, ingestion_service, mock_ocr):
-        mock_ocr.extract_text.side_effect = ["First page.", "Second page."]
+        mock_ocr.extract.side_effect = [
+            _ocr_result("First page."),
+            _ocr_result("Second page."),
+        ]
         entry = ingestion_service.ingest_multi_page_entry(
             images=[(b"img1", "image/jpeg"), (b"img2", "image/jpeg")],
             date="2026-03-22",
@@ -220,7 +383,10 @@ class TestMultiPageIngestion:
         joined with `"\\n"` naively we'd get `"Page one.\\n\\nPage two."`
         which recreates the paragraph-split bug this change fixes.
         """
-        mock_ocr.extract_text.side_effect = ["Page one.\n", "Page two.\n"]
+        mock_ocr.extract.side_effect = [
+            _ocr_result("Page one.\n"),
+            _ocr_result("Page two.\n"),
+        ]
         entry = ingestion_service.ingest_multi_page_entry(
             images=[(b"img1", "image/jpeg"), (b"img2", "image/jpeg")],
             date="2026-03-24",
@@ -256,7 +422,11 @@ class TestMultiPageIngestion:
             "meeting and whether to finally raise the staffing issue "
             "with the whole team present this time."
         )
-        mock_ocr.extract_text.side_effect = [page, page, page]
+        mock_ocr.extract.side_effect = [
+            _ocr_result(page),
+            _ocr_result(page),
+            _ocr_result(page),
+        ]
         # The default mock returns one embedding regardless of input.
         # Provide a callable side_effect so the chunker-produced list
         # gets a matching number of vectors back.
@@ -284,10 +454,10 @@ class TestMultiPageIngestion:
         # First page OCRs fine, second has same hash so should fail at duplicate check
         # But both hashes are checked before OCR in the loop, so the first image
         # passes hash check + OCR, and the second fails at hash check
-        mock_ocr.extract_text.return_value = "Page text."
+        mock_ocr.extract.return_value = _ocr_result("Page text.")
         ingestion_service.ingest_image(b"same", "image/jpeg", "2026-03-22")
 
-        mock_ocr.extract_text.return_value = "Another page."
+        mock_ocr.extract.return_value = _ocr_result("Another page.")
         with pytest.raises(ValueError, match="already ingested"):
             ingestion_service.ingest_multi_page_entry(
                 images=[(b"same", "image/jpeg")],
@@ -371,7 +541,7 @@ class TestMetadataPrefix:
         self, service_with_prefix, mock_ocr
     ):
         # OCR returns a deterministic string so we can compare exactly.
-        mock_ocr.extract_text.return_value = "This is the raw journal text."
+        mock_ocr.extract.return_value = _ocr_result("This is the raw journal text.")
         service_with_prefix.ingest_image(b"fake image", "image/jpeg", "2026-02-15")
 
         # Fetch what was stored in the vector store for this entry.

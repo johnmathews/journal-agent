@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import base64
 import logging
+from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Protocol, runtime_checkable
 
 import anthropic
@@ -27,11 +28,112 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 
+# Sentinels the OCR model wraps around uncertain words or phrases.
+# U+27EA / U+27EB (MATHEMATICAL LEFT/RIGHT DOUBLE ANGLE BRACKET) —
+# chosen because they are extraordinarily unlikely to appear in real
+# handwritten journal text, which makes the parser's single failure
+# mode (treating a real bracket as a marker) practically impossible.
+# If a user ever writes literal double angle brackets by hand, the
+# parser will silently swallow them; that is an accepted tail risk.
+UNCERTAIN_OPEN = "\u27EA"   # ⟪
+UNCERTAIN_CLOSE = "\u27EB"  # ⟫
+
 SYSTEM_PROMPT = (
     "You are an expert handwriting OCR system. Extract all text from the provided "
     "handwritten image as accurately as possible. Preserve paragraph breaks and line "
-    "structure. Output only the extracted text with no commentary or preamble."
+    "structure. Output only the extracted text with no commentary or preamble. "
+    "When you are unsure about a word or short phrase — illegible strokes, ambiguous "
+    "letters, a guess you cannot make with confidence — wrap that word or phrase in "
+    "the sentinels \u27EA and \u27EB. Use the sentinels sparingly and only around the "
+    "uncertain span itself, not around whole sentences. A span may cover one word or "
+    "several consecutive words if they are jointly uncertain. Do not nest sentinels."
 )
+
+
+@dataclass(frozen=True)
+class OCRResult:
+    """Result of an OCR extraction.
+
+    `text` is the clean extraction with all sentinels stripped.
+    `uncertain_spans` is a list of `(char_start, char_end)` half-open
+    offsets into `text` — each pair covers one contiguous region the
+    model flagged as uncertain. Spans are sorted by `char_start` and
+    do not overlap.
+    """
+
+    text: str
+    uncertain_spans: list[tuple[int, int]] = field(default_factory=list)
+
+
+def parse_uncertain_markers(raw: str) -> tuple[str, list[tuple[int, int]]]:
+    """Strip ⟪/⟫ sentinels from `raw` and extract uncertain span offsets.
+
+    Returns `(clean_text, spans)` where `spans` is a list of
+    `(char_start, char_end)` half-open offsets into `clean_text`.
+
+    The parser is deliberately forgiving — OCR output that arrives with
+    unmatched, nested, or empty sentinels is parsed without raising.
+    Specifically:
+
+    - **Unmatched open** (`⟪` with no closing `⟫`): the open is dropped
+      silently. The characters that were going to be in the span are
+      still copied into `clean_text` exactly as they appeared.
+    - **Unmatched close** (`⟫` with no preceding `⟪`): the close is
+      dropped silently. No span is recorded.
+    - **Nested sentinels** (`⟪foo ⟪bar⟫ baz⟫`): collapsed to the
+      outermost pair. Only the outer span is recorded.
+    - **Empty pair** (`⟪⟫`): dropped. No span is recorded.
+    - **Whitespace-only pair** (`⟪   ⟫`): dropped. No span is recorded.
+    - **Whitespace immediately inside** a pair is trimmed *out* of the
+      span. The span points at letters, not padding.
+
+    A single warning is logged per call if any sentinels were dropped,
+    so malformed model output is visible in logs without being noisy.
+    """
+    clean: list[str] = []
+    spans: list[tuple[int, int]] = []
+    open_at: int | None = None
+    depth = 0
+    drops = 0
+    for ch in raw:
+        if ch == UNCERTAIN_OPEN:
+            if depth == 0:
+                open_at = len(clean)
+            else:
+                drops += 1  # nested open — collapse to outermost
+            depth += 1
+            continue
+        if ch == UNCERTAIN_CLOSE:
+            if depth == 0:
+                drops += 1  # unmatched close
+                continue
+            depth -= 1
+            if depth == 0 and open_at is not None:
+                start = open_at
+                end = len(clean)
+                while start < end and clean[start].isspace():
+                    start += 1
+                while end > start and clean[end - 1].isspace():
+                    end -= 1
+                if end > start:
+                    spans.append((start, end))
+                else:
+                    drops += 1  # empty or whitespace-only pair
+                open_at = None
+            continue
+        clean.append(ch)
+
+    if depth > 0:
+        drops += 1  # unmatched open at end of input
+
+    if drops:
+        logger.warning(
+            "OCR sentinel parser dropped %d malformed marker(s); "
+            "text was preserved but some uncertainty spans may be missing",
+            drops,
+        )
+
+    return "".join(clean), spans
 
 # Minimum tokens for a cacheable block on Claude Opus 4.6. Below this
 # the Anthropic API silently ignores cache_control and bills the block
@@ -127,7 +229,7 @@ def _build_cache_control(ttl: str) -> dict[str, str]:
 class OCRProvider(Protocol):
     """Protocol for OCR providers."""
 
-    def extract_text(self, image_data: bytes, media_type: str) -> str: ...
+    def extract(self, image_data: bytes, media_type: str) -> OCRResult: ...
 
 
 class AnthropicOCRProvider:
@@ -200,8 +302,16 @@ class AnthropicOCRProvider:
                 self._model,
             )
 
-    def extract_text(self, image_data: bytes, media_type: str) -> str:
-        """Extract text from an image using Anthropic's vision API."""
+    def extract(self, image_data: bytes, media_type: str) -> OCRResult:
+        """Extract text from an image via Anthropic's vision API.
+
+        The model is prompted to wrap uncertain words or phrases in
+        ⟪/⟫ sentinels. This method strips the sentinels out of the
+        response and returns an `OCRResult` carrying both the clean
+        text and the list of uncertain span offsets (into the clean
+        text). See `parse_uncertain_markers` for the parser's
+        tolerance of malformed markers.
+        """
         logger.info("Extracting text via Anthropic OCR (model=%s)", self._model)
 
         encoded_image = base64.standard_b64encode(image_data).decode("utf-8")
@@ -237,6 +347,21 @@ class AnthropicOCRProvider:
             ],
         )
 
-        extracted = message.content[0].text
-        logger.info("OCR extraction complete (%d characters)", len(extracted))
-        return extracted
+        raw = message.content[0].text
+        clean_text, spans = parse_uncertain_markers(raw)
+        logger.info(
+            "OCR extraction complete (%d characters, %d uncertain span(s))",
+            len(clean_text),
+            len(spans),
+        )
+        return OCRResult(text=clean_text, uncertain_spans=spans)
+
+    def extract_text(self, image_data: bytes, media_type: str) -> str:
+        """Backward-compatible wrapper returning only the clean text.
+
+        Prefer `extract(...)` for new call sites — it exposes the
+        uncertainty spans that drive the webapp's Review toggle. This
+        wrapper stays available for simple callers (CLIs, one-off
+        scripts) that only need a string.
+        """
+        return self.extract(image_data, media_type).text

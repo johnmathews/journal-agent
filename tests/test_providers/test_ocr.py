@@ -9,10 +9,14 @@ import pytest
 from journal.providers.ocr import (
     CONTEXT_USAGE_INSTRUCTIONS,
     SYSTEM_PROMPT,
+    UNCERTAIN_CLOSE,
+    UNCERTAIN_OPEN,
     AnthropicOCRProvider,
     OCRProvider,
+    OCRResult,
     _build_cache_control,
     load_context_files,
+    parse_uncertain_markers,
 )
 
 
@@ -38,16 +42,46 @@ class TestAnthropicOCRProvider:
         provider = self._make_provider()
         assert isinstance(provider, OCRProvider)
 
-    def test_extract_text_success(self) -> None:
+    def test_extract_returns_ocr_result(self) -> None:
         provider = self._make_provider()
         mock_message = MagicMock()
         mock_message.content = [MagicMock(text="Hello world from handwriting")]
         provider._client.messages.create.return_value = mock_message
 
+        result = provider.extract(b"fake-image-data", "image/png")
+
+        assert isinstance(result, OCRResult)
+        assert result.text == "Hello world from handwriting"
+        assert result.uncertain_spans == []
+        provider._client.messages.create.assert_called_once()
+
+    def test_extract_strips_sentinels_and_records_spans(self) -> None:
+        provider = self._make_provider()
+        raw = f"Today I met {UNCERTAIN_OPEN}Ritsya{UNCERTAIN_CLOSE} at the park."
+        mock_message = MagicMock()
+        mock_message.content = [MagicMock(text=raw)]
+        provider._client.messages.create.return_value = mock_message
+
+        result = provider.extract(b"data", "image/png")
+
+        assert result.text == "Today I met Ritsya at the park."
+        assert result.uncertain_spans == [(12, 18)]
+        # Clean text must not contain sentinel characters.
+        assert UNCERTAIN_OPEN not in result.text
+        assert UNCERTAIN_CLOSE not in result.text
+
+    def test_extract_text_wrapper_returns_clean_string(self) -> None:
+        provider = self._make_provider()
+        raw = f"plain {UNCERTAIN_OPEN}foo{UNCERTAIN_CLOSE} bar"
+        mock_message = MagicMock()
+        mock_message.content = [MagicMock(text=raw)]
+        provider._client.messages.create.return_value = mock_message
+
         result = provider.extract_text(b"fake-image-data", "image/png")
 
-        assert result == "Hello world from handwriting"
-        provider._client.messages.create.assert_called_once()
+        assert result == "plain foo bar"
+        assert UNCERTAIN_OPEN not in result
+        assert UNCERTAIN_CLOSE not in result
 
     def test_system_prompt_included_without_context(self) -> None:
         provider = self._make_provider()
@@ -64,6 +98,17 @@ class TestAnthropicOCRProvider:
         # SYSTEM_PROMPT — no glossary instructions appended.
         assert system[0]["text"] == SYSTEM_PROMPT
         assert system[0]["cache_control"] == {"type": "ephemeral"}
+
+    def test_system_prompt_instructs_sentinel_usage(self) -> None:
+        """SYSTEM_PROMPT must tell the model to wrap uncertain words
+        in ⟪/⟫ sentinels — that instruction is what powers the whole
+        uncertainty-tracking feature, so a regression here would
+        silently disable it."""
+        assert UNCERTAIN_OPEN in SYSTEM_PROMPT
+        assert UNCERTAIN_CLOSE in SYSTEM_PROMPT
+        # Smell-test a couple of phrases to catch accidental deletes.
+        assert "uncertain" in SYSTEM_PROMPT.lower()
+        assert "sparingly" in SYSTEM_PROMPT.lower()
 
     def test_image_is_base64_encoded(self) -> None:
         provider = self._make_provider()
@@ -266,3 +311,143 @@ class TestBuildCacheControl:
     def test_invalid_raises(self) -> None:
         with pytest.raises(ValueError, match="Invalid OCR context cache TTL"):
             _build_cache_control("10m")
+
+
+class TestParseUncertainMarkers:
+    """Exhaustive coverage of the sentinel parser.
+
+    Every behaviour documented in `parse_uncertain_markers`'s docstring
+    has a test here. Anything we don't cover is a regression waiting to
+    happen — the parser runs on every OCR response and if it silently
+    misbehaves the webapp quietly stops highlighting things.
+    """
+
+    def _wrap(self, inner: str) -> str:
+        return f"{UNCERTAIN_OPEN}{inner}{UNCERTAIN_CLOSE}"
+
+    def test_plain_text_no_markers(self) -> None:
+        clean, spans = parse_uncertain_markers("hello world")
+        assert clean == "hello world"
+        assert spans == []
+
+    def test_empty_string(self) -> None:
+        assert parse_uncertain_markers("") == ("", [])
+
+    def test_single_word_span(self) -> None:
+        raw = f"hello {self._wrap('world')}"
+        clean, spans = parse_uncertain_markers(raw)
+        assert clean == "hello world"
+        assert spans == [(6, 11)]
+
+    def test_span_at_start(self) -> None:
+        raw = f"{self._wrap('foo')} bar"
+        clean, spans = parse_uncertain_markers(raw)
+        assert clean == "foo bar"
+        assert spans == [(0, 3)]
+
+    def test_span_at_end(self) -> None:
+        raw = f"foo {self._wrap('bar')}"
+        clean, spans = parse_uncertain_markers(raw)
+        assert clean == "foo bar"
+        assert spans == [(4, 7)]
+
+    def test_multi_word_phrase_span(self) -> None:
+        raw = f"I met {self._wrap('the dog')} today"
+        clean, spans = parse_uncertain_markers(raw)
+        assert clean == "I met the dog today"
+        assert spans == [(6, 13)]
+
+    def test_multiple_disjoint_spans(self) -> None:
+        raw = f"{self._wrap('foo')} plain {self._wrap('bar baz')} end"
+        clean, spans = parse_uncertain_markers(raw)
+        assert clean == "foo plain bar baz end"
+        assert spans == [(0, 3), (10, 17)]
+
+    def test_adjacent_spans(self) -> None:
+        raw = f"{self._wrap('foo')}{self._wrap('bar')}"
+        clean, spans = parse_uncertain_markers(raw)
+        assert clean == "foobar"
+        assert spans == [(0, 3), (3, 6)]
+
+    def test_unmatched_open_is_dropped(self) -> None:
+        raw = f"good {UNCERTAIN_OPEN}lost forever"
+        clean, spans = parse_uncertain_markers(raw)
+        # Text is preserved exactly — only the sentinel is dropped.
+        assert clean == "good lost forever"
+        assert spans == []
+
+    def test_unmatched_close_is_dropped(self) -> None:
+        raw = f"good {UNCERTAIN_CLOSE}still good"
+        clean, spans = parse_uncertain_markers(raw)
+        assert clean == "good still good"
+        assert spans == []
+
+    def test_nested_sentinels_collapse_to_outer(self) -> None:
+        raw = f"{UNCERTAIN_OPEN}foo {UNCERTAIN_OPEN}bar{UNCERTAIN_CLOSE} baz{UNCERTAIN_CLOSE}"
+        clean, spans = parse_uncertain_markers(raw)
+        assert clean == "foo bar baz"
+        assert spans == [(0, 11)]
+
+    def test_empty_pair_is_dropped(self) -> None:
+        raw = f"before {UNCERTAIN_OPEN}{UNCERTAIN_CLOSE} after"
+        clean, spans = parse_uncertain_markers(raw)
+        assert clean == "before  after"
+        assert spans == []
+
+    def test_whitespace_only_pair_is_dropped(self) -> None:
+        raw = f"x {UNCERTAIN_OPEN}   {UNCERTAIN_CLOSE} y"
+        clean, spans = parse_uncertain_markers(raw)
+        assert clean == "x     y"
+        assert spans == []
+
+    def test_inner_whitespace_trimmed_from_span(self) -> None:
+        raw = f"a {UNCERTAIN_OPEN}  foo  {UNCERTAIN_CLOSE} b"
+        clean, spans = parse_uncertain_markers(raw)
+        assert clean == "a   foo   b"
+        # Span covers only "foo" — whitespace padding is trimmed out.
+        (start, end), = spans
+        assert clean[start:end] == "foo"
+
+    def test_whitespace_inside_phrase_preserved(self) -> None:
+        # Whitespace *between* non-space chars inside the span is part
+        # of the span. Only leading/trailing whitespace is trimmed.
+        raw = f"{UNCERTAIN_OPEN}foo bar{UNCERTAIN_CLOSE}"
+        clean, spans = parse_uncertain_markers(raw)
+        assert clean == "foo bar"
+        assert spans == [(0, 7)]
+
+    def test_unicode_characters_counted_correctly(self) -> None:
+        # Accented characters are single code points; spans are in
+        # code-point (not byte) offsets.
+        raw = f"caf{UNCERTAIN_OPEN}é{UNCERTAIN_CLOSE}"
+        clean, spans = parse_uncertain_markers(raw)
+        assert clean == "café"
+        assert spans == [(3, 4)]
+
+    def test_parser_never_raises_on_malformed_input(self) -> None:
+        # Property-ish: any combination of sentinels and text should
+        # parse without an exception.
+        malformed = (
+            f"{UNCERTAIN_CLOSE}{UNCERTAIN_OPEN}"
+            f"{UNCERTAIN_OPEN}{UNCERTAIN_OPEN}"
+            f"hello{UNCERTAIN_CLOSE}"
+            f"{UNCERTAIN_OPEN}  {UNCERTAIN_CLOSE}"
+            f"{UNCERTAIN_OPEN}"  # dangling
+        )
+        clean, spans = parse_uncertain_markers(malformed)
+        # We don't assert the exact output, only that the parser
+        # returns without exploding and emits valid Python values.
+        assert isinstance(clean, str)
+        assert isinstance(spans, list)
+        assert all(
+            isinstance(s, tuple) and len(s) == 2 and s[1] > s[0]
+            for s in spans
+        )
+
+    def test_drops_are_logged_once(self, caplog: pytest.LogCaptureFixture) -> None:
+        with caplog.at_level("WARNING", logger="journal.providers.ocr"):
+            parse_uncertain_markers(f"bad {UNCERTAIN_CLOSE} close")
+        warnings = [
+            r.message for r in caplog.records if r.levelname == "WARNING"
+        ]
+        assert any("sentinel parser dropped" in m for m in warnings)
