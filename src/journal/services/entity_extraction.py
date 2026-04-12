@@ -136,7 +136,7 @@ class EntityExtractionService:
             if not canonical:
                 continue
 
-            entity_id, created, warning = self._resolve_entity(
+            entity_id, created, warning, near_miss = self._resolve_entity(
                 canonical=canonical,
                 entity_type=entity_type,
                 description=description,
@@ -149,6 +149,17 @@ class EntityExtractionService:
                 entities_matched += 1
             if warning:
                 warnings.append(warning)
+            if near_miss is not None:
+                candidate_id, score = near_miss
+                try:
+                    self._store.create_merge_candidate(
+                        entity_id_a=candidate_id,
+                        entity_id_b=entity_id,
+                        similarity=score,
+                        extraction_run_id=run_id,
+                    )
+                except Exception:
+                    pass  # table may not exist on older DBs
 
             # Record the resolved id under every name we know about
             # so the relationships step has the best chance of
@@ -362,28 +373,30 @@ class EntityExtractionService:
         description: str,
         aliases: list[str],
         first_seen: str,
-    ) -> tuple[int, bool, str | None]:
+    ) -> tuple[int, bool, str | None, tuple[int, float] | None]:
         """Resolve an extracted entity against the store.
 
-        Returns (entity_id, created, warning). `created` is True when a
-        brand-new row was inserted. `warning` is populated if the
-        embedding-similarity fallback fired (stage c) so the caller
-        can surface a "possible merge" note to the user.
+        Returns (entity_id, created, warning, near_miss). `created` is
+        True when a brand-new row was inserted. `warning` is populated if
+        the embedding-similarity fallback fired (stage c). `near_miss` is
+        a ``(candidate_id, score)`` tuple when a new entity was created
+        but a similar entity exists below the merge threshold — the caller
+        should persist this as a merge candidate for user review.
         """
         # Stage a: exact canonical name match.
         existing = self._store.get_entity_by_name(canonical, entity_type)
         if existing is not None:
-            return existing.id, False, None
+            return existing.id, False, None, None
 
         # Stage b: alias match on the canonical name itself, then on
         # each provided alias.
         by_alias = self._store.find_by_alias(canonical, entity_type)
         if by_alias is not None:
-            return by_alias.id, False, None
+            return by_alias.id, False, None, None
         for alias in aliases:
             by_alias = self._store.find_by_alias(alias, entity_type)
             if by_alias is not None:
-                return by_alias.id, False, None
+                return by_alias.id, False, None, None
 
         # Stage c: embedding similarity fallback.
         new_embedding = self._embeddings.embed_query(
@@ -406,7 +419,7 @@ class EntityExtractionService:
                 f"potential merge: {canonical!r} ~ {best_name!r},"
                 f" similarity {best_score:.3f}"
             )
-            return best_id, False, warning
+            return best_id, False, warning, None
 
         # Still no match — create a new entity and remember its
         # embedding so future runs can short-circuit via stage c.
@@ -417,7 +430,15 @@ class EntityExtractionService:
             first_seen=first_seen,
         )
         self._store.set_entity_embedding(entity.id, new_embedding)
-        return entity.id, True, None
+
+        # If there was a near-miss (below threshold but close), return
+        # it so the caller can persist a merge candidate for user review.
+        near_miss_threshold = max(self._threshold - 0.15, 0.5)
+        near_miss: tuple[int, float] | None = None
+        if best_id is not None and best_score >= near_miss_threshold:
+            near_miss = (best_id, best_score)
+
+        return entity.id, True, None, near_miss
 
     def _resolve_for_relationship(
         self,

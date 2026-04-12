@@ -1021,7 +1021,7 @@ def journal_list_entities(
     if not rows:
         return "No entities found."
     lines = [f"Showing {len(rows)} entities:"]
-    for entity, count in rows:
+    for entity, count, _last_seen in rows:
         aliases = f" (aliases: {', '.join(entity.aliases)})" if entity.aliases else ""
         lines.append(
             f"  [{entity.id}] {entity.entity_type}: {entity.canonical_name}"

@@ -207,6 +207,26 @@ class EntityRelationship:
 
 
 @dataclass
+class MergeResult:
+    survivor_id: int
+    absorbed_ids: list[int]
+    mentions_reassigned: int
+    relationships_reassigned: int
+    aliases_added: int
+
+
+@dataclass
+class MergeCandidate:
+    id: int
+    entity_a: Entity
+    entity_b: Entity
+    similarity: float
+    status: str  # 'pending', 'accepted', 'dismissed'
+    extraction_run_id: str
+    created_at: str = ""
+
+
+@dataclass
 class ExtractionResult:
     entry_id: int
     extraction_run_id: str

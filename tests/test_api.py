@@ -1361,3 +1361,199 @@ class TestEntryEntities:
         resp = client.get(f"/api/entries/{entry.id}/entities")
         data = resp.json()
         assert data["items"][0]["quotes"] == ["Alice"]
+
+
+class TestUpdateEntity:
+    def test_rename_entity(
+        self, client: TestClient, services: dict
+    ) -> None:
+        entity_store: SQLiteEntityStore = services["entity_store"]
+        entity = entity_store.create_entity("person", "Lizzie", "", "2026-01-01")
+        resp = client.patch(
+            f"/api/entities/{entity.id}",
+            json={"canonical_name": "Lizzie Extance"},
+        )
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data["canonical_name"] == "Lizzie Extance"
+        assert data["entity_type"] == "person"
+
+    def test_change_entity_type(
+        self, client: TestClient, services: dict
+    ) -> None:
+        entity_store: SQLiteEntityStore = services["entity_store"]
+        entity = entity_store.create_entity("other", "Monday", "", "2026-01-01")
+        resp = client.patch(
+            f"/api/entities/{entity.id}",
+            json={"entity_type": "activity"},
+        )
+        assert resp.status_code == 200
+        assert resp.json()["entity_type"] == "activity"
+
+    def test_update_nonexistent_returns_404(
+        self, client: TestClient, services: dict
+    ) -> None:
+        resp = client.patch("/api/entities/9999", json={"canonical_name": "X"})
+        assert resp.status_code == 404
+
+    def test_update_invalid_type_returns_400(
+        self, client: TestClient, services: dict
+    ) -> None:
+        entity_store: SQLiteEntityStore = services["entity_store"]
+        entity = entity_store.create_entity("person", "A", "", "2026-01-01")
+        resp = client.patch(
+            f"/api/entities/{entity.id}",
+            json={"entity_type": "invalid"},
+        )
+        assert resp.status_code == 400
+
+    def test_update_empty_name_returns_400(
+        self, client: TestClient, services: dict
+    ) -> None:
+        entity_store: SQLiteEntityStore = services["entity_store"]
+        entity = entity_store.create_entity("person", "A", "", "2026-01-01")
+        resp = client.patch(
+            f"/api/entities/{entity.id}",
+            json={"canonical_name": "  "},
+        )
+        assert resp.status_code == 400
+
+
+class TestDeleteEntity:
+    def test_delete_entity(
+        self, client: TestClient, services: dict
+    ) -> None:
+        entity_store: SQLiteEntityStore = services["entity_store"]
+        entity = entity_store.create_entity("person", "Noise", "", "2026-01-01")
+        resp = client.delete(f"/api/entities/{entity.id}")
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data["deleted"] is True
+        assert data["id"] == entity.id
+        assert entity_store.get_entity(entity.id) is None
+
+    def test_delete_nonexistent_returns_404(
+        self, client: TestClient, services: dict
+    ) -> None:
+        resp = client.delete("/api/entities/9999")
+        assert resp.status_code == 404
+
+
+class TestMergeEntities:
+    def test_merge_two_entities(
+        self,
+        client: TestClient,
+        repo: SQLiteEntryRepository,
+        services: dict,
+    ) -> None:
+        entity_store: SQLiteEntityStore = services["entity_store"]
+        entry = repo.create_entry("2026-01-01", "ocr", "text", 1)
+        a = entity_store.create_entity("person", "Vienna's aunt", "", "2026-01-01")
+        b = entity_store.create_entity("person", "Lizzie Extance", "", "2026-01-01")
+        entity_store.create_mention(a.id, entry.id, "aunt", 0.9, "r1")
+
+        resp = client.post(
+            "/api/entities/merge",
+            json={"survivor_id": b.id, "absorbed_ids": [a.id]},
+        )
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data["survivor"]["canonical_name"] == "Lizzie Extance"
+        assert data["absorbed_ids"] == [a.id]
+        assert data["mentions_reassigned"] == 1
+
+    def test_merge_missing_fields_returns_400(
+        self, client: TestClient, services: dict
+    ) -> None:
+        resp = client.post("/api/entities/merge", json={"survivor_id": 1})
+        assert resp.status_code == 400
+
+    def test_merge_nonexistent_returns_400(
+        self, client: TestClient, services: dict
+    ) -> None:
+        entity_store: SQLiteEntityStore = services["entity_store"]
+        a = entity_store.create_entity("person", "A", "", "2026-01-01")
+        resp = client.post(
+            "/api/entities/merge",
+            json={"survivor_id": a.id, "absorbed_ids": [9999]},
+        )
+        assert resp.status_code == 400
+
+
+class TestMergeCandidates:
+    def test_list_candidates(
+        self, client: TestClient, services: dict
+    ) -> None:
+        entity_store: SQLiteEntityStore = services["entity_store"]
+        a = entity_store.create_entity("person", "A", "", "2026-01-01")
+        b = entity_store.create_entity("person", "B", "", "2026-01-01")
+        entity_store.create_merge_candidate(a.id, b.id, 0.82, "run-1")
+
+        resp = client.get("/api/entities/merge-candidates")
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data["total"] == 1
+        assert data["items"][0]["similarity"] == pytest.approx(0.82)
+
+    def test_resolve_candidate(
+        self, client: TestClient, services: dict
+    ) -> None:
+        entity_store: SQLiteEntityStore = services["entity_store"]
+        a = entity_store.create_entity("person", "A", "", "2026-01-01")
+        b = entity_store.create_entity("person", "B", "", "2026-01-01")
+        entity_store.create_merge_candidate(a.id, b.id, 0.82, "run-1")
+
+        candidates = entity_store.list_merge_candidates()
+        resp = client.patch(
+            f"/api/entities/merge-candidates/{candidates[0].id}",
+            json={"status": "dismissed"},
+        )
+        assert resp.status_code == 200
+        assert resp.json()["status"] == "dismissed"
+
+    def test_resolve_invalid_status_returns_400(
+        self, client: TestClient, services: dict
+    ) -> None:
+        resp = client.patch(
+            "/api/entities/merge-candidates/1",
+            json={"status": "bogus"},
+        )
+        assert resp.status_code == 400
+
+
+class TestMergeHistory:
+    def test_merge_history_after_merge(
+        self,
+        client: TestClient,
+        repo: SQLiteEntryRepository,
+        services: dict,
+    ) -> None:
+        entity_store: SQLiteEntityStore = services["entity_store"]
+        entry = repo.create_entry("2026-01-01", "ocr", "text", 1)
+        a = entity_store.create_entity("person", "Old Name", "desc", "2026-01-01")
+        b = entity_store.create_entity("person", "New Name", "", "2026-01-01")
+        entity_store.create_mention(a.id, entry.id, "old", 0.9, "r1")
+        entity_store.merge_entities(b.id, [a.id])
+
+        resp = client.get(f"/api/entities/{b.id}/merge-history")
+        assert resp.status_code == 200
+        data = resp.json()
+        assert len(data["history"]) == 1
+        assert data["history"][0]["absorbed_name"] == "Old Name"
+
+
+class TestEntitySearchFilter:
+    """Regression test for the tuple-unpack bug in GET /api/entities?search=..."""
+
+    def test_search_filter_works(
+        self, client: TestClient, services: dict
+    ) -> None:
+        entity_store: SQLiteEntityStore = services["entity_store"]
+        entity_store.create_entity("person", "Atlas", "", "2026-01-01")
+        entity_store.create_entity("person", "Ritsya", "", "2026-01-01")
+
+        resp = client.get("/api/entities?search=atlas")
+        assert resp.status_code == 200
+        data = resp.json()
+        assert len(data["items"]) == 1
+        assert data["items"][0]["canonical_name"] == "Atlas"

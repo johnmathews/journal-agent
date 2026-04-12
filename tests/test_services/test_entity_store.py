@@ -1,5 +1,6 @@
 """Tests for SQLiteEntityStore."""
 
+import json
 import sqlite3
 
 import pytest
@@ -339,3 +340,254 @@ class TestGetEntitiesForEntry:
         entities = store.get_entities_for_entry(sample_entry_id)
         ids = {e.id for e in entities}
         assert ids == {a.id, v.id}
+
+
+class TestUpdateEntity:
+    def test_update_canonical_name(self, store: SQLiteEntityStore) -> None:
+        entity = store.create_entity("person", "Lizzie", "", "2026-01-01")
+        updated = store.update_entity(entity.id, canonical_name="Lizzie Extance")
+        assert updated.canonical_name == "Lizzie Extance"
+        assert updated.entity_type == "person"
+        fetched = store.get_entity(entity.id)
+        assert fetched is not None
+        assert fetched.canonical_name == "Lizzie Extance"
+
+    def test_update_entity_type(self, store: SQLiteEntityStore) -> None:
+        entity = store.create_entity("other", "Monday", "", "2026-01-01")
+        updated = store.update_entity(entity.id, entity_type="activity")
+        assert updated.entity_type == "activity"
+
+    def test_update_description(self, store: SQLiteEntityStore) -> None:
+        entity = store.create_entity("person", "Atlas", "", "2026-01-01")
+        updated = store.update_entity(entity.id, description="a beloved dog")
+        assert updated.description == "a beloved dog"
+
+    def test_update_multiple_fields(self, store: SQLiteEntityStore) -> None:
+        entity = store.create_entity("other", "Gym", "", "2026-01-01")
+        updated = store.update_entity(
+            entity.id, canonical_name="Gym session", entity_type="activity"
+        )
+        assert updated.canonical_name == "Gym session"
+        assert updated.entity_type == "activity"
+
+    def test_update_no_fields_returns_unchanged(
+        self, store: SQLiteEntityStore
+    ) -> None:
+        entity = store.create_entity("person", "Atlas", "", "2026-01-01")
+        result = store.update_entity(entity.id)
+        assert result.canonical_name == "Atlas"
+
+    def test_update_nonexistent_raises(self, store: SQLiteEntityStore) -> None:
+        with pytest.raises(ValueError, match="not found"):
+            store.update_entity(9999, canonical_name="Ghost")
+
+    def test_update_sets_updated_at(self, store: SQLiteEntityStore) -> None:
+        entity = store.create_entity("person", "Atlas", "", "2026-01-01")
+        original_updated_at = entity.updated_at
+        updated = store.update_entity(entity.id, description="new desc")
+        assert updated.updated_at >= original_updated_at
+
+
+class TestDeleteEntity:
+    def test_delete_entity(self, store: SQLiteEntityStore) -> None:
+        entity = store.create_entity("person", "Noise", "", "2026-01-01")
+        store.delete_entity(entity.id)
+        assert store.get_entity(entity.id) is None
+        assert store.count_entities() == 0
+
+    def test_delete_cascades_mentions(
+        self, store: SQLiteEntityStore, sample_entry_id: int
+    ) -> None:
+        entity = store.create_entity("person", "Noise", "", "2026-01-01")
+        store.create_mention(entity.id, sample_entry_id, "noise", 0.5, "r1")
+        store.delete_entity(entity.id)
+        assert store.get_mentions_for_entry(sample_entry_id) == []
+
+    def test_delete_cascades_relationships(
+        self, store: SQLiteEntityStore, sample_entry_id: int
+    ) -> None:
+        a = store.create_entity("person", "A", "", "2026-01-01")
+        b = store.create_entity("person", "B", "", "2026-01-01")
+        store.create_relationship(a.id, "knows", b.id, "q", sample_entry_id, 0.9, "r1")
+        store.delete_entity(a.id)
+        assert store.get_relationships_for_entry(sample_entry_id) == []
+
+    def test_delete_cascades_aliases(
+        self, store: SQLiteEntityStore, db_conn: sqlite3.Connection
+    ) -> None:
+        entity = store.create_entity("person", "Liz", "", "2026-01-01")
+        store.add_alias(entity.id, "lizzie")
+        store.delete_entity(entity.id)
+        row = db_conn.execute(
+            "SELECT COUNT(*) AS cnt FROM entity_aliases WHERE entity_id = ?",
+            (entity.id,),
+        ).fetchone()
+        assert row["cnt"] == 0
+
+    def test_delete_nonexistent_raises(self, store: SQLiteEntityStore) -> None:
+        with pytest.raises(ValueError, match="not found"):
+            store.delete_entity(9999)
+
+
+class TestMergeEntities:
+    def test_basic_merge(
+        self, store: SQLiteEntityStore, sample_entry_id: int
+    ) -> None:
+        a = store.create_entity("person", "Vienna's aunt", "", "2026-01-01")
+        b = store.create_entity("person", "Lizzie Extance", "", "2026-01-01")
+        store.create_mention(a.id, sample_entry_id, "Vienna's aunt", 0.9, "r1")
+        store.create_mention(b.id, sample_entry_id, "Lizzie", 0.9, "r1")
+
+        result = store.merge_entities(b.id, [a.id])
+        assert result.survivor_id == b.id
+        assert result.absorbed_ids == [a.id]
+        assert result.mentions_reassigned == 1
+
+        # Absorbed entity is gone
+        assert store.get_entity(a.id) is None
+        # Survivor has both mentions
+        mentions = store.get_mentions_for_entity(b.id)
+        assert len(mentions) == 2
+        # Absorbed name became an alias
+        survivor = store.get_entity(b.id)
+        assert survivor is not None
+        assert "vienna's aunt" in survivor.aliases
+
+    def test_merge_reassigns_relationships(
+        self, store: SQLiteEntityStore, sample_entry_id: int
+    ) -> None:
+        a = store.create_entity("person", "A", "", "2026-01-01")
+        b = store.create_entity("person", "B", "", "2026-01-01")
+        c = store.create_entity("place", "Park", "", "2026-01-01")
+        # A -> Park, Park -> A
+        store.create_relationship(a.id, "visited", c.id, "q", sample_entry_id, 0.9, "r1")
+        store.create_relationship(c.id, "near", a.id, "q", sample_entry_id, 0.8, "r1")
+
+        result = store.merge_entities(b.id, [a.id])
+        assert result.relationships_reassigned == 2
+
+        out, inc = store.get_relationships_for_entity(b.id)
+        assert len(out) == 1
+        assert out[0].predicate == "visited"
+        assert len(inc) == 1
+        assert inc[0].predicate == "near"
+
+    def test_merge_multiple_absorbed(
+        self, store: SQLiteEntityStore, sample_entry_id: int
+    ) -> None:
+        survivor = store.create_entity("person", "Lizzie Extance", "", "2026-01-01")
+        a = store.create_entity("person", "Vienna's aunt", "", "2026-01-01")
+        b = store.create_entity("person", "My sister", "", "2026-01-01")
+        store.create_mention(a.id, sample_entry_id, "aunt", 0.9, "r1")
+        store.create_mention(b.id, sample_entry_id, "sister", 0.9, "r1")
+
+        result = store.merge_entities(survivor.id, [a.id, b.id])
+        assert result.absorbed_ids == [a.id, b.id]
+        assert result.mentions_reassigned == 2
+        assert store.get_entity(a.id) is None
+        assert store.get_entity(b.id) is None
+        assert len(store.get_mentions_for_entity(survivor.id)) == 2
+
+    def test_merge_preserves_merge_history(
+        self, store: SQLiteEntityStore, sample_entry_id: int
+    ) -> None:
+        a = store.create_entity("person", "Old Name", "old desc", "2026-01-01")
+        store.add_alias(a.id, "alias1")
+        b = store.create_entity("person", "New Name", "", "2026-01-01")
+        store.merge_entities(b.id, [a.id])
+
+        history = store.get_merge_history(b.id)
+        assert len(history) == 1
+        assert history[0]["absorbed_id"] == a.id
+        assert history[0]["absorbed_name"] == "Old Name"
+        assert history[0]["absorbed_type"] == "person"
+        assert history[0]["absorbed_desc"] == "old desc"
+        assert "alias1" in history[0]["absorbed_aliases"]
+
+    def test_merge_into_self_raises(self, store: SQLiteEntityStore) -> None:
+        a = store.create_entity("person", "A", "", "2026-01-01")
+        with pytest.raises(ValueError, match="Cannot merge entity into itself"):
+            store.merge_entities(a.id, [a.id])
+
+    def test_merge_nonexistent_survivor_raises(
+        self, store: SQLiteEntityStore
+    ) -> None:
+        with pytest.raises(ValueError, match="Survivor entity"):
+            store.merge_entities(9999, [1])
+
+    def test_merge_nonexistent_absorbed_raises(
+        self, store: SQLiteEntityStore
+    ) -> None:
+        a = store.create_entity("person", "A", "", "2026-01-01")
+        with pytest.raises(ValueError, match="Absorbed entity"):
+            store.merge_entities(a.id, [9999])
+
+
+class TestMergeCandidates:
+    def test_create_and_list_candidates(
+        self, store: SQLiteEntityStore
+    ) -> None:
+        a = store.create_entity("person", "A", "", "2026-01-01")
+        b = store.create_entity("person", "B", "", "2026-01-01")
+        store.create_merge_candidate(a.id, b.id, 0.82, "run-1")
+
+        candidates = store.list_merge_candidates(status="pending")
+        assert len(candidates) == 1
+        assert candidates[0].entity_a.id == a.id
+        assert candidates[0].entity_b.id == b.id
+        assert candidates[0].similarity == pytest.approx(0.82)
+
+    def test_resolve_candidate_dismissed(
+        self, store: SQLiteEntityStore
+    ) -> None:
+        a = store.create_entity("person", "A", "", "2026-01-01")
+        b = store.create_entity("person", "B", "", "2026-01-01")
+        store.create_merge_candidate(a.id, b.id, 0.82, "run-1")
+
+        candidates = store.list_merge_candidates()
+        store.resolve_merge_candidate(candidates[0].id, "dismissed")
+
+        assert store.list_merge_candidates(status="pending") == []
+        dismissed = store.list_merge_candidates(status="dismissed")
+        assert len(dismissed) == 1
+
+    def test_resolve_candidate_accepted(
+        self, store: SQLiteEntityStore
+    ) -> None:
+        a = store.create_entity("person", "A", "", "2026-01-01")
+        b = store.create_entity("person", "B", "", "2026-01-01")
+        store.create_merge_candidate(a.id, b.id, 0.82, "run-1")
+
+        candidates = store.list_merge_candidates()
+        store.resolve_merge_candidate(candidates[0].id, "accepted")
+
+        assert store.list_merge_candidates(status="pending") == []
+
+    def test_resolve_invalid_status_raises(
+        self, store: SQLiteEntityStore
+    ) -> None:
+        with pytest.raises(ValueError, match="Invalid status"):
+            store.resolve_merge_candidate(1, "invalid")
+
+    def test_normalised_order(self, store: SQLiteEntityStore) -> None:
+        """(a,b) and (b,a) should be the same candidate."""
+        a = store.create_entity("person", "A", "", "2026-01-01")
+        b = store.create_entity("person", "B", "", "2026-01-01")
+        store.create_merge_candidate(b.id, a.id, 0.82, "run-1")
+
+        candidates = store.list_merge_candidates()
+        assert len(candidates) == 1
+        assert candidates[0].entity_a.id == min(a.id, b.id)
+
+    def test_merge_auto_resolves_candidates(
+        self, store: SQLiteEntityStore, sample_entry_id: int
+    ) -> None:
+        a = store.create_entity("person", "A", "", "2026-01-01")
+        b = store.create_entity("person", "B", "", "2026-01-01")
+        store.create_merge_candidate(a.id, b.id, 0.85, "run-1")
+        store.create_mention(a.id, sample_entry_id, "A", 0.9, "r1")
+
+        store.merge_entities(b.id, [a.id])
+
+        # Candidate should be auto-resolved
+        assert store.list_merge_candidates(status="pending") == []

@@ -307,54 +307,43 @@ is comfortable with the output, this becomes worth building.
 
 ---
 
-### 8. Entity management: combine, rename, delete `[both]`
+### 8. Entity management: combine, rename, delete `[both]` — ✅ shipped 2026-04-12
 
-Entities extracted by the LLM are often fragmented or duplicated.
-The same real-world person may appear as multiple entities —
-e.g., "Vienna's aunt", "my sister", and "Lizzie Extance" are all
-the same person. The system needs a way for the user to combine
-these, as well as rename entities that were extracted with the
-wrong canonical name, and delete entities that are noise.
+All four entity management features shipped:
 
-**Features:**
+1. ✅ **Combine / merge** — select 2+ entities in the list view
+   via checkboxes, click "Merge selected", pick the survivor in a
+   modal. All mentions, relationships, and aliases from absorbed
+   entities are reassigned to the survivor. Merge history is
+   recorded in `entity_merge_history` for audit/undo.
+2. ✅ **Rename / edit** — edit button on entity detail view opens
+   an inline form for canonical name, entity type, and description.
+   `PATCH /api/entities/{id}`.
+3. ✅ **Delete** — delete button on entity detail view with
+   `window.confirm()` dialog. `DELETE /api/entities/{id}` cascades
+   to mentions, relationships, and aliases.
+4. ✅ **Merge review** — extraction service now persists near-miss
+   similarity matches to `entity_merge_candidates` table. The
+   entity list view shows a "Possible duplicates to review" banner
+   with accept/dismiss actions per candidate.
 
-1. **Combine / merge** — select 2+ entities and merge them into
-   one. The user picks which canonical name to keep. All mentions,
-   relationships, and aliases from the merged entities are
-   reassigned to the survivor. This is the most important operation
-   because the extraction service frequently creates separate
-   entities for the same real-world referent described with
-   different phrases.
-2. **Rename** — change an entity's canonical name (e.g., fix
-   "Lizzie" → "Lizzie Extance"). Should also allow editing the
-   entity type (person / place / etc.) if the extraction got it
-   wrong.
-3. **Delete** — remove an entity entirely (e.g., a false positive
-   like "Monday" tagged as a person). Removes the entity, its
-   mentions, and its relationships.
-4. **Merge review** — the extraction service emits warnings whenever
-   stage-c (embedding similarity) auto-merges two entities. Surface
-   these in the UI with "Accept" / "Split apart" actions so the
-   user can review automatic merges.
+**Backend:** Migration 0008 (`entity_merge_history` +
+`entity_merge_candidates` tables). `EntityStore` Protocol extended
+with `update_entity`, `delete_entity`, `merge_entities`,
+`create_merge_candidate`, `list_merge_candidates`,
+`resolve_merge_candidate`, `get_merge_history`. Six new REST
+endpoints. Extraction service updated to persist near-miss
+candidates.
 
-**Backend work** `[server]`:
-- API endpoints: `POST /api/entities/merge`, `PATCH /api/entities/{id}`,
-  `DELETE /api/entities/{id}` (delete may already exist)
-- Merge logic in the entity store: reassign mentions and
-  relationships, update aliases, delete the absorbed entities
-- Split logic for undoing a merge — design question on whether to
-  keep a merge-history table or reconstruct from mentions
+**Frontend:** New types, API functions, and store actions.
+`EntityDetailView` has edit form + delete button.
+`EntityListView` has row checkboxes, merge modal, and merge review
+section.
 
-**Frontend work** `[webapp]`:
-- Entity detail view: rename/type edit form, delete button
-- Entity list view: multi-select + "Merge selected" action
-- Merge review queue (badge count in sidebar)
+**Also fixed:** Two tuple-unpack bugs in `GET /api/entities?search=`
+and MCP `journal_list_entities` that crashed on non-empty results.
 
-**Blocker:** Tier 1 item 1 (needs real entity data to work with).
-
-**Source:** user feedback 2026-04-12 — "combining is important
-because 'Vienna's aunt' is also 'my sister' and is also 'Lizzie
-Extance'".
+**Source:** user feedback 2026-04-12.
 
 ---
 
@@ -736,6 +725,12 @@ Included so we don't accidentally re-surface these as TODOs.
     `uncertain_spans` DB storage, yellow highlights on Original
     OCR panel. UX improved 2026-04-12: always clickable, info
     banner when no spans exist.
+22. Entity management (Tier 2 item 8, 2026-04-12) — merge, rename,
+    delete, and merge review for entities. Migration 0008 adds
+    `entity_merge_history` and `entity_merge_candidates` tables.
+    Six new REST endpoints. Webapp entity detail view has edit/delete,
+    list view has multi-select merge + merge review section.
+    Fixed two tuple-unpack bugs in entity list endpoints.
 21. Mobile layout fix (2026-04-12) — corrected text panel was
     invisible on small screens due to absolute-positioned children
     in a flex-col layout. Both editor sections now have

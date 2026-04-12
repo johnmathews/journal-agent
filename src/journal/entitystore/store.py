@@ -13,7 +13,7 @@ import json
 import logging
 from typing import TYPE_CHECKING, Protocol, runtime_checkable
 
-from journal.models import Entity, EntityMention, EntityRelationship
+from journal.models import Entity, EntityMention, EntityRelationship, MergeCandidate, MergeResult
 
 if TYPE_CHECKING:
     import sqlite3
@@ -119,6 +119,47 @@ class EntityStore(Protocol):
     def get_entities_for_entry(self, entry_id: int) -> list[Entity]: ...
 
     def mark_entry_extracted(self, entry_id: int) -> None: ...
+
+    # ---- entity management (update / delete / merge) --------------------
+
+    def update_entity(
+        self,
+        entity_id: int,
+        *,
+        canonical_name: str | None = None,
+        entity_type: str | None = None,
+        description: str | None = None,
+    ) -> Entity: ...
+
+    def delete_entity(self, entity_id: int) -> None: ...
+
+    def merge_entities(
+        self, survivor_id: int, absorbed_ids: list[int]
+    ) -> MergeResult: ...
+
+    # ---- merge candidates -----------------------------------------------
+
+    def create_merge_candidate(
+        self,
+        entity_id_a: int,
+        entity_id_b: int,
+        similarity: float,
+        extraction_run_id: str,
+    ) -> None: ...
+
+    def list_merge_candidates(
+        self, status: str = "pending", limit: int = 50
+    ) -> list[MergeCandidate]: ...
+
+    def resolve_merge_candidate(
+        self, candidate_id: int, status: str
+    ) -> None: ...
+
+    # ---- merge history ---------------------------------------------------
+
+    def get_merge_history(
+        self, entity_id: int
+    ) -> list[dict[str, object]]: ...
 
 
 def _normalise(s: str) -> str:
@@ -455,6 +496,232 @@ class SQLiteEntityStore:
             (entry_id,),
         )
         self._conn.commit()
+
+    # ---- entity management (update / delete / merge) --------------------
+
+    def update_entity(
+        self,
+        entity_id: int,
+        *,
+        canonical_name: str | None = None,
+        entity_type: str | None = None,
+        description: str | None = None,
+    ) -> Entity:
+        entity = self.get_entity(entity_id)
+        if entity is None:
+            raise ValueError(f"Entity {entity_id} not found")
+        sets: list[str] = []
+        params: list[object] = []
+        if canonical_name is not None:
+            sets.append("canonical_name = ?")
+            params.append(canonical_name.strip())
+        if entity_type is not None:
+            sets.append("entity_type = ?")
+            params.append(entity_type)
+        if description is not None:
+            sets.append("description = ?")
+            params.append(description)
+        if not sets:
+            return entity
+        sets.append("updated_at = strftime('%Y-%m-%dT%H:%M:%SZ', 'now')")
+        params.append(entity_id)
+        self._conn.execute(
+            f"UPDATE entities SET {', '.join(sets)} WHERE id = ?",
+            params,
+        )
+        self._conn.commit()
+        updated = self.get_entity(entity_id)
+        assert updated is not None
+        log.info("Updated entity %d: %s", entity_id, updated.canonical_name)
+        return updated
+
+    def delete_entity(self, entity_id: int) -> None:
+        entity = self.get_entity(entity_id)
+        if entity is None:
+            raise ValueError(f"Entity {entity_id} not found")
+        self._conn.execute("DELETE FROM entities WHERE id = ?", (entity_id,))
+        self._conn.commit()
+        log.info(
+            "Deleted entity %d: %s (%s)",
+            entity_id, entity.canonical_name, entity.entity_type,
+        )
+
+    def merge_entities(
+        self, survivor_id: int, absorbed_ids: list[int]
+    ) -> MergeResult:
+        survivor = self.get_entity(survivor_id)
+        if survivor is None:
+            raise ValueError(f"Survivor entity {survivor_id} not found")
+
+        total_mentions = 0
+        total_relationships = 0
+        total_aliases = 0
+
+        for absorbed_id in absorbed_ids:
+            absorbed = self.get_entity(absorbed_id)
+            if absorbed is None:
+                raise ValueError(f"Absorbed entity {absorbed_id} not found")
+            if absorbed_id == survivor_id:
+                raise ValueError("Cannot merge entity into itself")
+
+            # Snapshot the absorbed entity for merge history
+            self._conn.execute(
+                "INSERT INTO entity_merge_history"
+                " (survivor_id, absorbed_id, absorbed_name,"
+                "  absorbed_type, absorbed_desc, absorbed_aliases)"
+                " VALUES (?, ?, ?, ?, ?, ?)",
+                (
+                    survivor_id,
+                    absorbed_id,
+                    absorbed.canonical_name,
+                    absorbed.entity_type,
+                    absorbed.description,
+                    json.dumps(absorbed.aliases),
+                ),
+            )
+
+            # Reassign mentions
+            cursor = self._conn.execute(
+                "UPDATE entity_mentions SET entity_id = ?"
+                " WHERE entity_id = ?",
+                (survivor_id, absorbed_id),
+            )
+            total_mentions += cursor.rowcount
+
+            # Reassign relationships (both sides)
+            cursor = self._conn.execute(
+                "UPDATE entity_relationships SET subject_entity_id = ?"
+                " WHERE subject_entity_id = ?",
+                (survivor_id, absorbed_id),
+            )
+            total_relationships += cursor.rowcount
+            cursor = self._conn.execute(
+                "UPDATE entity_relationships SET object_entity_id = ?"
+                " WHERE object_entity_id = ?",
+                (survivor_id, absorbed_id),
+            )
+            total_relationships += cursor.rowcount
+
+            # Copy aliases (including the absorbed entity's canonical name)
+            for alias in [*absorbed.aliases, _normalise(absorbed.canonical_name)]:
+                if alias and alias != _normalise(survivor.canonical_name):
+                    self._conn.execute(
+                        "INSERT OR IGNORE INTO entity_aliases"
+                        " (entity_id, alias_normalised) VALUES (?, ?)",
+                        (survivor_id, alias),
+                    )
+                    total_aliases += 1
+
+            # Delete the absorbed entity (cascades aliases)
+            self._conn.execute(
+                "DELETE FROM entities WHERE id = ?", (absorbed_id,)
+            )
+
+            # Dismiss any pending merge candidates involving the absorbed entity
+            self._conn.execute(
+                "UPDATE entity_merge_candidates SET status = 'accepted',"
+                " resolved_at = strftime('%Y-%m-%dT%H:%M:%SZ', 'now')"
+                " WHERE status = 'pending'"
+                " AND (entity_id_a = ? OR entity_id_b = ?)",
+                (absorbed_id, absorbed_id),
+            )
+
+            log.info(
+                "Merged entity %d (%s) into %d (%s)",
+                absorbed_id, absorbed.canonical_name,
+                survivor_id, survivor.canonical_name,
+            )
+
+        self._conn.commit()
+        return MergeResult(
+            survivor_id=survivor_id,
+            absorbed_ids=absorbed_ids,
+            mentions_reassigned=total_mentions,
+            relationships_reassigned=total_relationships,
+            aliases_added=total_aliases,
+        )
+
+    # ---- merge candidates -----------------------------------------------
+
+    def create_merge_candidate(
+        self,
+        entity_id_a: int,
+        entity_id_b: int,
+        similarity: float,
+        extraction_run_id: str,
+    ) -> None:
+        # Normalise order so (a, b) == (b, a)
+        lo, hi = sorted([entity_id_a, entity_id_b])
+        self._conn.execute(
+            "INSERT OR IGNORE INTO entity_merge_candidates"
+            " (entity_id_a, entity_id_b, similarity, extraction_run_id)"
+            " VALUES (?, ?, ?, ?)",
+            (lo, hi, similarity, extraction_run_id),
+        )
+        self._conn.commit()
+
+    def list_merge_candidates(
+        self, status: str = "pending", limit: int = 50
+    ) -> list[MergeCandidate]:
+        rows = self._conn.execute(
+            "SELECT * FROM entity_merge_candidates"
+            " WHERE status = ? ORDER BY similarity DESC LIMIT ?",
+            (status, limit),
+        ).fetchall()
+        candidates: list[MergeCandidate] = []
+        for row in rows:
+            entity_a = self.get_entity(row["entity_id_a"])
+            entity_b = self.get_entity(row["entity_id_b"])
+            if entity_a is None or entity_b is None:
+                continue
+            candidates.append(MergeCandidate(
+                id=row["id"],
+                entity_a=entity_a,
+                entity_b=entity_b,
+                similarity=row["similarity"],
+                status=row["status"],
+                extraction_run_id=row["extraction_run_id"],
+                created_at=row["created_at"],
+            ))
+        return candidates
+
+    def resolve_merge_candidate(
+        self, candidate_id: int, status: str
+    ) -> None:
+        if status not in ("accepted", "dismissed"):
+            raise ValueError(f"Invalid status: {status}")
+        self._conn.execute(
+            "UPDATE entity_merge_candidates SET status = ?,"
+            " resolved_at = strftime('%Y-%m-%dT%H:%M:%SZ', 'now')"
+            " WHERE id = ?",
+            (status, candidate_id),
+        )
+        self._conn.commit()
+
+    # ---- merge history ---------------------------------------------------
+
+    def get_merge_history(
+        self, entity_id: int
+    ) -> list[dict[str, object]]:
+        rows = self._conn.execute(
+            "SELECT * FROM entity_merge_history"
+            " WHERE survivor_id = ? ORDER BY merged_at DESC",
+            (entity_id,),
+        ).fetchall()
+        return [
+            {
+                "id": r["id"],
+                "survivor_id": r["survivor_id"],
+                "absorbed_id": r["absorbed_id"],
+                "absorbed_name": r["absorbed_name"],
+                "absorbed_type": r["absorbed_type"],
+                "absorbed_desc": r["absorbed_desc"],
+                "absorbed_aliases": json.loads(r["absorbed_aliases"]),
+                "merged_at": r["merged_at"],
+                "merged_by": r["merged_by"],
+            }
+            for r in rows
+        ]
 
 
 def _row_to_mention(row: sqlite3.Row) -> EntityMention:

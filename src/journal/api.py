@@ -1344,8 +1344,8 @@ def register_api_routes(
         if search:
             needle = search.strip().lower()
             rows = [
-                (e, c)
-                for e, c in rows
+                (e, c, ls)
+                for e, c, ls in rows
                 if needle in e.canonical_name.lower()
                 or any(needle in a.lower() for a in e.aliases)
             ]
@@ -1470,6 +1470,258 @@ def register_api_routes(
                 "incoming": [_relationship_dict(r) for r in incoming],
             }
         )
+
+    # ---- entity management: update / delete / merge ----------------------
+
+    @mcp.custom_route(
+        "/api/entities/{entity_id:int}",
+        methods=["PATCH"],
+        name="api_update_entity",
+    )
+    async def update_entity(request: Request) -> JSONResponse:
+        services = _require_services()
+        if services is None:
+            return JSONResponse(
+                {"error": "Server not initialized"}, status_code=503
+            )
+        entity_store: EntityStore = services["entity_store"]
+        entity_id = int(request.path_params["entity_id"])
+
+        try:
+            body = await request.json()
+        except Exception:
+            return JSONResponse(
+                {"error": "Invalid JSON body"}, status_code=400
+            )
+
+        canonical_name = body.get("canonical_name")
+        entity_type = body.get("entity_type")
+        description = body.get("description")
+
+        if canonical_name is not None and (
+            not isinstance(canonical_name, str) or not canonical_name.strip()
+        ):
+            return JSONResponse(
+                {"error": "'canonical_name' must be a non-empty string"},
+                status_code=400,
+            )
+        valid_types = {
+            "person", "place", "activity", "organization", "topic", "other"
+        }
+        if entity_type is not None and entity_type not in valid_types:
+            return JSONResponse(
+                {"error": f"'entity_type' must be one of {sorted(valid_types)}"},
+                status_code=400,
+            )
+
+        try:
+            updated = entity_store.update_entity(
+                entity_id,
+                canonical_name=canonical_name,
+                entity_type=entity_type,
+                description=description,
+            )
+        except ValueError:
+            return JSONResponse(
+                {"error": f"Entity {entity_id} not found"}, status_code=404
+            )
+
+        log.info("PATCH /api/entities/%d — updated", entity_id)
+        return JSONResponse(_entity_detail(updated))
+
+    @mcp.custom_route(
+        "/api/entities/{entity_id:int}",
+        methods=["DELETE"],
+        name="api_delete_entity",
+    )
+    async def delete_entity_route(request: Request) -> JSONResponse:
+        services = _require_services()
+        if services is None:
+            return JSONResponse(
+                {"error": "Server not initialized"}, status_code=503
+            )
+        entity_store: EntityStore = services["entity_store"]
+        entity_id = int(request.path_params["entity_id"])
+
+        try:
+            entity_store.delete_entity(entity_id)
+        except ValueError:
+            return JSONResponse(
+                {"error": f"Entity {entity_id} not found"}, status_code=404
+            )
+
+        log.info("DELETE /api/entities/%d — deleted", entity_id)
+        return JSONResponse({"deleted": True, "id": entity_id})
+
+    @mcp.custom_route(
+        "/api/entities/merge",
+        methods=["POST"],
+        name="api_merge_entities",
+    )
+    async def merge_entities_route(request: Request) -> JSONResponse:
+        services = _require_services()
+        if services is None:
+            return JSONResponse(
+                {"error": "Server not initialized"}, status_code=503
+            )
+        entity_store: EntityStore = services["entity_store"]
+
+        try:
+            body = await request.json()
+        except Exception:
+            return JSONResponse(
+                {"error": "Invalid JSON body"}, status_code=400
+            )
+
+        survivor_id = body.get("survivor_id")
+        absorbed_ids = body.get("absorbed_ids")
+
+        if not isinstance(survivor_id, int):
+            return JSONResponse(
+                {"error": "'survivor_id' must be an integer"}, status_code=400
+            )
+        if (
+            not isinstance(absorbed_ids, list)
+            or not absorbed_ids
+            or not all(isinstance(i, int) for i in absorbed_ids)
+        ):
+            return JSONResponse(
+                {"error": "'absorbed_ids' must be a non-empty list of integers"},
+                status_code=400,
+            )
+
+        try:
+            result = entity_store.merge_entities(survivor_id, absorbed_ids)
+        except ValueError as e:
+            return JSONResponse({"error": str(e)}, status_code=400)
+
+        survivor = entity_store.get_entity(survivor_id)
+        log.info(
+            "POST /api/entities/merge — merged %s into %d",
+            absorbed_ids, survivor_id,
+        )
+        return JSONResponse({
+            "survivor": _entity_detail(survivor) if survivor else None,
+            "absorbed_ids": result.absorbed_ids,
+            "mentions_reassigned": result.mentions_reassigned,
+            "relationships_reassigned": result.relationships_reassigned,
+            "aliases_added": result.aliases_added,
+        })
+
+    # ---- merge candidates -----------------------------------------------
+
+    @mcp.custom_route(
+        "/api/entities/merge-candidates",
+        methods=["GET"],
+        name="api_merge_candidates",
+    )
+    async def list_merge_candidates_route(
+        request: Request,
+    ) -> JSONResponse:
+        services = _require_services()
+        if services is None:
+            return JSONResponse(
+                {"error": "Server not initialized"}, status_code=503
+            )
+        entity_store: EntityStore = services["entity_store"]
+
+        status = request.query_params.get("status", "pending")
+        try:
+            limit = min(int(request.query_params.get("limit", "50")), 200)
+        except ValueError:
+            limit = 50
+
+        candidates = entity_store.list_merge_candidates(
+            status=status, limit=limit
+        )
+        items = [
+            {
+                "id": c.id,
+                "entity_a": _entity_summary(c.entity_a),
+                "entity_b": _entity_summary(c.entity_b),
+                "similarity": c.similarity,
+                "status": c.status,
+                "extraction_run_id": c.extraction_run_id,
+                "created_at": c.created_at,
+            }
+            for c in candidates
+        ]
+        log.info(
+            "GET /api/entities/merge-candidates — %d candidates", len(items)
+        )
+        return JSONResponse({"items": items, "total": len(items)})
+
+    @mcp.custom_route(
+        "/api/entities/merge-candidates/{candidate_id:int}",
+        methods=["PATCH"],
+        name="api_resolve_merge_candidate",
+    )
+    async def resolve_merge_candidate_route(
+        request: Request,
+    ) -> JSONResponse:
+        services = _require_services()
+        if services is None:
+            return JSONResponse(
+                {"error": "Server not initialized"}, status_code=503
+            )
+        entity_store: EntityStore = services["entity_store"]
+        candidate_id = int(request.path_params["candidate_id"])
+
+        try:
+            body = await request.json()
+        except Exception:
+            return JSONResponse(
+                {"error": "Invalid JSON body"}, status_code=400
+            )
+
+        status = body.get("status")
+        if status not in ("accepted", "dismissed"):
+            return JSONResponse(
+                {"error": "'status' must be 'accepted' or 'dismissed'"},
+                status_code=400,
+            )
+
+        try:
+            entity_store.resolve_merge_candidate(candidate_id, status)
+        except ValueError as e:
+            return JSONResponse({"error": str(e)}, status_code=400)
+
+        log.info(
+            "PATCH /api/entities/merge-candidates/%d — %s",
+            candidate_id, status,
+        )
+        return JSONResponse({"id": candidate_id, "status": status})
+
+    @mcp.custom_route(
+        "/api/entities/{entity_id:int}/merge-history",
+        methods=["GET"],
+        name="api_entity_merge_history",
+    )
+    async def entity_merge_history(request: Request) -> JSONResponse:
+        services = _require_services()
+        if services is None:
+            return JSONResponse(
+                {"error": "Server not initialized"}, status_code=503
+            )
+        entity_store: EntityStore = services["entity_store"]
+        entity_id = int(request.path_params["entity_id"])
+
+        entity = entity_store.get_entity(entity_id)
+        if entity is None:
+            return JSONResponse(
+                {"error": f"Entity {entity_id} not found"}, status_code=404
+            )
+
+        history = entity_store.get_merge_history(entity_id)
+        log.info(
+            "GET /api/entities/%d/merge-history — %d entries",
+            entity_id, len(history),
+        )
+        return JSONResponse(
+            {"entity_id": entity_id, "history": history}
+        )
+
+    # ---- per-entry entity lookups ---------------------------------------
 
     @mcp.custom_route(
         "/api/entries/{entry_id:int}/entities",

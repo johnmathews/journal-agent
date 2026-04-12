@@ -807,6 +807,135 @@ says "quiet reflection" but the canonical entity is "prayer").
 { "error": "Entry 999 not found" }
 ```
 
+### PATCH /api/entities/{entity_id}
+
+Update an entity's canonical name, type, or description.
+
+**Request body:**
+```json
+{
+  "canonical_name": "Lizzie Extance",
+  "entity_type": "person",
+  "description": "John's sister"
+}
+```
+
+All fields are optional — include only the ones you want to change.
+
+**Response (200):** Full entity detail object (same shape as GET /api/entities/{id}).
+
+**Response (400):** `canonical_name` is empty, or `entity_type` is invalid.
+
+**Response (404):** Entity not found.
+
+### DELETE /api/entities/{entity_id}
+
+Delete an entity and all its mentions, relationships, and aliases (via FK CASCADE).
+
+**Response (200):**
+```json
+{ "deleted": true, "id": 42 }
+```
+
+**Response (404):** Entity not found.
+
+### POST /api/entities/merge
+
+Merge one or more entities into a survivor. All mentions, relationships, and
+aliases from the absorbed entities are reassigned to the survivor. Absorbed
+entities are deleted. A snapshot of each absorbed entity is saved to
+`entity_merge_history` for audit/undo.
+
+**Request body:**
+```json
+{
+  "survivor_id": 5,
+  "absorbed_ids": [12, 17]
+}
+```
+
+**Response (200):**
+```json
+{
+  "survivor": { "id": 5, "canonical_name": "Lizzie Extance", "..." : "..." },
+  "absorbed_ids": [12, 17],
+  "mentions_reassigned": 4,
+  "relationships_reassigned": 2,
+  "aliases_added": 3
+}
+```
+
+**Response (400):** Missing fields, entity not found, or trying to merge into self.
+
+### GET /api/entities/merge-candidates
+
+List pending merge candidates (near-miss similarity matches from extraction).
+
+**Query parameters:**
+
+| Parameter | Type | Default | Description |
+|-----------|------|---------|-------------|
+| `status`  | string | `pending` | Filter by status: `pending`, `accepted`, `dismissed` |
+| `limit`   | int    | 50        | Max results (up to 200) |
+
+**Response (200):**
+```json
+{
+  "items": [
+    {
+      "id": 1,
+      "entity_a": { "id": 5, "canonical_name": "Liz", "..." : "..." },
+      "entity_b": { "id": 12, "canonical_name": "Lizzie", "..." : "..." },
+      "similarity": 0.82,
+      "status": "pending",
+      "extraction_run_id": "abc-123",
+      "created_at": "2026-04-12T10:00:00Z"
+    }
+  ],
+  "total": 1
+}
+```
+
+### PATCH /api/entities/merge-candidates/{candidate_id}
+
+Resolve a merge candidate by accepting or dismissing it.
+
+**Request body:**
+```json
+{ "status": "dismissed" }
+```
+
+`status` must be `"accepted"` or `"dismissed"`.
+
+**Response (200):**
+```json
+{ "id": 1, "status": "dismissed" }
+```
+
+### GET /api/entities/{entity_id}/merge-history
+
+Get the merge history for an entity (all entities that were merged into it).
+
+**Response (200):**
+```json
+{
+  "entity_id": 5,
+  "history": [
+    {
+      "id": 1,
+      "survivor_id": 5,
+      "absorbed_id": 12,
+      "absorbed_name": "Vienna's aunt",
+      "absorbed_type": "person",
+      "absorbed_desc": "",
+      "absorbed_aliases": ["aunt", "lizzie"],
+      "merged_at": "2026-04-12T10:30:00Z",
+      "merged_by": "user"
+    }
+  ]
+}
+```
+
 ---
 
 ## Batch job endpoints
