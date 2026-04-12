@@ -169,7 +169,7 @@ class TestIngestImageFromUrl:
 
         mock_url.return_value = _mock_urlopen(b"same image data")
 
-        with pytest.raises(ValueError, match="already ingested"):
+        with pytest.raises(ValueError, match="already been uploaded"):
             ingestion_service.ingest_image_from_url(
                 url="https://example.com/page1.jpg",
                 date="2026-03-23",
@@ -313,7 +313,7 @@ class TestIngestMultiPageFromUrls:
             _mock_urlopen(b"page two bytes"),
         ]
 
-        with pytest.raises(ValueError, match="already ingested"):
+        with pytest.raises(ValueError, match="already been uploaded"):
             ingestion_service.ingest_multi_page_entry_from_urls(
                 urls=[
                     "https://example.com/p1.jpg",

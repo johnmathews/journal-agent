@@ -156,7 +156,10 @@ class IngestionService:
         # Check for duplicate
         file_hash = hashlib.sha256(image_data).hexdigest()
         if self._is_duplicate(file_hash):
-            raise ValueError(f"Image already ingested (hash: {file_hash[:12]}...)")
+            raise ValueError(
+                "This image has already been uploaded in another entry. "
+                "Delete the existing entry first if you want to re-upload."
+            )
 
         # Extract text + uncertainty spans via OCR. Spans are in
         # ocr_result.text coordinates; since we store that text as-is
@@ -204,7 +207,10 @@ class IngestionService:
 
         file_hash = hashlib.sha256(audio_data).hexdigest()
         if self._is_duplicate(file_hash):
-            raise ValueError(f"Audio already ingested (hash: {file_hash[:12]}...)")
+            raise ValueError(
+                "This audio file has already been uploaded in another entry. "
+                "Delete the existing entry first if you want to re-upload."
+            )
 
         # Transcribe
         raw_text = self._transcription.transcribe(audio_data, media_type, language)
@@ -452,7 +458,8 @@ class IngestionService:
             file_hash = hashlib.sha256(image_data).hexdigest()
             if self._is_duplicate(file_hash):
                 raise ValueError(
-                    f"Page {i + 1} already ingested (hash: {file_hash[:12]}...)"
+                    f"Page {i + 1} has already been uploaded in another entry. "
+                    f"Delete the existing entry first if you want to re-upload."
                 )
             ocr_result = self._ocr.extract(image_data, media_type)
             if not ocr_result.text.strip():

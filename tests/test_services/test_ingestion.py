@@ -73,7 +73,7 @@ class TestIngestImage:
     def test_ingest_image_duplicate(self, ingestion_service):
         ingestion_service.ingest_image(b"same data", "image/jpeg", "2026-03-22")
 
-        with pytest.raises(ValueError, match="already ingested"):
+        with pytest.raises(ValueError, match="already been uploaded"):
             ingestion_service.ingest_image(b"same data", "image/jpeg", "2026-03-23")
 
     def test_ingest_image_empty_text(self, ingestion_service, mock_ocr):
@@ -101,7 +101,7 @@ class TestIngestVoice:
     def test_ingest_voice_duplicate(self, ingestion_service):
         ingestion_service.ingest_voice(b"same audio", "audio/mp3", "2026-03-22")
 
-        with pytest.raises(ValueError, match="already ingested"):
+        with pytest.raises(ValueError, match="already been uploaded"):
             ingestion_service.ingest_voice(b"same audio", "audio/mp3", "2026-03-23")
 
 
@@ -458,7 +458,7 @@ class TestMultiPageIngestion:
         ingestion_service.ingest_image(b"same", "image/jpeg", "2026-03-22")
 
         mock_ocr.extract.return_value = _ocr_result("Another page.")
-        with pytest.raises(ValueError, match="already ingested"):
+        with pytest.raises(ValueError, match="already been uploaded"):
             ingestion_service.ingest_multi_page_entry(
                 images=[(b"same", "image/jpeg")],
                 date="2026-03-23",
