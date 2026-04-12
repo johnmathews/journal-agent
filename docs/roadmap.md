@@ -307,27 +307,54 @@ is comfortable with the output, this becomes worth building.
 
 ---
 
-### 8. Entity merge review UI `[webapp]`
+### 8. Entity management: combine, rename, delete `[both]`
 
-The extraction service emits warnings whenever stage-c (embedding
-similarity) merges two entities that weren't exact-name or alias
-matches. There's currently no surface in the webapp to review or
-overturn these merges.
+Entities extracted by the LLM are often fragmented or duplicated.
+The same real-world person may appear as multiple entities —
+e.g., "Vienna's aunt", "my sister", and "Lizzie Extance" are all
+the same person. The system needs a way for the user to combine
+these, as well as rename entities that were extracted with the
+wrong canonical name, and delete entities that are noise.
 
-**Design sketch:**
-1. New "Merge review" badge in the sidebar that shows a count of
-   pending warnings
-2. Review page lists warnings with entity A, entity B, their
-   canonical names, sample mentions, and an "Accept merge" /
-   "Split back apart" action
-3. Splitting an accepted merge needs a backend surface — this is a
-   **backend design question** before it's a UI task.
+**Features:**
 
-**Blocker:** Tier 1 item 1 (no merges exist yet), plus needs a
-design pass on how "undo a merge" works at the storage layer.
+1. **Combine / merge** — select 2+ entities and merge them into
+   one. The user picks which canonical name to keep. All mentions,
+   relationships, and aliases from the merged entities are
+   reassigned to the survivor. This is the most important operation
+   because the extraction service frequently creates separate
+   entities for the same real-world referent described with
+   different phrases.
+2. **Rename** — change an entity's canonical name (e.g., fix
+   "Lizzie" → "Lizzie Extance"). Should also allow editing the
+   entity type (person / place / etc.) if the extraction got it
+   wrong.
+3. **Delete** — remove an entity entirely (e.g., a false positive
+   like "Monday" tagged as a person). Removes the entity, its
+   mentions, and its relationships.
+4. **Merge review** — the extraction service emits warnings whenever
+   stage-c (embedding similarity) auto-merges two entities. Surface
+   these in the UI with "Accept" / "Split apart" actions so the
+   user can review automatic merges.
 
-**Source:** `journal-webapp/journal/260411-auth-header-overlay-cache-entity-views.md`
-"Deferred to Phase 2".
+**Backend work** `[server]`:
+- API endpoints: `POST /api/entities/merge`, `PATCH /api/entities/{id}`,
+  `DELETE /api/entities/{id}` (delete may already exist)
+- Merge logic in the entity store: reassign mentions and
+  relationships, update aliases, delete the absorbed entities
+- Split logic for undoing a merge — design question on whether to
+  keep a merge-history table or reconstruct from mentions
+
+**Frontend work** `[webapp]`:
+- Entity detail view: rename/type edit form, delete button
+- Entity list view: multi-select + "Merge selected" action
+- Merge review queue (badge count in sidebar)
+
+**Blocker:** Tier 1 item 1 (needs real entity data to work with).
+
+**Source:** user feedback 2026-04-12 — "combining is important
+because 'Vienna's aunt' is also 'my sister' and is also 'Lizzie
+Extance'".
 
 ---
 
