@@ -1,6 +1,5 @@
 """Tests for SQLiteEntityStore."""
 
-import json
 import sqlite3
 
 import pytest

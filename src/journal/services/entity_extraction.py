@@ -13,6 +13,7 @@ reason.
 
 from __future__ import annotations
 
+import contextlib
 import logging
 import math
 import uuid
@@ -151,15 +152,13 @@ class EntityExtractionService:
                 warnings.append(warning)
             if near_miss is not None:
                 candidate_id, score = near_miss
-                try:
+                with contextlib.suppress(Exception):
                     self._store.create_merge_candidate(
                         entity_id_a=candidate_id,
                         entity_id_b=entity_id,
                         similarity=score,
                         extraction_run_id=run_id,
                     )
-                except Exception:
-                    pass  # table may not exist on older DBs
 
             # Record the resolved id under every name we know about
             # so the relationships step has the best chance of
