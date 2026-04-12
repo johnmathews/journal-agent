@@ -776,7 +776,10 @@ entity, split into outgoing (entity is the subject) and incoming
 ### GET /api/entries/{entry_id}/entities
 
 List the entities extracted from a single entry, with per-entity
-mention counts scoped to that entry.
+mention counts and verbatim quotes scoped to that entry. The `quotes`
+array contains the deduplicated text spans that Claude extracted from
+the entry — these may differ from the `canonical_name` (e.g. the entry
+says "quiet reflection" but the canonical entity is "prayer").
 
 **No query parameters.**
 
@@ -791,6 +794,7 @@ mention counts scoped to that entry.
       "entity_type": "person",
       "aliases": ["Atlas G."],
       "mention_count": 2,
+      "quotes": ["Atlas", "Atlas G."],
       "first_seen": "2026-01-04"
     }
   ],

@@ -10,6 +10,7 @@ from starlette.testclient import TestClient
 
 from journal.db.migrations import run_migrations
 from journal.db.repository import SQLiteEntryRepository
+from journal.entitystore.store import SQLiteEntityStore
 from journal.services.ingestion import IngestionService
 from journal.services.query import QueryService
 
@@ -75,7 +76,8 @@ def services(
         vector_store=mock_vector_store,
         embeddings_provider=mock_embeddings,
     )
-    return {"ingestion": ingestion, "query": query}
+    entity_store = SQLiteEntityStore(repo._conn)
+    return {"ingestion": ingestion, "query": query, "entity_store": entity_store}
 
 
 @pytest.fixture
@@ -1298,3 +1300,64 @@ class TestRepositoryHelpers:
         self, repo: SQLiteEntryRepository
     ) -> None:
         assert repo.get_page_count(999) == 0
+
+
+class TestEntryEntities:
+    def test_entry_entities_includes_quotes(
+        self,
+        client: TestClient,
+        repo: SQLiteEntryRepository,
+        services: dict,
+    ) -> None:
+        entry = repo.create_entry("2026-04-01", "ocr", "I met Alice at the park.", 5)
+        entity_store: SQLiteEntityStore = services["entity_store"]
+        entity = entity_store.create_entity("person", "Alice", "A friend", "2026-04-01")
+        entity_store.create_mention(
+            entity_id=entity.id,
+            entry_id=entry.id,
+            quote="Alice at the park",
+            confidence=0.95,
+            extraction_run_id="run-1",
+        )
+        entity_store.create_mention(
+            entity_id=entity.id,
+            entry_id=entry.id,
+            quote="Alice",
+            confidence=0.9,
+            extraction_run_id="run-1",
+        )
+        resp = client.get(f"/api/entries/{entry.id}/entities")
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data["total"] == 1
+        item = data["items"][0]
+        assert item["canonical_name"] == "Alice"
+        assert item["mention_count"] == 2
+        assert set(item["quotes"]) == {"Alice at the park", "Alice"}
+
+    def test_entry_entities_deduplicates_quotes(
+        self,
+        client: TestClient,
+        repo: SQLiteEntryRepository,
+        services: dict,
+    ) -> None:
+        entry = repo.create_entry("2026-04-01", "ocr", "Alice Alice", 2)
+        entity_store: SQLiteEntityStore = services["entity_store"]
+        entity = entity_store.create_entity("person", "Alice", "", "2026-04-01")
+        entity_store.create_mention(
+            entity_id=entity.id,
+            entry_id=entry.id,
+            quote="Alice",
+            confidence=0.9,
+            extraction_run_id="run-1",
+        )
+        entity_store.create_mention(
+            entity_id=entity.id,
+            entry_id=entry.id,
+            quote="Alice",
+            confidence=0.85,
+            extraction_run_id="run-1",
+        )
+        resp = client.get(f"/api/entries/{entry.id}/entities")
+        data = resp.json()
+        assert data["items"][0]["quotes"] == ["Alice"]

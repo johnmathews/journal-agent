@@ -78,10 +78,13 @@ def _entry_to_dict(
 
 
 def _entity_summary(
-    entity: Any, mention_count: int = 0, last_seen: str = ""
+    entity: Any,
+    mention_count: int = 0,
+    last_seen: str = "",
+    quotes: list[str] | None = None,
 ) -> dict[str, Any]:
     """Convert an Entity to a JSON-serialisable summary dict."""
-    return {
+    d: dict[str, Any] = {
         "id": entity.id,
         "canonical_name": entity.canonical_name,
         "entity_type": entity.entity_type,
@@ -90,6 +93,9 @@ def _entity_summary(
         "first_seen": entity.first_seen,
         "last_seen": last_seen,
     }
+    if quotes is not None:
+        d["quotes"] = quotes
+    return d
 
 
 def _entity_detail(entity: Any) -> dict[str, Any]:
@@ -1489,12 +1495,20 @@ def register_api_routes(
         entities = entity_store.get_entities_for_entry(entry_id)
         mentions = entity_store.get_mentions_for_entry(entry_id)
         mentions_by_entity: dict[int, int] = {}
+        quotes_by_entity: dict[int, list[str]] = {}
         for m in mentions:
             mentions_by_entity[m.entity_id] = (
                 mentions_by_entity.get(m.entity_id, 0) + 1
             )
+            quotes_by_entity.setdefault(m.entity_id, [])
+            if m.quote not in quotes_by_entity[m.entity_id]:
+                quotes_by_entity[m.entity_id].append(m.quote)
         items = [
-            _entity_summary(e, mentions_by_entity.get(e.id, 0))
+            _entity_summary(
+                e,
+                mentions_by_entity.get(e.id, 0),
+                quotes=quotes_by_entity.get(e.id, []),
+            )
             for e in entities
         ]
         log.info(
