@@ -43,6 +43,7 @@ if TYPE_CHECKING:
     from journal.models import Job
     from journal.services.backfill import MoodBackfillResult
     from journal.services.entity_extraction import EntityExtractionService
+    from journal.services.ingestion import IngestionService
     from journal.services.mood_scoring import MoodScoringService
 
 log = logging.getLogger(__name__)
@@ -66,6 +67,14 @@ _MOOD_BACKFILL_KEYS: dict[str, type | tuple[type, ...]] = {
 }
 
 _MOOD_BACKFILL_MODES = frozenset({"stale-only", "force"})
+
+_INGEST_IMAGES_KEYS: dict[str, type | tuple[type, ...]] = {
+    "entry_date": str,
+}
+
+_MOOD_SCORE_ENTRY_KEYS: dict[str, type | tuple[type, ...]] = {
+    "entry_id": int,
+}
 
 
 def _validate_params(
@@ -135,15 +144,22 @@ class JobRunner:
         mood_backfill_callable: Callable[..., MoodBackfillResult],
         mood_scoring_service: MoodScoringService,
         entry_repository: EntryRepository,
+        ingestion_service: IngestionService | None = None,
     ) -> None:
         self._jobs = job_repository
         self._extraction = entity_extraction_service
         self._mood_backfill = mood_backfill_callable
         self._mood_scoring = mood_scoring_service
         self._entries = entry_repository
+        self._ingestion = ingestion_service
         self._executor = ThreadPoolExecutor(
             max_workers=1, thread_name_prefix="journal-jobs"
         )
+        # Temporary storage for image data keyed by job_id. The images
+        # are large binary blobs that cannot be serialised into the
+        # jobs table params_json column. They are popped from the dict
+        # when the worker starts so memory is released promptly.
+        self._pending_images: dict[str, list[tuple[bytes, str, str]]] = {}
 
     # ------------------------------------------------------------------
     # Public API
@@ -185,6 +201,39 @@ class JobRunner:
             )
         job = self._jobs.create("mood_backfill", params)
         self._executor.submit(self._run_mood_backfill, job.id, params)
+        return job
+
+    def submit_image_ingestion(
+        self,
+        images: list[tuple[bytes, str, str]],  # (data, media_type, filename)
+        entry_date: str,
+    ) -> Job:
+        """Queue an image-ingestion job.
+
+        Images are held in memory until the worker starts. The params
+        stored in the jobs table contain only the entry_date and page
+        count (image bytes are too large for the JSON column).
+        """
+        if not images:
+            raise ValueError("At least one image is required")
+        params = {"entry_date": entry_date}
+        _validate_params(params, _INGEST_IMAGES_KEYS, job_type="ingest_images")
+        job = self._jobs.create("ingest_images", {**params, "page_count": len(images)})
+        self._pending_images[job.id] = images
+        self._executor.submit(self._run_image_ingestion, job.id, params)
+        return job
+
+    def submit_mood_score_entry(self, entry_id: int) -> Job:
+        """Queue a mood-scoring job for a single entry.
+
+        Lighter than a full backfill — scores one entry and returns.
+        Used by the text/file ingest endpoints to defer mood scoring
+        to a background thread.
+        """
+        params = {"entry_id": entry_id}
+        _validate_params(params, _MOOD_SCORE_ENTRY_KEYS, job_type="mood_score_entry")
+        job = self._jobs.create("mood_score_entry", params)
+        self._executor.submit(self._run_mood_score_entry, job.id, params)
         return job
 
     def shutdown(self, wait: bool = False) -> None:
@@ -263,6 +312,80 @@ class JobRunner:
                 log.exception(
                     "Failed to record failure for job %s", job_id
                 )
+
+    def _run_image_ingestion(
+        self, job_id: str, params: dict[str, Any]
+    ) -> None:
+        """Execute one image-ingestion job from start to terminal state."""
+        try:
+            self._jobs.mark_running(job_id)
+            images_with_names = self._pending_images.pop(job_id, [])
+            if not images_with_names:
+                self._jobs.mark_failed(job_id, "No image data found for job")
+                return
+            if self._ingestion is None:
+                self._jobs.mark_failed(job_id, "Ingestion service not available")
+                return
+
+            # Strip filenames — IngestionService expects (bytes, media_type)
+            images: list[tuple[bytes, str]] = [
+                (data, media_type) for data, media_type, _filename in images_with_names
+            ]
+            entry_date = params["entry_date"]
+            total = len(images) + 1  # pages + processing step
+
+            def progress_callback(current: int, total_pages: int) -> None:
+                self._jobs.update_progress(job_id, current, total)
+
+            if len(images) == 1:
+                self._jobs.update_progress(job_id, 0, total)
+                entry = self._ingestion.ingest_image(images[0][0], images[0][1], entry_date)
+                self._jobs.update_progress(job_id, 1, total)
+            else:
+                self._jobs.update_progress(job_id, 0, total)
+                entry = self._ingestion.ingest_multi_page_entry(
+                    images, entry_date, on_progress=progress_callback,
+                )
+
+            self._jobs.update_progress(job_id, total, total)
+            self._jobs.mark_succeeded(job_id, {"entry_id": entry.id})
+        except Exception as exc:  # noqa: BLE001 — terminal-state guard
+            log.exception("Image ingestion job %s failed", job_id)
+            # Clean up any remaining image data
+            self._pending_images.pop(job_id, None)
+            try:
+                self._jobs.mark_failed(job_id, str(exc))
+            except Exception:  # noqa: BLE001 — last-resort bookkeeping
+                log.exception("Failed to record failure for job %s", job_id)
+
+    def _run_mood_score_entry(
+        self, job_id: str, params: dict[str, Any]
+    ) -> None:
+        """Score a single entry's mood dimensions."""
+        try:
+            self._jobs.mark_running(job_id)
+            self._jobs.update_progress(job_id, 0, 1)
+
+            entry_id = params["entry_id"]
+            entry = self._entries.get_entry(entry_id)
+            if entry is None:
+                self._jobs.mark_failed(job_id, f"Entry {entry_id} not found")
+                return
+
+            text = entry.final_text or entry.raw_text
+            if not text or not text.strip():
+                self._jobs.mark_failed(job_id, f"Entry {entry_id} has no text")
+                return
+
+            count = self._mood_scoring.score_entry(entry_id, text)
+            self._jobs.update_progress(job_id, 1, 1)
+            self._jobs.mark_succeeded(job_id, {"entry_id": entry_id, "scores_written": count})
+        except Exception as exc:  # noqa: BLE001 — terminal-state guard
+            log.exception("Mood score entry job %s failed", job_id)
+            try:
+                self._jobs.mark_failed(job_id, str(exc))
+            except Exception:  # noqa: BLE001 — last-resort bookkeeping
+                log.exception("Failed to record failure for job %s", job_id)
 
     def _run_mood_backfill(
         self, job_id: str, params: dict[str, Any]

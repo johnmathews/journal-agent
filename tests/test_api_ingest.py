@@ -1,0 +1,234 @@
+"""Tests for entry creation API endpoints."""
+
+import io
+import sqlite3
+from collections.abc import Generator
+from pathlib import Path
+from unittest.mock import MagicMock
+
+import pytest
+from starlette.testclient import TestClient
+
+from journal.db.jobs_repository import SQLiteJobRepository
+from journal.db.migrations import run_migrations
+from journal.db.repository import SQLiteEntryRepository
+from journal.services.chunking import FixedTokenChunker
+from journal.services.ingestion import IngestionService
+from journal.services.jobs import JobRunner
+from journal.services.query import QueryService
+
+
+@pytest.fixture
+def api_db_conn(tmp_path: Path) -> Generator[sqlite3.Connection]:
+    db_path = tmp_path / "test_api_ingest.db"
+    conn = sqlite3.connect(str(db_path), check_same_thread=False)
+    conn.row_factory = sqlite3.Row
+    conn.execute("PRAGMA journal_mode=WAL")
+    conn.execute("PRAGMA foreign_keys=ON")
+    run_migrations(conn)
+    yield conn
+    conn.close()
+
+
+@pytest.fixture
+def repo(api_db_conn: sqlite3.Connection) -> SQLiteEntryRepository:
+    return SQLiteEntryRepository(api_db_conn)
+
+
+@pytest.fixture
+def mock_vector_store() -> MagicMock:
+    store = MagicMock()
+    store.delete_entry = MagicMock()
+    store.add_entry = MagicMock()
+    return store
+
+
+@pytest.fixture
+def mock_embeddings() -> MagicMock:
+    provider = MagicMock()
+    provider.embed_texts = MagicMock(return_value=[[0.1] * 1024])
+    provider.embed_query = MagicMock(return_value=[0.1] * 1024)
+    return provider
+
+
+@pytest.fixture
+def services(
+    repo: SQLiteEntryRepository,
+    mock_vector_store: MagicMock,
+    mock_embeddings: MagicMock,
+    api_db_conn: sqlite3.Connection,
+) -> dict:
+    ingestion = IngestionService(
+        repository=repo,
+        vector_store=mock_vector_store,
+        ocr_provider=MagicMock(),
+        transcription_provider=MagicMock(),
+        embeddings_provider=mock_embeddings,
+        chunker=FixedTokenChunker(max_tokens=150, overlap_tokens=40),
+    )
+    query = QueryService(
+        repository=repo,
+        vector_store=mock_vector_store,
+        embeddings_provider=mock_embeddings,
+    )
+    # Minimal job infrastructure for the image endpoint
+    job_repo = SQLiteJobRepository(api_db_conn)
+    mock_extraction = MagicMock()
+    mock_mood_scoring = MagicMock()
+    job_runner = JobRunner(
+        job_repository=job_repo,
+        entity_extraction_service=mock_extraction,
+        mood_backfill_callable=MagicMock(),
+        mood_scoring_service=mock_mood_scoring,
+        entry_repository=repo,
+        ingestion_service=ingestion,
+    )
+    return {
+        "ingestion": ingestion,
+        "query": query,
+        "job_runner": job_runner,
+        "job_repository": job_repo,
+    }
+
+
+@pytest.fixture
+def client(services: dict) -> Generator[TestClient]:
+    from mcp.server.fastmcp import FastMCP
+
+    from journal.api import register_api_routes
+
+    test_mcp = FastMCP("test-journal")
+    register_api_routes(test_mcp, lambda: services)
+    app = test_mcp.streamable_http_app()
+    with TestClient(app, raise_server_exceptions=False) as tc:
+        yield tc
+
+
+class TestIngestText:
+    def test_creates_entry(self, client: TestClient) -> None:
+        response = client.post(
+            "/api/entries/ingest/text",
+            json={"text": "Today I went for a walk in the park."},
+        )
+        assert response.status_code == 201
+        data = response.json()
+        assert "entry" in data
+        assert data["entry"]["source_type"] == "manual"
+        assert "walk" in data["entry"]["final_text"]
+        assert data["mood_job_id"] is None
+
+    def test_custom_date(self, client: TestClient) -> None:
+        response = client.post(
+            "/api/entries/ingest/text",
+            json={"text": "A journal entry.", "entry_date": "2026-01-15"},
+        )
+        assert response.status_code == 201
+        assert response.json()["entry"]["entry_date"] == "2026-01-15"
+
+    def test_custom_source_type(self, client: TestClient) -> None:
+        response = client.post(
+            "/api/entries/ingest/text",
+            json={"text": "Imported text.", "source_type": "import"},
+        )
+        assert response.status_code == 201
+        assert response.json()["entry"]["source_type"] == "import"
+
+    def test_missing_text(self, client: TestClient) -> None:
+        response = client.post("/api/entries/ingest/text", json={})
+        assert response.status_code == 400
+        assert "text" in response.json()["error"].lower()
+
+    def test_empty_text(self, client: TestClient) -> None:
+        response = client.post(
+            "/api/entries/ingest/text", json={"text": "   "}
+        )
+        assert response.status_code == 400
+
+    def test_invalid_json(self, client: TestClient) -> None:
+        response = client.post(
+            "/api/entries/ingest/text",
+            content=b"not json",
+            headers={"Content-Type": "application/json"},
+        )
+        assert response.status_code == 400
+
+
+class TestIngestFile:
+    def _upload(
+        self, client: TestClient, content: str = "Hello from a file.",
+        filename: str = "entry.txt", entry_date: str | None = None,
+    ):
+        files = {"file": (filename, io.BytesIO(content.encode()), "text/plain")}
+        data = {}
+        if entry_date:
+            data["entry_date"] = entry_date
+        return client.post("/api/entries/ingest/file", files=files, data=data)
+
+    def test_txt_upload(self, client: TestClient) -> None:
+        response = self._upload(client, "My exported journal entry.")
+        assert response.status_code == 201
+        data = response.json()
+        assert data["entry"]["source_type"] == "import"
+        assert "exported" in data["entry"]["final_text"]
+
+    def test_md_upload(self, client: TestClient) -> None:
+        response = self._upload(client, "# My Day\n\nWent hiking.", filename="entry.md")
+        assert response.status_code == 201
+        assert "# My Day" in response.json()["entry"]["raw_text"]
+
+    def test_custom_date(self, client: TestClient) -> None:
+        response = self._upload(client, "Some text.", entry_date="2026-02-20")
+        assert response.status_code == 201
+        assert response.json()["entry"]["entry_date"] == "2026-02-20"
+
+    def test_wrong_extension(self, client: TestClient) -> None:
+        files = {"file": ("photo.jpg", io.BytesIO(b"not an image"), "image/jpeg")}
+        response = client.post("/api/entries/ingest/file", files=files)
+        assert response.status_code == 400
+        assert ".md or .txt" in response.json()["error"]
+
+    def test_empty_file(self, client: TestClient) -> None:
+        response = self._upload(client, "   ")
+        assert response.status_code == 400
+        assert "empty" in response.json()["error"].lower()
+
+    def test_no_file(self, client: TestClient) -> None:
+        response = client.post("/api/entries/ingest/file", data={})
+        assert response.status_code == 400
+
+
+class TestIngestImages:
+    def test_single_image(self, client: TestClient) -> None:
+        files = {"images": ("page1.jpg", io.BytesIO(b"fake jpeg data"), "image/jpeg")}
+        response = client.post("/api/entries/ingest/images", files=files)
+        assert response.status_code == 202
+        data = response.json()
+        assert "job_id" in data
+        assert data["status"] == "queued"
+
+    def test_multiple_images(self, client: TestClient) -> None:
+        files = [
+            ("images", ("page1.jpg", io.BytesIO(b"fake page 1"), "image/jpeg")),
+            ("images", ("page2.jpg", io.BytesIO(b"fake page 2"), "image/jpeg")),
+        ]
+        response = client.post("/api/entries/ingest/images", files=files)
+        assert response.status_code == 202
+        assert "job_id" in response.json()
+
+    def test_no_images(self, client: TestClient) -> None:
+        response = client.post("/api/entries/ingest/images", data={})
+        assert response.status_code == 400
+
+    def test_wrong_file_type(self, client: TestClient) -> None:
+        files = {"images": ("doc.pdf", io.BytesIO(b"pdf content"), "application/pdf")}
+        response = client.post("/api/entries/ingest/images", files=files)
+        assert response.status_code == 400
+        assert "unsupported type" in response.json()["error"].lower()
+
+    def test_file_too_large(self, client: TestClient) -> None:
+        # 11 MB file
+        big_data = b"x" * (11 * 1024 * 1024)
+        files = {"images": ("big.jpg", io.BytesIO(big_data), "image/jpeg")}
+        response = client.post("/api/entries/ingest/images", files=files)
+        assert response.status_code == 400
+        assert "10 MB" in response.json()["error"]

@@ -19,6 +19,8 @@ from journal.services.chunking import ChunkingStrategy
 from journal.vectorstore.store import VectorStore
 
 if TYPE_CHECKING:
+    from collections.abc import Callable
+
     from journal.services.mood_scoring import MoodScoringService
 
 log = logging.getLogger(__name__)
@@ -214,6 +216,40 @@ class IngestionService:
         log.info("Ingested voice entry %d: %d words, date %s", entry.id, word_count, date)
         return self._repo.get_entry(entry.id)  # type: ignore[return-value]
 
+    def ingest_text(
+        self, text: str, date: str, source_type: str = "manual", *, skip_mood: bool = False,
+    ) -> Entry:
+        """Ingest a plain-text entry (no OCR, no transcription).
+
+        Used for manually typed entries and imported text/markdown files.
+        The text is stored as both raw_text and final_text, then chunked,
+        embedded, and stored in the vector DB.
+
+        Args:
+            text: The entry text content.
+            date: Journal entry date (ISO 8601).
+            source_type: Entry source type (e.g. "manual", "import").
+            skip_mood: When True, skip inline mood scoring (caller will
+                handle it separately, e.g. via an async job).
+        """
+        text = text.strip()
+        if not text:
+            raise ValueError("Text must not be empty")
+
+        log.info(
+            "Ingesting text entry for date %s (source=%s, %d chars)",
+            date, source_type, len(text),
+        )
+
+        word_count = len(text.split())
+        entry = self._repo.create_entry(date, source_type, text, word_count)
+
+        chunk_count = self._process_text(entry.id, entry.final_text, date, skip_mood=skip_mood)
+        self._repo.update_chunk_count(entry.id, chunk_count)
+
+        log.info("Ingested text entry %d: %d words, date %s", entry.id, word_count, date)
+        return self._repo.get_entry(entry.id)  # type: ignore[return-value]
+
     def ingest_image_from_url(
         self,
         url: str,
@@ -311,7 +347,7 @@ class IngestionService:
         log.info("Downloaded %d bytes (type: %s)", len(data), media_type)
         return data, media_type
 
-    def _process_text(self, entry_id: int, text: str, date: str) -> int:
+    def _process_text(self, entry_id: int, text: str, date: str, *, skip_mood: bool = False) -> int:
         """Chunk text, persist chunks, generate embeddings, store vectors.
 
         Returns the number of chunks produced.
@@ -371,7 +407,7 @@ class IngestionService:
         # embedding step. `score_entry` never raises — it logs and
         # returns 0 on failure — so ingestion continues cleanly
         # even if the LLM is unreachable.
-        if self._mood_scoring is not None:
+        if self._mood_scoring is not None and not skip_mood:
             self._mood_scoring.score_entry(entry_id, text)
 
         return len(chunks)
@@ -387,6 +423,8 @@ class IngestionService:
         self,
         images: list[tuple[bytes, str]],
         date: str,
+        *,
+        on_progress: "Callable[[int, int], None] | None" = None,
     ) -> Entry:
         """Ingest multiple page images as a single journal entry.
 
@@ -415,6 +453,8 @@ class IngestionService:
             page_results.append(ocr_result)
             page_hashes.append(file_hash)
             page_media_types.append(media_type)
+            if on_progress is not None:
+                on_progress(i + 1, len(images))
 
         # Combine page texts. Each page is stripped of leading/trailing
         # whitespace (OCR output frequently has trailing newlines) and

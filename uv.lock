@@ -541,6 +541,7 @@ dependencies = [
     { name = "mcp", extra = ["cli"] },
     { name = "openai" },
     { name = "pysbd" },
+    { name = "python-multipart" },
     { name = "tiktoken" },
 ]
 
@@ -560,6 +561,7 @@ requires-dist = [
     { name = "mcp", extras = ["cli"], specifier = ">=1.26,<2" },
     { name = "openai", specifier = ">=2.29,<3" },
     { name = "pysbd", specifier = ">=0.3,<1" },
+    { name = "python-multipart", specifier = ">=0.0.24" },
     { name = "tiktoken", specifier = ">=0.9,<1" },
 ]
 

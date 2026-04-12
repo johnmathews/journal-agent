@@ -157,6 +157,20 @@ def _init_services() -> dict:
         dedup_similarity_threshold=config.entity_dedup_similarity_threshold,
     )
 
+    # Ingestion service — created before the JobRunner so the runner
+    # can delegate image-ingestion jobs to it on the background thread.
+    ingestion_service = IngestionService(
+        repository=repo,
+        vector_store=vector_store,
+        ocr_provider=ocr,
+        transcription_provider=transcription,
+        embeddings_provider=embeddings,
+        chunker=chunker,
+        slack_bot_token=config.slack_bot_token,
+        embed_metadata_prefix=config.chunking_embed_metadata_prefix,
+        mood_scoring=mood_scoring_service,
+    )
+
     # Jobs infrastructure: repository + single-worker runner. Must
     # share `conn` (opened with check_same_thread=False above). The
     # runner serialises worker writes to one thread at a time.
@@ -172,6 +186,7 @@ def _init_services() -> dict:
         mood_backfill_callable=backfill_mood_scores,
         mood_scoring_service=mood_scoring_service,
         entry_repository=repo,
+        ingestion_service=ingestion_service,
     )
     log.info("  Jobs: JobRunner started (single-worker executor)")
 
@@ -191,17 +206,7 @@ def _init_services() -> dict:
     atexit.register(_shutdown_job_runner)
 
     _services = {
-        "ingestion": IngestionService(
-            repository=repo,
-            vector_store=vector_store,
-            ocr_provider=ocr,
-            transcription_provider=transcription,
-            embeddings_provider=embeddings,
-            chunker=chunker,
-            slack_bot_token=config.slack_bot_token,
-            embed_metadata_prefix=config.chunking_embed_metadata_prefix,
-            mood_scoring=mood_scoring_service,
-        ),
+        "ingestion": ingestion_service,
         "query": QueryService(
             repository=repo,
             vector_store=vector_store,

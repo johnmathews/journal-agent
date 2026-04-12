@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 import logging
 import sqlite3
@@ -881,12 +882,281 @@ def register_api_routes(
         )
 
     # -----------------------------------------------------------------
-    # Entity routes
+    # Ingestion routes (entry creation)
     # -----------------------------------------------------------------
 
     def _require_services() -> dict | None:
         svcs = services_getter()
         return svcs
+
+    @mcp.custom_route(
+        "/api/entries/ingest/text",
+        methods=["POST"],
+        name="api_ingest_text",
+    )
+    async def ingest_text(request: Request) -> JSONResponse:
+        """Create a journal entry from plain text (no OCR).
+
+        Request body (JSON):
+            text (str, required): The entry content.
+            entry_date (str, optional): ISO-8601 date, defaults to today.
+            source_type (str, optional): defaults to "manual".
+
+        Returns 201 with the created entry and an optional mood_job_id.
+        """
+        services = _require_services()
+        if services is None:
+            return JSONResponse(
+                {"error": "Server not initialized"}, status_code=503
+            )
+
+        ingestion_svc: IngestionService = services["ingestion"]
+
+        try:
+            body = await request.json()
+        except (json.JSONDecodeError, ValueError):
+            return JSONResponse(
+                {"error": "Invalid JSON body"}, status_code=400
+            )
+
+        if not isinstance(body, dict):
+            return JSONResponse(
+                {"error": "Request body must be a JSON object"},
+                status_code=400,
+            )
+
+        text = body.get("text")
+        if text is None or not isinstance(text, str):
+            return JSONResponse(
+                {"error": "'text' is required and must be a string"},
+                status_code=400,
+            )
+        if not text.strip():
+            return JSONResponse(
+                {"error": "'text' must not be empty"},
+                status_code=400,
+            )
+
+        entry_date = body.get("entry_date") or datetime.now(UTC).strftime("%Y-%m-%d")
+        source_type = body.get("source_type", "manual")
+
+        try:
+            entry = ingestion_svc.ingest_text(
+                text, entry_date, source_type, skip_mood=True,
+            )
+        except ValueError as e:
+            log.warning("POST /api/entries/ingest/text — %s", e)
+            return JSONResponse({"error": str(e)}, status_code=400)
+
+        # Fire async mood scoring if enabled
+        mood_job_id = None
+        config = services.get("config")
+        if config and config.enable_mood_scoring:
+            job_runner: JobRunner = services["job_runner"]
+            mood_job = job_runner.submit_mood_score_entry(entry.id)
+            mood_job_id = mood_job.id
+
+        page_count = ingestion_svc._repo.get_page_count(entry.id)
+        log.info(
+            "POST /api/entries/ingest/text — created entry %d (%d words)",
+            entry.id, entry.word_count,
+        )
+        return JSONResponse(
+            {
+                "entry": _entry_to_dict(entry, page_count),
+                "mood_job_id": mood_job_id,
+            },
+            status_code=201,
+        )
+
+    @mcp.custom_route(
+        "/api/entries/ingest/file",
+        methods=["POST"],
+        name="api_ingest_file",
+    )
+    async def ingest_file(request: Request) -> JSONResponse:
+        """Create a journal entry from an uploaded .md or .txt file.
+
+        Expects multipart/form-data with:
+            file: a single .md or .txt file
+            entry_date (optional): ISO-8601 date, defaults to today.
+
+        Returns 201 with the created entry and an optional mood_job_id.
+        """
+        from journal.api_utils import parse_multipart_request
+
+        services = _require_services()
+        if services is None:
+            return JSONResponse(
+                {"error": "Server not initialized"}, status_code=503
+            )
+
+        ingestion_svc: IngestionService = services["ingestion"]
+
+        try:
+            fields, files = await parse_multipart_request(request)
+        except Exception as e:
+            log.warning("POST /api/entries/ingest/file — parse error: %s", e)
+            return JSONResponse(
+                {"error": f"Failed to parse multipart request: {e}"},
+                status_code=400,
+            )
+
+        file_list = files.get("file", [])
+        if len(file_list) != 1:
+            return JSONResponse(
+                {"error": "Exactly one file is required in the 'file' field"},
+                status_code=400,
+            )
+
+        uploaded = file_list[0]
+        filename_lower = uploaded.filename.lower()
+        if not (filename_lower.endswith(".md") or filename_lower.endswith(".txt")):
+            return JSONResponse(
+                {"error": "File must be .md or .txt"},
+                status_code=400,
+            )
+
+        try:
+            content = uploaded.data.decode("utf-8")
+        except UnicodeDecodeError:
+            return JSONResponse(
+                {"error": "File must be valid UTF-8 text"},
+                status_code=400,
+            )
+
+        if not content.strip():
+            return JSONResponse(
+                {"error": "File is empty"},
+                status_code=400,
+            )
+
+        entry_date = fields.get("entry_date") or datetime.now(UTC).strftime("%Y-%m-%d")
+
+        try:
+            entry = ingestion_svc.ingest_text(
+                content, entry_date, "import", skip_mood=True,
+            )
+        except ValueError as e:
+            log.warning("POST /api/entries/ingest/file — %s", e)
+            return JSONResponse({"error": str(e)}, status_code=400)
+
+        # Store source file metadata for dedup
+        file_hash = hashlib.sha256(uploaded.data).hexdigest()
+        ingestion_svc._store_source_file(
+            entry.id, f"upload:{uploaded.filename}", uploaded.content_type, file_hash,
+        )
+
+        # Fire async mood scoring if enabled
+        mood_job_id = None
+        config = services.get("config")
+        if config and config.enable_mood_scoring:
+            job_runner: JobRunner = services["job_runner"]
+            mood_job = job_runner.submit_mood_score_entry(entry.id)
+            mood_job_id = mood_job.id
+
+        page_count = ingestion_svc._repo.get_page_count(entry.id)
+        log.info(
+            "POST /api/entries/ingest/file — created entry %d from %s (%d words)",
+            entry.id, uploaded.filename, entry.word_count,
+        )
+        return JSONResponse(
+            {
+                "entry": _entry_to_dict(entry, page_count),
+                "mood_job_id": mood_job_id,
+            },
+            status_code=201,
+        )
+
+    @mcp.custom_route(
+        "/api/entries/ingest/images",
+        methods=["POST"],
+        name="api_ingest_images",
+    )
+    async def ingest_images(request: Request) -> JSONResponse:
+        """Upload one or more journal page images for OCR ingestion.
+
+        Expects multipart/form-data with:
+            images: one or more image files (jpeg, png, gif, webp)
+            entry_date (optional): ISO-8601 date, defaults to today.
+
+        Returns 202 with a job_id for async processing.
+        """
+        from journal.api_utils import parse_multipart_request
+
+        services = _require_services()
+        if services is None:
+            return JSONResponse(
+                {"error": "Server not initialized"}, status_code=503
+            )
+
+        try:
+            fields, files = await parse_multipart_request(request)
+        except Exception as e:
+            log.warning("POST /api/entries/ingest/images — parse error: %s", e)
+            return JSONResponse(
+                {"error": f"Failed to parse multipart request: {e}"},
+                status_code=400,
+            )
+
+        image_list = files.get("images", [])
+        if not image_list:
+            return JSONResponse(
+                {"error": "At least one image is required in the 'images' field"},
+                status_code=400,
+            )
+
+        allowed_types = {"image/jpeg", "image/png", "image/gif", "image/webp"}
+        max_file_size = 10 * 1024 * 1024  # 10 MB per file
+        max_total_size = 50 * 1024 * 1024  # 50 MB total
+
+        total_size = 0
+        images: list[tuple[bytes, str, str]] = []
+        for uploaded in image_list:
+            if uploaded.content_type not in allowed_types:
+                return JSONResponse(
+                    {
+                        "error": f"File '{uploaded.filename}' has unsupported type "
+                        f"'{uploaded.content_type}'. Allowed: JPEG, PNG, GIF, WebP."
+                    },
+                    status_code=400,
+                )
+            if len(uploaded.data) > max_file_size:
+                return JSONResponse(
+                    {
+                        "error": f"File '{uploaded.filename}' exceeds 10 MB limit"
+                    },
+                    status_code=400,
+                )
+            total_size += len(uploaded.data)
+            if total_size > max_total_size:
+                return JSONResponse(
+                    {"error": "Total upload size exceeds 50 MB limit"},
+                    status_code=413,
+                )
+            images.append((uploaded.data, uploaded.content_type, uploaded.filename))
+
+        entry_date = fields.get("entry_date") or datetime.now(UTC).strftime("%Y-%m-%d")
+
+        job_runner: JobRunner = services["job_runner"]
+        try:
+            job = job_runner.submit_image_ingestion(images, entry_date)
+        except ValueError as e:
+            log.warning("POST /api/entries/ingest/images — %s", e)
+            return JSONResponse({"error": str(e)}, status_code=400)
+
+        log.info(
+            "POST /api/entries/ingest/images — queued job %s (%d images)",
+            job.id, len(images),
+        )
+        return JSONResponse(
+            {"job_id": job.id, "status": job.status},
+            status_code=202,
+        )
+
+    # -----------------------------------------------------------------
+    # Entity routes
+    # -----------------------------------------------------------------
 
     @mcp.custom_route(
         "/api/entities/extract",
