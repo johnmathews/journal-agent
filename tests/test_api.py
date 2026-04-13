@@ -415,9 +415,8 @@ class TestUpdateEntry:
 
     def test_patch_text_queues_entity_extraction(
         self,
+        client: TestClient,
         repo: SQLiteEntryRepository,
-        mock_vector_store: MagicMock,
-        mock_embeddings: MagicMock,
         services: dict,
     ) -> None:
         """When a job_runner is present, PATCH text should fire an async
@@ -426,23 +425,16 @@ class TestUpdateEntry:
         mock_job.id = "test-job-123"
         mock_runner = MagicMock()
         mock_runner.submit_entity_extraction = MagicMock(return_value=mock_job)
+        mock_runner.submit_reprocess_embeddings = MagicMock(return_value=mock_job)
+        mock_runner.submit_mood_score_entry = MagicMock(return_value=mock_job)
         services["job_runner"] = mock_runner
-
-        from mcp.server.fastmcp import FastMCP
-
-        from journal.api import register_api_routes
-
-        test_mcp = FastMCP("test-journal-entity")
-        register_api_routes(test_mcp, lambda: services)
-        app = test_mcp.streamable_http_app()
 
         entry = repo.create_entry("2026-03-22", "ocr", "raw text", 2)
 
-        with TestClient(app, raise_server_exceptions=False) as tc:
-            response = tc.patch(
-                f"/api/entries/{entry.id}",
-                json={"final_text": "corrected text"},
-            )
+        response = client.patch(
+            f"/api/entries/{entry.id}",
+            json={"final_text": "corrected text"},
+        )
 
         assert response.status_code == 200
         data = response.json()
@@ -453,6 +445,7 @@ class TestUpdateEntry:
 
     def test_patch_date_only_does_not_queue_extraction(
         self,
+        client: TestClient,
         repo: SQLiteEntryRepository,
         services: dict,
     ) -> None:
@@ -460,21 +453,12 @@ class TestUpdateEntry:
         mock_runner = MagicMock()
         services["job_runner"] = mock_runner
 
-        from mcp.server.fastmcp import FastMCP
-
-        from journal.api import register_api_routes
-
-        test_mcp = FastMCP("test-journal-entity-date")
-        register_api_routes(test_mcp, lambda: services)
-        app = test_mcp.streamable_http_app()
-
         entry = repo.create_entry("2026-03-22", "ocr", "Hello world", 2)
 
-        with TestClient(app, raise_server_exceptions=False) as tc:
-            response = tc.patch(
-                f"/api/entries/{entry.id}",
-                json={"entry_date": "2026-01-01"},
-            )
+        response = client.patch(
+            f"/api/entries/{entry.id}",
+            json={"entry_date": "2026-01-01"},
+        )
 
         assert response.status_code == 200
         assert "entity_extraction_job_id" not in response.json()
