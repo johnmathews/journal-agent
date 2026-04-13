@@ -622,6 +622,57 @@ def register_api_routes(
             }
         )
 
+    @mcp.custom_route("/api/settings", methods=["GET"], name="api_settings")
+    async def get_settings(request: Request) -> JSONResponse:
+        """Return current server configuration (non-secret values only).
+
+        Secrets (API keys, bearer tokens, Slack bot token) are redacted.
+        """
+        services = services_getter()
+        if services is None:
+            return JSONResponse(
+                {"error": "Server not initialized"}, status_code=503
+            )
+        config = services.get("config")
+        if config is None:
+            return JSONResponse(
+                {"error": "Config not available"}, status_code=503
+            )
+        from journal.providers.ocr import _DEFAULT_MODELS
+
+        ocr_model = config.ocr_model or _DEFAULT_MODELS.get(
+            config.ocr_provider, ""
+        )
+        return JSONResponse(
+            {
+                "ocr": {
+                    "provider": config.ocr_provider,
+                    "model": ocr_model,
+                },
+                "transcription": {
+                    "model": config.transcription_model,
+                },
+                "embedding": {
+                    "model": config.embedding_model,
+                    "dimensions": config.embedding_dimensions,
+                },
+                "chunking": {
+                    "strategy": config.chunking_strategy,
+                    "max_tokens": config.chunking_max_tokens,
+                    "min_tokens": config.chunking_min_tokens,
+                    "overlap_tokens": config.chunking_overlap_tokens,
+                    "boundary_percentile": config.chunking_boundary_percentile,
+                    "decisive_percentile": config.chunking_decisive_percentile,
+                    "embed_metadata_prefix": config.chunking_embed_metadata_prefix,
+                },
+                "features": {
+                    "mood_scoring": config.enable_mood_scoring,
+                    "mood_scorer_model": config.mood_scorer_model,
+                    "journal_author_name": config.journal_author_name,
+                },
+            }
+        )
+
     @mcp.custom_route("/health", methods=["GET"], name="api_health")
     async def get_health(request: Request) -> JSONResponse:
         """Operational health endpoint. Bypasses bearer auth.

@@ -77,7 +77,16 @@ def services(
         embeddings_provider=mock_embeddings,
     )
     entity_store = SQLiteEntityStore(repo._conn)
-    return {"ingestion": ingestion, "query": query, "entity_store": entity_store}
+
+    from journal.config import Config
+    config = Config()
+
+    return {
+        "ingestion": ingestion,
+        "query": query,
+        "entity_store": entity_store,
+        "config": config,
+    }
 
 
 @pytest.fixture
@@ -1288,6 +1297,47 @@ class TestHealth:
         # Assert the search term does not appear anywhere in the
         # serialized envelope — query stats are counts-only.
         assert "sensitive" not in dumped
+
+
+class TestSettings:
+    """GET /api/settings — non-secret config values."""
+
+    def test_settings_returns_config(
+        self, client: TestClient,
+    ) -> None:
+        resp = client.get("/api/settings")
+        assert resp.status_code == 200
+        data = resp.json()
+        # Top-level sections
+        assert "ocr" in data
+        assert "transcription" in data
+        assert "embedding" in data
+        assert "chunking" in data
+        assert "features" in data
+        # OCR block
+        assert data["ocr"]["provider"] == "anthropic"
+        assert "claude" in data["ocr"]["model"] or data["ocr"]["model"] != ""
+        # Chunking block
+        assert isinstance(data["chunking"]["max_tokens"], int)
+        assert isinstance(data["chunking"]["embed_metadata_prefix"], bool)
+        # Features block
+        assert isinstance(data["features"]["mood_scoring"], bool)
+        assert isinstance(data["features"]["journal_author_name"], str)
+
+    def test_settings_does_not_leak_secrets(
+        self, client: TestClient,
+    ) -> None:
+        import json as _json
+
+        resp = client.get("/api/settings")
+        dumped = _json.dumps(resp.json())
+        # No API keys or secret values should appear
+        assert "api_key" not in dumped.lower()
+        assert "bearer" not in dumped.lower()
+        assert "password" not in dumped.lower()
+        assert "sk-ant-" not in dumped
+        assert "sk-" not in dumped
+        assert "xoxb-" not in dumped
 
 
 class TestDashboardWritingStats:
