@@ -225,8 +225,9 @@ counters in a future version, clients must tolerate unknown keys.
 - **Cancellation.** There is no API to cancel a running job. Jobs are fast
   enough (tens of seconds for typical runs) that cancellation is not worth
   the complexity of interrupting the worker mid-entry.
-- **Job history UI.** The webapp tracks only the jobs the current session
-  submitted. Old rows accumulate in the database forever; no pruning runs
+- **Job history UI.** The webapp has a dedicated Job History page (`/jobs`)
+  backed by `GET /api/jobs` that lists all historical jobs with filters
+  and pagination. Old rows accumulate in the database; no pruning runs
   automatically.
 - **Retry.** A failed job is not automatically retried. The user can submit
   a new job with the same parameters.

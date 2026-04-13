@@ -1043,6 +1043,29 @@ invalid, or an unknown key is present.
 Poll `GET /api/jobs/{job_id}` for progress and the final result. See
 [jobs.md](jobs.md) for the full result-payload shape.
 
+### GET /api/jobs
+
+List jobs ordered newest first, with optional filters and pagination.
+
+**Query parameters:**
+
+| Param    | Type   | Default | Description                                           |
+| -------- | ------ | ------- | ----------------------------------------------------- |
+| `status` | string | (all)   | Filter by status (`queued`, `running`, `succeeded`, `failed`) |
+| `type`   | string | (all)   | Filter by job type (`entity_extraction`, `mood_backfill`, etc.) |
+| `limit`  | int    | 50      | Max items to return                                   |
+| `offset` | int    | 0       | Pagination offset                                     |
+
+**Response (200):**
+```json
+{
+  "items": [ /* array of job objects (same shape as GET /api/jobs/{id}) */ ],
+  "total": 42,
+  "limit": 50,
+  "offset": 0
+}
+```
+
 ### GET /api/jobs/{job_id}
 
 Return the full serialised state of a batch job. Clients should poll
