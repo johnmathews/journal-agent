@@ -1,4 +1,4 @@
-"""Tests for the Anthropic OCR provider."""
+"""Tests for OCR providers (Anthropic, Gemini) and the factory."""
 
 import base64
 from pathlib import Path
@@ -7,14 +7,17 @@ from unittest.mock import MagicMock, patch
 import pytest
 
 from journal.providers.ocr import (
+    _DEFAULT_MODELS,
     CONTEXT_USAGE_INSTRUCTIONS,
     SYSTEM_PROMPT,
     UNCERTAIN_CLOSE,
     UNCERTAIN_OPEN,
     AnthropicOCRProvider,
+    GeminiOCRProvider,
     OCRProvider,
     OCRResult,
     _build_cache_control,
+    build_ocr_provider,
     load_context_files,
     parse_uncertain_markers,
 )
@@ -451,3 +454,120 @@ class TestParseUncertainMarkers:
             r.message for r in caplog.records if r.levelname == "WARNING"
         ]
         assert any("sentinel parser dropped" in m for m in warnings)
+
+
+class TestGeminiOCRProvider:
+    """Tests for GeminiOCRProvider."""
+
+    def _make_provider(self) -> GeminiOCRProvider:
+        with patch("journal.providers.ocr.genai.Client"):
+            provider = GeminiOCRProvider(
+                api_key="test-google-key",
+                model="gemini-3-pro",
+            )
+        return provider
+
+    def test_implements_protocol(self) -> None:
+        provider = self._make_provider()
+        assert isinstance(provider, OCRProvider)
+
+    def test_extract_returns_ocr_result(self) -> None:
+        provider = self._make_provider()
+        mock_response = MagicMock()
+        mock_response.text = "Hello world from handwriting"
+        provider._client.models.generate_content.return_value = mock_response
+
+        result = provider.extract(b"fake-image-data", "image/png")
+
+        assert isinstance(result, OCRResult)
+        assert result.text == "Hello world from handwriting"
+        assert result.uncertain_spans == []
+        provider._client.models.generate_content.assert_called_once()
+
+    def test_extract_strips_sentinels_and_records_spans(self) -> None:
+        provider = self._make_provider()
+        raw = f"Today I met {UNCERTAIN_OPEN}Ritsya{UNCERTAIN_CLOSE} at the park."
+        mock_response = MagicMock()
+        mock_response.text = raw
+        provider._client.models.generate_content.return_value = mock_response
+
+        result = provider.extract(b"data", "image/png")
+
+        assert result.text == "Today I met Ritsya at the park."
+        assert result.uncertain_spans == [(12, 18)]
+
+    def test_system_prompt_passed_to_gemini(self) -> None:
+        provider = self._make_provider()
+        mock_response = MagicMock()
+        mock_response.text = "extracted"
+        provider._client.models.generate_content.return_value = mock_response
+
+        provider.extract(b"data", "image/jpeg")
+
+        call_kwargs = provider._client.models.generate_content.call_args.kwargs
+        assert call_kwargs["config"].system_instruction == SYSTEM_PROMPT
+
+    def test_extract_text_wrapper(self) -> None:
+        provider = self._make_provider()
+        mock_response = MagicMock()
+        mock_response.text = "plain text"
+        provider._client.models.generate_content.return_value = mock_response
+
+        assert provider.extract_text(b"data", "image/png") == "plain text"
+
+
+class TestBuildOcrProvider:
+    """Tests for the build_ocr_provider factory."""
+
+    def _make_config(self, **overrides: str) -> MagicMock:
+        defaults = {
+            "ocr_provider": "anthropic",
+            "anthropic_api_key": "test-anthropic-key",
+            "google_api_key": "test-google-key",
+            "ocr_model": "",
+            "ocr_max_tokens": 4096,
+            "ocr_context_dir": None,
+            "ocr_context_cache_ttl": "5m",
+        }
+        defaults.update(overrides)
+        config = MagicMock()
+        for k, v in defaults.items():
+            setattr(config, k, v)
+        return config
+
+    @patch("journal.providers.ocr.anthropic.Anthropic")
+    def test_builds_anthropic_provider(self, _mock_anthropic: MagicMock) -> None:
+        config = self._make_config(ocr_provider="anthropic")
+        provider = build_ocr_provider(config)
+        assert isinstance(provider, AnthropicOCRProvider)
+
+    @patch("journal.providers.ocr.genai.Client")
+    def test_builds_gemini_provider(self, _mock_genai: MagicMock) -> None:
+        config = self._make_config(ocr_provider="gemini")
+        provider = build_ocr_provider(config)
+        assert isinstance(provider, GeminiOCRProvider)
+
+    @patch("journal.providers.ocr.anthropic.Anthropic")
+    def test_default_model_anthropic(self, _mock: MagicMock) -> None:
+        config = self._make_config(ocr_provider="anthropic", ocr_model="")
+        provider = build_ocr_provider(config)
+        assert provider._model == _DEFAULT_MODELS["anthropic"]
+
+    @patch("journal.providers.ocr.genai.Client")
+    def test_default_model_gemini(self, _mock: MagicMock) -> None:
+        config = self._make_config(ocr_provider="gemini", ocr_model="")
+        provider = build_ocr_provider(config)
+        assert provider._model == _DEFAULT_MODELS["gemini"]
+
+    @patch("journal.providers.ocr.anthropic.Anthropic")
+    def test_explicit_model_override(self, _mock: MagicMock) -> None:
+        config = self._make_config(
+            ocr_provider="anthropic", ocr_model="claude-sonnet-4-5"
+        )
+        provider = build_ocr_provider(config)
+        assert provider._model == "claude-sonnet-4-5"
+
+    def test_unknown_provider_raises(self) -> None:
+        config = self._make_config(ocr_provider="openai")
+        with pytest.raises(ValueError, match="Unknown OCR provider"):
+            build_ocr_provider(config)

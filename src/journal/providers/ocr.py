@@ -22,9 +22,13 @@ from typing import TYPE_CHECKING, Protocol, runtime_checkable
 
 import anthropic
 import tiktoken
+from google import genai
+from google.genai import types as genai_types
 
 if TYPE_CHECKING:
     from pathlib import Path
+
+    from journal.config import Config
 
 logger = logging.getLogger(__name__)
 
@@ -365,3 +369,76 @@ class AnthropicOCRProvider:
         scripts) that only need a string.
         """
         return self.extract(image_data, media_type).text
+
+
+class GeminiOCRProvider:
+    """OCR provider using Google's Gemini vision API."""
+
+    def __init__(
+        self,
+        api_key: str,
+        model: str = "gemini-3-pro",
+    ) -> None:
+        self._client = genai.Client(api_key=api_key)
+        self._model = model
+
+    def extract(self, image_data: bytes, media_type: str) -> OCRResult:
+        """Extract text from an image via Google's Gemini vision API.
+
+        Uses the same system prompt and ⟪/⟫ uncertainty sentinels as the
+        Anthropic provider so the downstream pipeline (sentinel parser,
+        uncertain_spans, webapp Review toggle) works identically.
+        """
+        logger.info("Extracting text via Gemini OCR (model=%s)", self._model)
+
+        response = self._client.models.generate_content(
+            model=self._model,
+            contents=[
+                genai_types.Part.from_bytes(data=image_data, mime_type=media_type),
+                "Extract all handwritten text from this image.",
+            ],
+            config=genai_types.GenerateContentConfig(
+                system_instruction=SYSTEM_PROMPT,
+            ),
+        )
+
+        raw = response.text
+        clean_text, spans = parse_uncertain_markers(raw)
+        logger.info(
+            "OCR extraction complete (%d characters, %d uncertain span(s))",
+            len(clean_text),
+            len(spans),
+        )
+        return OCRResult(text=clean_text, uncertain_spans=spans)
+
+    def extract_text(self, image_data: bytes, media_type: str) -> str:
+        """Backward-compatible wrapper returning only the clean text."""
+        return self.extract(image_data, media_type).text
+
+
+_DEFAULT_MODELS: dict[str, str] = {
+    "anthropic": "claude-opus-4-6",
+    "gemini": "gemini-3-pro",
+}
+
+
+def build_ocr_provider(config: Config) -> OCRProvider:
+    """Build the OCR provider specified by config.ocr_provider."""
+    provider_name = config.ocr_provider
+    model = config.ocr_model or _DEFAULT_MODELS.get(provider_name, "")
+    if provider_name == "anthropic":
+        return AnthropicOCRProvider(
+            api_key=config.anthropic_api_key,
+            model=model,
+            max_tokens=config.ocr_max_tokens,
+            context_dir=config.ocr_context_dir,
+            cache_ttl=config.ocr_context_cache_ttl,
+        )
+    if provider_name == "gemini":
+        return GeminiOCRProvider(
+            api_key=config.google_api_key,
+            model=model,
+        )
+    raise ValueError(
+        f"Unknown OCR provider {provider_name!r} — must be 'anthropic' or 'gemini'"
+    )

@@ -17,11 +17,27 @@ class Config:
     )
     chromadb_collection: str = "journal_entries"
 
-    # Anthropic (OCR)
+    # OCR provider selection: "anthropic" or "gemini"
+    ocr_provider: str = field(
+        default_factory=lambda: os.environ.get("OCR_PROVIDER", "anthropic")
+    )
+
+    # Anthropic
     anthropic_api_key: str = field(
         default_factory=lambda: os.environ.get("ANTHROPIC_API_KEY", "")
     )
-    ocr_model: str = "claude-opus-4-6"
+
+    # Google (Gemini)
+    google_api_key: str = field(
+        default_factory=lambda: os.environ.get("GOOGLE_API_KEY", "")
+    )
+
+    # OCR model — interpreted by the selected provider.
+    # Defaults depend on provider: claude-opus-4-6 for anthropic, gemini-3-pro for gemini.
+    # When unset, the factory in ocr.py picks the provider's default.
+    ocr_model: str = field(
+        default_factory=lambda: os.environ.get("OCR_MODEL", "")
+    )
     ocr_max_tokens: int = 4096
     # Optional directory of markdown files loaded once at startup and
     # injected into the OCR system prompt to prime the model with

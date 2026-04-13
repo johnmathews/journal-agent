@@ -36,7 +36,7 @@ Business logic orchestration:
 
 ### Provider Layer
 Adapters for external APIs, each behind a Protocol interface:
-- **OCRProvider** — `AnthropicOCRProvider` (Claude Opus 4.6 vision)
+- **OCRProvider** — `AnthropicOCRProvider` (Claude) or `GeminiOCRProvider` (Google Gemini), selected via `OCR_PROVIDER` env var
 - **TranscriptionProvider** — `OpenAITranscriptionProvider` (gpt-4o-transcribe)
 - **EmbeddingsProvider** — `OpenAIEmbeddingsProvider` (text-embedding-3-large)
 

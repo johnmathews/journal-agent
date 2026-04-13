@@ -20,7 +20,7 @@ from journal.entitystore.store import SQLiteEntityStore
 from journal.logging import setup_logging
 from journal.providers.embeddings import OpenAIEmbeddingsProvider
 from journal.providers.extraction import AnthropicExtractionProvider
-from journal.providers.ocr import AnthropicOCRProvider
+from journal.providers.ocr import build_ocr_provider
 from journal.providers.transcription import OpenAITranscriptionProvider
 from journal.services.backfill import backfill_mood_scores
 from journal.services.chunking import build_chunker
@@ -79,13 +79,7 @@ def _init_services() -> dict:
     log.info("  ChromaDB connected (collection=%s)", config.chromadb_collection)
 
     # Providers
-    ocr = AnthropicOCRProvider(
-        api_key=config.anthropic_api_key,
-        model=config.ocr_model,
-        max_tokens=config.ocr_max_tokens,
-        context_dir=config.ocr_context_dir,
-        cache_ttl=config.ocr_context_cache_ttl,
-    )
+    ocr = build_ocr_provider(config)
     transcription = OpenAITranscriptionProvider(
         api_key=config.openai_api_key,
         model=config.transcription_model,
@@ -95,8 +89,9 @@ def _init_services() -> dict:
         model=config.embedding_model,
         dimensions=config.embedding_dimensions,
     )
-    log.info("  Providers: OCR=%s, transcription=%s, embeddings=%s",
-             config.ocr_model, config.transcription_model, config.embedding_model)
+    log.info("  Providers: OCR=%s (%s), transcription=%s, embeddings=%s",
+             config.ocr_provider, config.ocr_model or "default",
+             config.transcription_model, config.embedding_model)
 
     chunker = build_chunker(config, embeddings)
 

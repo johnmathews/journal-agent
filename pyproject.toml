@@ -5,6 +5,7 @@ description = "Personal journal insight engine — ingest handwritten pages and 
 requires-python = ">=3.13"
 dependencies = [
     "anthropic>=0.87,<1",
+    "google-genai>=1,<2",
     "openai>=2.29,<3",
     "chromadb-client>=1.5,<2",
     "mcp[cli]>=1.26,<2",
