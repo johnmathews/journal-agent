@@ -769,6 +769,16 @@ def register_api_routes(
             }
         )
 
+    @mcp.custom_route("/api/health", methods=["GET"], name="api_health_authed")
+    async def get_health_authed(request: Request) -> JSONResponse:
+        """Authenticated mirror of /health for the webapp.
+
+        The webapp's nginx only proxies /api/* to the server, so the
+        unauthenticated /health path is unreachable from the browser.
+        This route serves the same payload under /api/ (with auth).
+        """
+        return await get_health(request)
+
     @mcp.custom_route("/api/stats", methods=["GET"], name="api_stats")
     async def get_stats(request: Request) -> JSONResponse:
         """Get journal statistics."""
