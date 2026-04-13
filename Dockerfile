@@ -8,6 +8,7 @@ COPY pyproject.toml uv.lock ./
 RUN uv sync --frozen --no-dev --no-install-project
 
 COPY src/ src/
+COPY config/ config/
 RUN uv sync --frozen --no-dev
 
 ENV PYTHONUNBUFFERED=1
