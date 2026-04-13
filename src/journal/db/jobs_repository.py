@@ -116,6 +116,42 @@ class SQLiteJobRepository:
         ).fetchone()
         return _row_to_job(row) if row else None
 
+    def list_jobs(
+        self,
+        *,
+        status: str | None = None,
+        job_type: str | None = None,
+        limit: int = 50,
+        offset: int = 0,
+    ) -> tuple[list[Job], int]:
+        """Return jobs ordered by created_at DESC with optional filters.
+
+        Returns ``(jobs, total)`` where *total* is the unfiltered count
+        matching the filters (before limit/offset), for pagination.
+        """
+        where_clauses: list[str] = []
+        params: list[str | int] = []
+        if status is not None:
+            where_clauses.append("status = ?")
+            params.append(status)
+        if job_type is not None:
+            where_clauses.append("type = ?")
+            params.append(job_type)
+
+        where_sql = (" WHERE " + " AND ".join(where_clauses)) if where_clauses else ""
+
+        total_row = self._conn.execute(
+            f"SELECT COUNT(*) FROM jobs{where_sql}", params,
+        ).fetchone()
+        total: int = total_row[0] if total_row else 0
+
+        rows = self._conn.execute(
+            f"SELECT * FROM jobs{where_sql} ORDER BY created_at DESC LIMIT ? OFFSET ?",
+            [*params, limit, offset],
+        ).fetchall()
+
+        return [_row_to_job(r) for r in rows], total
+
     def reconcile_stuck_jobs(self) -> int:
         """Fail any jobs left queued/running from a previous process.
 

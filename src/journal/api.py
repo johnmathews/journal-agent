@@ -1315,6 +1315,45 @@ def register_api_routes(
         )
 
     @mcp.custom_route(
+        "/api/jobs",
+        methods=["GET"],
+        name="api_list_jobs",
+    )
+    async def list_jobs(request: Request) -> JSONResponse:
+        """List jobs with optional filters, ordered newest first."""
+        services = _require_services()
+        if services is None:
+            return JSONResponse(
+                {"error": "Server not initialized"}, status_code=503
+            )
+        job_repository: SQLiteJobRepository = services["job_repository"]
+
+        status = request.query_params.get("status")
+        job_type = request.query_params.get("type")
+        try:
+            limit = int(request.query_params.get("limit", "50"))
+            offset = int(request.query_params.get("offset", "0"))
+        except ValueError:
+            return JSONResponse(
+                {"error": "limit and offset must be integers"},
+                status_code=400,
+            )
+
+        jobs, total = job_repository.list_jobs(
+            status=status, job_type=job_type, limit=limit, offset=offset,
+        )
+        log.info(
+            "GET /api/jobs — %d jobs (total %d, offset %d)",
+            len(jobs), total, offset,
+        )
+        return JSONResponse({
+            "items": [_job_to_dict(j) for j in jobs],
+            "total": total,
+            "limit": limit,
+            "offset": offset,
+        })
+
+    @mcp.custom_route(
         "/api/jobs/{job_id:str}",
         methods=["GET"],
         name="api_job_detail",

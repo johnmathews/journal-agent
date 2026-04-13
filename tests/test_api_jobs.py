@@ -352,6 +352,71 @@ class TestMoodBackfillRoute:
 # --------------------------------------------------------------------
 
 
+class TestListJobsRoute:
+    def test_returns_empty_list_with_no_jobs(self, client: TestClient) -> None:
+        resp = client.get("/api/jobs")
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data["items"] == []
+        assert data["total"] == 0
+
+    def test_returns_jobs_with_total(
+        self, client: TestClient, job_runner: JobRunner
+    ) -> None:
+        r1 = client.post("/api/entities/extract", json={"stale_only": True})
+        job_runner.shutdown(wait=True)
+        _wait_for_job(client, r1.json()["job_id"])
+
+        resp = client.get("/api/jobs")
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data["total"] >= 1
+        assert len(data["items"]) >= 1
+        ids = [j["id"] for j in data["items"]]
+        assert r1.json()["job_id"] in ids
+
+    def test_filters_by_status(
+        self, client: TestClient, job_runner: JobRunner
+    ) -> None:
+        client.post("/api/entities/extract", json={"stale_only": True})
+        job_runner.shutdown(wait=True)
+
+        resp = client.get("/api/jobs?status=succeeded")
+        assert resp.status_code == 200
+        assert all(j["status"] == "succeeded" for j in resp.json()["items"])
+
+    def test_filters_by_type(
+        self, client: TestClient, job_runner: JobRunner
+    ) -> None:
+        client.post("/api/entities/extract", json={"stale_only": True})
+        client.post("/api/mood/backfill", json={"mode": "stale-only"})
+        job_runner.shutdown(wait=True)
+
+        resp = client.get("/api/jobs?type=entity_extraction")
+        assert resp.status_code == 200
+        assert all(
+            j["type"] == "entity_extraction" for j in resp.json()["items"]
+        )
+
+    def test_pagination(
+        self, client: TestClient, job_runner: JobRunner
+    ) -> None:
+        client.post("/api/entities/extract", json={"stale_only": True})
+        client.post("/api/mood/backfill", json={"mode": "stale-only"})
+        job_runner.shutdown(wait=True)
+
+        resp = client.get("/api/jobs?limit=1&offset=0")
+        data = resp.json()
+        assert len(data["items"]) == 1
+        assert data["total"] == 2
+        assert data["offset"] == 0
+
+        resp2 = client.get("/api/jobs?limit=1&offset=1")
+        data2 = resp2.json()
+        assert len(data2["items"]) == 1
+        assert data2["items"][0]["id"] != data["items"][0]["id"]
+
+
 class TestJobDetailRoute:
     def test_unknown_id_returns_404(self, client: TestClient) -> None:
         resp = client.get("/api/jobs/not-a-real-id")
