@@ -238,7 +238,13 @@ class ExtractionResult:
 
 
 JobStatus = Literal["queued", "running", "succeeded", "failed"]
-JobType = Literal["entity_extraction", "mood_backfill", "ingest_images", "mood_score_entry", "reprocess_embeddings"]
+JobType = Literal[
+    "entity_extraction",
+    "mood_backfill",
+    "ingest_images",
+    "mood_score_entry",
+    "reprocess_embeddings",
+]
 
 
 @dataclass
