@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import base64
 import logging
+import re
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Protocol, runtime_checkable
 
@@ -138,6 +139,21 @@ def parse_uncertain_markers(raw: str) -> tuple[str, list[tuple[int, int]]]:
         )
 
     return "".join(clean), spans
+
+def reflow_paragraphs(text: str) -> str:
+    """Replace hard line breaks within paragraphs with spaces.
+
+    Some OCR models (notably Gemini) preserve the physical line breaks
+    from the handwritten page, producing many short lines. This function
+    collapses single newlines into spaces while preserving paragraph
+    breaks (two or more consecutive newlines).
+
+    Because each ``\\n`` is replaced with a single space (1-for-1), the
+    character count is unchanged and any character-offset spans (e.g.
+    uncertain_spans) remain valid without adjustment.
+    """
+    return re.sub(r"(?<!\n)\n(?!\n)", " ", text)
+
 
 # Minimum tokens for a cacheable block on Claude Opus 4.6. Below this
 # the Anthropic API silently ignores cache_control and bills the block
@@ -419,6 +435,9 @@ class GeminiOCRProvider:
 
         raw = response.text
         clean_text, spans = parse_uncertain_markers(raw)
+        # Gemini preserves physical line breaks from the handwritten page.
+        # Reflow into natural paragraphs — single \n → space, \n\n+ kept.
+        clean_text = reflow_paragraphs(clean_text)
         logger.info(
             "OCR extraction complete (%d characters, %d uncertain span(s))",
             len(clean_text),

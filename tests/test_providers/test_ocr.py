@@ -20,6 +20,7 @@ from journal.providers.ocr import (
     build_ocr_provider,
     load_context_files,
     parse_uncertain_markers,
+    reflow_paragraphs,
 )
 
 
@@ -456,6 +457,47 @@ class TestParseUncertainMarkers:
         assert any("sentinel parser dropped" in m for m in warnings)
 
 
+class TestReflowParagraphs:
+    """Tests for reflow_paragraphs (Gemini line-break normalization)."""
+
+    def test_single_newlines_become_spaces(self) -> None:
+        assert reflow_paragraphs("hello\nworld") == "hello world"
+
+    def test_multiple_single_newlines(self) -> None:
+        assert reflow_paragraphs("a\nb\nc") == "a b c"
+
+    def test_paragraph_breaks_preserved(self) -> None:
+        assert reflow_paragraphs("para1\n\npara2") == "para1\n\npara2"
+
+    def test_triple_newline_preserved(self) -> None:
+        assert reflow_paragraphs("para1\n\n\npara2") == "para1\n\n\npara2"
+
+    def test_mixed_single_and_double(self) -> None:
+        text = "line1\nline2\n\npara2 line1\npara2 line2"
+        expected = "line1 line2\n\npara2 line1 para2 line2"
+        assert reflow_paragraphs(text) == expected
+
+    def test_empty_string(self) -> None:
+        assert reflow_paragraphs("") == ""
+
+    def test_no_newlines(self) -> None:
+        assert reflow_paragraphs("no breaks here") == "no breaks here"
+
+    def test_preserves_length(self) -> None:
+        """Reflow must not change character count — span offsets depend on it."""
+        text = "Today I went to\nthe store and\nbought some food.\n\nThen I came home."
+        result = reflow_paragraphs(text)
+        assert len(result) == len(text)
+
+    def test_span_offsets_remain_valid(self) -> None:
+        """A span pointing at 'store' (offset 20..25) should still point
+        at 'store' after reflow."""
+        text = "Today I went to\nthe store and\nbought food."
+        result = reflow_paragraphs(text)
+        assert result[20:25] == "store"
+        assert text[20:25] == "store"
+
+
 class TestGeminiOCRProvider:
     """Tests for GeminiOCRProvider."""
 
@@ -518,6 +560,33 @@ class TestGeminiOCRProvider:
         provider._client.models.generate_content.return_value = mock_response
 
         assert provider.extract_text(b"data", "image/png") == "plain text"
+
+    def test_extract_reflows_single_newlines(self) -> None:
+        """Gemini preserves physical line breaks — extract() should
+        collapse them into spaces while keeping paragraph breaks."""
+        provider = self._make_provider()
+        mock_response = MagicMock()
+        mock_response.text = "Today I went\nto the store.\n\nThen I came home."
+        provider._client.models.generate_content.return_value = mock_response
+
+        result = provider.extract(b"data", "image/png")
+
+        assert result.text == "Today I went to the store.\n\nThen I came home."
+
+    def test_extract_reflow_preserves_uncertain_span_offsets(self) -> None:
+        """Uncertain spans must still point at the right text after reflow."""
+        provider = self._make_provider()
+        # "Ritsya" starts at char 12 after sentinel removal, and reflow
+        # doesn't change that because \n→space is 1-for-1.
+        raw = f"Today I met\n{UNCERTAIN_OPEN}Ritsya{UNCERTAIN_CLOSE} at the park."
+        mock_response = MagicMock()
+        mock_response.text = raw
+        provider._client.models.generate_content.return_value = mock_response
+
+        result = provider.extract(b"data", "image/png")
+
+        assert result.text[12:18] == "Ritsya"
+        assert result.uncertain_spans == [(12, 18)]
 
     def test_context_dir_composes_into_system_text(
         self, tmp_path: Path
