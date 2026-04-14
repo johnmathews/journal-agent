@@ -10,82 +10,106 @@ alternatives exist.
 
 ## What Happens When You Process a Single Entry
 
-The table below shows **every external API call** in order, for the most common flow: uploading a handwritten page, then
-later reviewing and correcting the OCR text.
+This shows every external API call for the current production configuration.
 
-### Upload a handwritten page image
+### Upload a 3-page handwritten journal entry
 
-| Step | What happens                                                                         | API call?                                          | Provider  | Model                    | Runs on        |
-| ---- | ------------------------------------------------------------------------------------ | -------------------------------------------------- | --------- | ------------------------ | -------------- |
-| 1    | **OCR** — image sent to vision LLM, text returned                                    | **Yes — 1 LLM call**                               | Anthropic | `claude-opus-4-6`        | Request thread |
-| 2    | Date extraction from OCR text                                                        | No — regex/heuristic                               | —         | —                        | Request thread |
-| 3    | Entry + page records saved to SQLite                                                 | No — local DB                                      | —         | —                        | Request thread |
-| 4    | **Semantic chunking** — sentences embedded, cosine similarity finds topic boundaries | **Yes — 1 embedding call** (batch)                 | OpenAI    | `text-embedding-3-large` | Request thread |
-| 5    | **Chunk embedding** — final chunks embedded for vector search                        | **Yes — 1 embedding call** (batch)                 | OpenAI    | `text-embedding-3-large` | Request thread |
-| 6    | Chunks + vectors stored in ChromaDB                                                  | No — local HTTP to ChromaDB                        | —         | —                        | Request thread |
-| 7    | **Mood scoring** — text scored on 7 dimensions                                       | **Yes — 1 LLM call** (if enabled)                  | Anthropic | `claude-sonnet-4-5`      | Request thread |
-| 8    | **Entity extraction** — queued as background job                                     | **Yes — 1 LLM call**                               | Anthropic | `claude-opus-4-6`        | Background job |
-| 9    | Entity dedup — new entities compared to existing by name similarity                  | **Yes — 1 embedding call** (if new entities found) | OpenAI    | `text-embedding-3-large` | Background job |
+Each page is OCR'd individually, then the combined text flows through chunking, embedding, and enrichment.
 
-**Total for upload: 4-6 API calls** (1 LLM for OCR + 2 embedding for chunking/storage + 1 LLM for entities + optionally 1
-LLM for mood + optionally 1 embedding for entity dedup).
+| Step | What happens | API call | Provider | Model |
+|-----:|-------------|----------|----------|-------|
+| 1 | **OCR page 1** — image → text | 1 LLM call | Google | `gemini-3-pro` |
+| 2 | **OCR page 2** | 1 LLM call | Google | `gemini-3-pro` |
+| 3 | **OCR page 3** | 1 LLM call | Google | `gemini-3-pro` |
+| 4 | Date extraction from OCR text | — local | — | — |
+| 5 | Entry + page records saved to SQLite | — local | — | — |
+| 6 | **Semantic chunking** — embed all sentences, cosine similarity finds topic boundaries | 1 embedding call | OpenAI | `text-embedding-3-large` |
+| 7 | **Chunk embedding** — embed final chunks for vector search | 1 embedding call | OpenAI | `text-embedding-3-large` |
+| 8 | Chunks + vectors stored in ChromaDB | — local | — | — |
+| 9 | **Mood scoring** — text scored on 7 emotional dimensions | 1 LLM call | Anthropic | `claude-sonnet-4-5` |
+| 10 | **Entity extraction** — people, places, activities, relationships | 1 LLM call | Anthropic | `claude-opus-4-6` |
+| 11 | **Entity dedup** — compare new entities to existing by embedding similarity | 1 embedding call | OpenAI | `text-embedding-3-large` |
 
-### Review and correct OCR text (PATCH save)
+**Total: 8 API calls** — 3 OCR + 2 LLM enrichment + 3 embedding.
 
-When you edit the entry text and save, the following re-processing is triggered:
+### Review and correct OCR text (save after editing)
 
-| Step | What happens                                        | API call?                                                | Provider  | Model                    | Runs on        |
-| ---- | --------------------------------------------------- | -------------------------------------------------------- | --------- | ------------------------ | -------------- |
-| 1    | Updated text saved to SQLite                        | No — local DB                                            | —         | —                        | Request thread |
-| 2    | **Re-chunk + re-embed** — queued as background job  | **Yes — 2 embedding calls** (chunk boundaries + storage) | OpenAI    | `text-embedding-3-large` | Background job |
-| 3    | **Entity re-extraction** — queued as background job | **Yes — 1 LLM call**                                     | Anthropic | `claude-opus-4-6`        | Background job |
-| 4    | Entity dedup (if new entities found)                | **Yes — 1 embedding call** (if needed)                   | OpenAI    | `text-embedding-3-large` | Background job |
-| 5    | **Mood re-scoring** — queued as background job      | **Yes — 1 LLM call** (if enabled)                        | Anthropic | `claude-sonnet-4-5`      | Background job |
+When you edit the entry text and save, re-processing runs as background jobs:
 
-**Total for save: 3-5 API calls** (2 embedding + 1 LLM for entities + optionally 1 LLM for mood + optionally 1 embedding
-for dedup).
+| Step | What happens | API call | Provider | Model |
+|-----:|-------------|----------|----------|-------|
+| 1 | Updated text saved to SQLite | — local | — | — |
+| 2 | **Re-chunk** — re-embed sentences for new topic boundaries | 1 embedding call | OpenAI | `text-embedding-3-large` |
+| 3 | **Re-embed chunks** — store updated vectors in ChromaDB | 1 embedding call | OpenAI | `text-embedding-3-large` |
+| 4 | **Entity re-extraction** — extract from corrected text | 1 LLM call | Anthropic | `claude-opus-4-6` |
+| 5 | **Entity dedup** | 1 embedding call | OpenAI | `text-embedding-3-large` |
+| 6 | **Mood re-scoring** | 1 LLM call | Anthropic | `claude-sonnet-4-5` |
 
-### Full lifecycle total: 7-11 API calls
+**Total: 5 API calls** — 2 LLM + 3 embedding.
 
-| Type                      | Upload  | Save    | Total    | Provider  |
-| ------------------------- | ------- | ------- | -------- | --------- |
-| Vision LLM (OCR)          | 1       | 0       | **1**    | Anthropic |
-| LLM (entity extraction)   | 1       | 1       | **2**    | Anthropic |
-| LLM (mood scoring)        | 0-1     | 0-1     | **0-2**  | Anthropic |
-| Embedding (chunking)      | 1       | 1       | **2**    | OpenAI    |
-| Embedding (chunk storage) | 1       | 1       | **2**    | OpenAI    |
-| Embedding (entity dedup)  | 0-1     | 0-1     | **0-2**  | OpenAI    |
-| **Total**                 | **4-6** | **3-5** | **7-11** |           |
+### Full lifecycle: upload + review = 13 API calls
+
+| Type | Upload | Save | Total | Provider |
+|------|-------:|-----:|------:|----------|
+| Vision LLM (OCR) | 3 | 0 | **3** | Google |
+| LLM (entity extraction) | 1 | 1 | **2** | Anthropic |
+| LLM (mood scoring) | 1 | 1 | **2** | Anthropic |
+| Embedding (chunking) | 1 | 1 | **2** | OpenAI |
+| Embedding (chunk storage) | 1 | 1 | **2** | OpenAI |
+| Embedding (entity dedup) | 1 | 1 | **2** | OpenAI |
+| **Total** | **8** | **5** | **13** | |
+
+### Cost estimate: 3-page, 500-word entry (upload + review)
+
+Assumes ~170 words per page, ~25 sentences total, ~4 chunks, ~8 entities with relationships.
+
+| Step | Input tokens | Output tokens | Model | Cost |
+|------|------------:|-------------:|-------|-----:|
+| **OCR** (3 pages × 660 in + 220 out) | 1,980 | 660 | Gemini 3 Pro ($2/$12) | $0.012 |
+| **Semantic chunking** (25 sentences) | 650 | — | embedding-3-large ($0.13) | <$0.001 |
+| **Chunk embedding** (4 chunks) | 850 | — | embedding-3-large ($0.13) | <$0.001 |
+| **Entity extraction** | 1,550 | 500 | Claude Opus 4.6 ($5/$25) | $0.020 |
+| **Entity dedup** (8 names) | 30 | — | embedding-3-large ($0.13) | <$0.001 |
+| **Mood scoring** | 1,750 | 200 | Claude Sonnet 4.5 ($3/$15) | $0.008 |
+| **Re-chunk + re-embed** (on save) | 1,500 | — | embedding-3-large ($0.13) | <$0.001 |
+| **Entity re-extraction** (on save) | 1,550 | 500 | Claude Opus 4.6 ($5/$25) | $0.020 |
+| **Entity dedup** (on save) | 30 | — | embedding-3-large ($0.13) | <$0.001 |
+| **Mood re-scoring** (on save) | 1,750 | 200 | Claude Sonnet 4.5 ($3/$15) | $0.008 |
+| | | | **Total** | **~$0.07** |
+
+Cost breakdown by provider: **Anthropic ~$0.056** (80%), **Google ~$0.012** (17%), **OpenAI ~$0.002** (3%).
+
+Entity extraction dominates cost. OCR is the second-largest item. Embeddings are negligible.
 
 ### Other entry types
 
-| Input type           | Difference from handwritten page                                                           |
-| -------------------- | ------------------------------------------------------------------------------------------ |
-| **Voice note**       | Step 1 is transcription (OpenAI `gpt-4o-transcribe`) instead of OCR. Same steps 2-9 after. |
-| **Typed text**       | No step 1 (text provided directly). Same steps 2-9 after. Saves 1 API call.                |
-| **Multi-page image** | Step 1 is N OCR calls (1 per page), concatenated into one entry. Same steps 2-9 after.     |
+| Input type | Difference from handwritten page |
+|-----------|----------------------------------|
+| **Voice note** | Steps 1-3 replaced by 1 transcription call (OpenAI `gpt-4o-transcribe`, ~$0.001/min). Rest is identical. |
+| **Typed text** | No step 1-3. Text goes straight to chunking. Saves the OCR cost entirely. |
+| **Single-page image** | 1 OCR call instead of 3. Total upload cost drops by ~$0.008. |
 
 ### Querying (no ingestion)
 
-| Action            | API calls                                               |
-| ----------------- | ------------------------------------------------------- |
-| Semantic search   | 1 embedding call (embed query → ChromaDB cosine search) |
-| Keyword search    | 0 (FTS5, local)                                         |
-| Stats / dashboard | 0 (SQL aggregation, local)                              |
+| Action | API calls | Cost |
+|--------|-----------|------|
+| Semantic search | 1 embedding call (embed query → ChromaDB cosine) | <$0.001 |
+| Keyword search | 0 (FTS5, local) | $0 |
+| Stats / dashboard | 0 (SQL, local) | $0 |
 
 ---
 
-## Current Stack Summary
+## Current Production Stack
 
-| Provider      | Model                    | Used for                            | Price                   |
-| ------------- | ------------------------ | ----------------------------------- | ----------------------- |
-| **Anthropic** | `claude-opus-4-6`        | OCR, entity extraction              | $5.00 / $25.00 per MTok |
-| **Anthropic** | `claude-sonnet-4-5`      | Mood scoring                        | $3.00 / $15.00 per MTok |
-| **Google**    | `gemini-3-pro`           | OCR (switchable alt)                | $2.00 / $12.00 per MTok |
-| **OpenAI**    | `text-embedding-3-large` | Chunking, search, entity dedup      | $0.13 per MTok          |
-| **OpenAI**    | `gpt-4o-transcribe`      | Voice transcription                 | $0.006 / min            |
-| **ChromaDB**  | HNSW cosine              | Vector storage                      | Self-hosted             |
-| **SQLite**    | FTS5                     | Structured storage + keyword search | Local                   |
+| Provider | Model | Used for | Price |
+|----------|-------|----------|-------|
+| **Google** | `gemini-3-pro` | OCR (handwriting) | $2.00 / $12.00 per MTok |
+| **Anthropic** | `claude-opus-4-6` | Entity extraction | $5.00 / $25.00 per MTok |
+| **Anthropic** | `claude-sonnet-4-5` | Mood scoring | $3.00 / $15.00 per MTok |
+| **OpenAI** | `text-embedding-3-large` | Chunking, search, entity dedup (1024 dims) | $0.13 per MTok |
+| **OpenAI** | `gpt-4o-transcribe` | Voice transcription | $0.006 / min |
+| **ChromaDB** | HNSW cosine | Vector storage | Self-hosted |
+| **SQLite** | FTS5 | Structured storage + keyword search | Local |
 
 ---
 
@@ -485,8 +509,8 @@ Not every task needs a frontier model:
 Current dependencies from `pyproject.toml`:
 
 ```
-anthropic>=0.87,<1          # OCR, entity extraction, mood scoring
-google-genai>=1,<2          # Alternative OCR provider
+anthropic>=0.87,<1          # Entity extraction, mood scoring
+google-genai>=1,<2          # OCR (primary provider)
 openai>=2.29,<3             # Transcription, embeddings
 chromadb-client>=1.5,<2     # Vector store
 mcp[cli]>=1.26,<2           # MCP server framework
@@ -495,61 +519,65 @@ tiktoken>=0.9,<1            # Token counting (cl100k_base)
 
 ---
 
-## Processing Pipeline: Single Entry Lifecycle
+## Processing Pipeline: 3-Page Entry Lifecycle
 
 ```
-  IMAGE / VOICE / TEXT
-         │
-         ▼
-  ┌──────────────────────────────────────────────────────┐
-  │  1. INPUT → TEXT                        (request)    │
-  │                                                      │
-  │  Image ──► OCR ──────────────► plain text            │
-  │             ╰─ 1 LLM call (Anthropic vision)        │
-  │                                                      │
-  │  Voice ──► Transcribe ───────► plain text            │
-  │             ╰─ 1 API call (OpenAI Whisper)          │
-  │                                                      │
-  │  Text ───► (pass-through) ──► plain text             │
-  └──────────────────────┬───────────────────────────────┘
-                         │
-                         ▼
-  ┌──────────────────────────────────────────────────────┐
-  │  2. CHUNK + EMBED                       (request)    │
-  │                                                      │
-  │  Sentences ──► embed all ──► cosine similarity       │
-  │                ╰─ 1 embedding call (OpenAI)         │
-  │                                                      │
-  │  Chunks ──► embed all ──► store in ChromaDB          │
-  │              ╰─ 1 embedding call (OpenAI)           │
-  └──────────────────────┬───────────────────────────────┘
-                         │
-                         ▼
-  ┌──────────────────────────────────────────────────────┐
-  │  3. ENRICH                          (background)     │
-  │                                                      │
-  │  Entity extraction ──► entities + relationships      │
-  │   ╰─ 1 LLM call (Anthropic, tool_use)              │
-  │   ╰─ 0-1 embedding call (dedup, if new entities)   │
-  │                                                      │
-  │  Mood scoring ──► 7 dimension scores  (if enabled)   │
-  │   ╰─ 1 LLM call (Anthropic, tool_use)              │
-  │                                                      │
-  │  Summarisation ──► entry summary      (planned)      │
-  │  Coreference ──► resolved pronouns    (planned)      │
-  │  Predicate norm ──► canonical preds   (planned)      │
-  └──────────────────────────────────────────────────────┘
+  3 PAGE IMAGES
+     │
+     ▼
+  ┌──────────────────────────────────────────────────────────┐
+  │  1. OCR                               (request thread)   │
+  │                                                          │
+  │  Page 1 ──► Gemini 3 Pro ──► text ─┐                    │
+  │  Page 2 ──► Gemini 3 Pro ──► text ──┼──► combined text   │
+  │  Page 3 ──► Gemini 3 Pro ──► text ─┘     (~500 words)   │
+  │                                                          │
+  │  3 LLM calls (Google)                        cost: $0.01 │
+  └────────────────────────┬─────────────────────────────────┘
+                           │
+                           ▼
+  ┌──────────────────────────────────────────────────────────┐
+  │  2. CHUNK + EMBED                     (request thread)   │
+  │                                                          │
+  │  ~25 sentences ──► embed ──► cosine sim ──► 4 chunks     │
+  │  4 chunks ──► embed ──► store in ChromaDB                │
+  │                                                          │
+  │  2 embedding calls (OpenAI)                  cost: <$0.01│
+  └────────────────────────┬─────────────────────────────────┘
+                           │
+                           ▼
+  ┌──────────────────────────────────────────────────────────┐
+  │  3. ENRICH                            (background jobs)  │
+  │                                                          │
+  │  Entity extraction ──► ~8 entities + relationships       │
+  │    1 LLM call (Anthropic Opus, tool_use)     cost: $0.02 │
+  │    1 embedding call (dedup)                  cost: <$0.01│
+  │                                                          │
+  │  Mood scoring ──► 7 dimension scores                     │
+  │    1 LLM call (Anthropic Sonnet, tool_use)   cost: $0.01 │
+  │                                                          │
+  │  Summarisation                               (planned)   │
+  │  Coreference resolution                      (planned)   │
+  │  Predicate normalisation                     (planned)   │
+  └──────────────────────────────────────────────────────────┘
 
-  ─────────────── LATER, ON QUERY ───────────────
+  TOTAL UPLOAD: 8 API calls, ~$0.04
 
-  ┌──────────────────────────────────────────────────────┐
-  │  4. SEARCH                              (on demand)  │
-  │                                                      │
-  │  Semantic ──► embed query ──► ChromaDB cosine        │
-  │               ╰─ 1 embedding call (OpenAI)          │
-  │                                                      │
-  │  Keyword ──► FTS5 (no API call)                      │
-  │  Stats ──► SQL aggregation (no API call)             │
-  │  Synthesis ──► LLM answer generation    (planned)    │
-  └──────────────────────────────────────────────────────┘
+  ═══════════ AFTER OCR REVIEW + SAVE ═══════════
+
+  ┌──────────────────────────────────────────────────────────┐
+  │  4. RE-PROCESS                        (background jobs)  │
+  │                                                          │
+  │  Re-chunk + re-embed ──► updated vectors                 │
+  │    2 embedding calls (OpenAI)                cost: <$0.01│
+  │                                                          │
+  │  Entity re-extraction + dedup                            │
+  │    1 LLM + 1 embedding call                  cost: $0.02 │
+  │                                                          │
+  │  Mood re-scoring                                         │
+  │    1 LLM call                                cost: $0.01 │
+  └──────────────────────────────────────────────────────────┘
+
+  TOTAL SAVE: 5 API calls, ~$0.03
+  TOTAL LIFECYCLE: 13 API calls, ~$0.07
 ```

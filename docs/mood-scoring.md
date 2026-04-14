@@ -1,8 +1,8 @@
 # Mood Scoring
 
 Per-entry emotional scoring against a user-configurable set of
-facets. Optional, off by default, opt in explicitly via
-`JOURNAL_ENABLE_MOOD_SCORING=true`.
+facets. On by default. Opt out explicitly via
+`JOURNAL_ENABLE_MOOD_SCORING=false`.
 
 The pipeline sits at the tail of `IngestionService._process_text`:
 after chunks + embeddings are persisted, the `MoodScoringService`

@@ -139,15 +139,15 @@ class Config:
         default_factory=lambda: os.environ.get("JOURNAL_API_TOKEN") or None
     )
 
-    # Mood scoring. Off by default — opt in explicitly via
-    # `JOURNAL_ENABLE_MOOD_SCORING=true`. When enabled, ingestion
+    # Mood scoring. On by default — opt out explicitly via
+    # `JOURNAL_ENABLE_MOOD_SCORING=false`. When enabled, ingestion
     # calls the MoodScorer provider after chunking/embedding for
     # each entry and writes the results to `mood_scores`. The
     # dimension set is loaded from `mood_dimensions_path` (TOML)
     # at server startup.
     enable_mood_scoring: bool = field(
         default_factory=lambda: os.environ.get(
-            "JOURNAL_ENABLE_MOOD_SCORING", "false"
+            "JOURNAL_ENABLE_MOOD_SCORING", "true"
         ).lower() in ("1", "true", "yes", "on")
     )
     mood_scorer_model: str = field(
