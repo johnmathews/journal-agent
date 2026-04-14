@@ -377,7 +377,7 @@ class GeminiOCRProvider:
     def __init__(
         self,
         api_key: str,
-        model: str = "gemini-3-pro",
+        model: str = "gemini-2.5-pro",
     ) -> None:
         self._client = genai.Client(api_key=api_key)
         self._model = model
@@ -418,7 +418,7 @@ class GeminiOCRProvider:
 
 _DEFAULT_MODELS: dict[str, str] = {
     "anthropic": "claude-opus-4-6",
-    "gemini": "gemini-3-pro",
+    "gemini": "gemini-2.5-pro",
 }
 
 

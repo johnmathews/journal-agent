@@ -18,9 +18,9 @@ Each page is OCR'd individually, then the combined text flows through chunking, 
 
 | Step | What happens                                                                          | API call         | Provider  | Model                    |
 | ---: | ------------------------------------------------------------------------------------- | ---------------- | --------- | ------------------------ |
-|    1 | **OCR page 1** — image → text                                                         | 1 LLM call       | Google    | `gemini-3-pro`           |
-|    2 | **OCR page 2**                                                                        | 1 LLM call       | Google    | `gemini-3-pro`           |
-|    3 | **OCR page 3**                                                                        | 1 LLM call       | Google    | `gemini-3-pro`           |
+|    1 | **OCR page 1** — image → text                                                         | 1 LLM call       | Google    | `gemini-2.5-pro`           |
+|    2 | **OCR page 2**                                                                        | 1 LLM call       | Google    | `gemini-2.5-pro`           |
+|    3 | **OCR page 3**                                                                        | 1 LLM call       | Google    | `gemini-2.5-pro`           |
 |    4 | Date extraction from OCR text                                                         | — local          | —         | —                        |
 |    5 | Entry + page records saved to SQLite                                                  | — local          | —         | —                        |
 |    6 | **Semantic chunking** — embed all sentences, cosine similarity finds topic boundaries | 1 embedding call | OpenAI    | `text-embedding-3-large` |
@@ -65,7 +65,7 @@ Assumes ~170 words per page, ~25 sentences total, ~4 chunks, ~8 entities with re
 
 | Step                                 | Input tokens | Output tokens | Model                      |       Cost |
 | ------------------------------------ | -----------: | ------------: | -------------------------- | ---------: |
-| **OCR** (3 pages × 2,100 in + 800 out) |       6,300 |         2,400 | Gemini 3 Pro ($2/$12)      |     $0.042 |
+| **OCR** (3 pages × 2,100 in + 800 out) |       6,300 |         2,400 | Gemini 2.5 Pro ($1.25/$10) |     $0.032 |
 | **Semantic chunking** (25 sentences) |          650 |             — | embedding-3-large ($0.13)  |    <$0.001 |
 | **Chunk embedding** (4 chunks)       |          850 |             — | embedding-3-large ($0.13)  |    <$0.001 |
 | **Entity extraction**                |        1,550 |           500 | Claude Opus 4.6 ($5/$25)   |     $0.020 |
@@ -75,9 +75,9 @@ Assumes ~170 words per page, ~25 sentences total, ~4 chunks, ~8 entities with re
 | **Entity re-extraction** (on save)   |        1,550 |           500 | Claude Opus 4.6 ($5/$25)   |     $0.020 |
 | **Entity dedup** (on save)           |           30 |             — | embedding-3-large ($0.13)  |    <$0.001 |
 | **Mood re-scoring** (on save)        |        1,750 |           200 | Claude Sonnet 4.5 ($3/$15) |     $0.008 |
-|                                      |              |               | **Total**                  | **~$0.10** |
+|                                      |              |               | **Total**                  | **~$0.09** |
 
-Cost breakdown by provider: **Anthropic ~$0.056** (56%), **Google ~$0.042** (42%), **OpenAI ~$0.002** (2%).
+Cost breakdown by provider: **Anthropic ~$0.056** (62%), **Google ~$0.032** (36%), **OpenAI ~$0.002** (2%).
 
 Entity extraction and OCR dominate cost at roughly equal shares. Embeddings are negligible.
 
@@ -103,7 +103,7 @@ Entity extraction and OCR dominate cost at roughly equal shares. Embeddings are 
 
 | Provider      | Model                    | Used for                                   | Price                   |
 | ------------- | ------------------------ | ------------------------------------------ | ----------------------- |
-| **Google**    | `gemini-3-pro`           | OCR (handwriting)                          | $2.00 / $12.00 per MTok |
+| **Google**    | `gemini-2.5-pro`           | OCR (handwriting)                          | $1.25 / $10.00 per MTok |
 | **Anthropic** | `claude-opus-4-6`        | Entity extraction                          | $5.00 / $25.00 per MTok |
 | **Anthropic** | `claude-sonnet-4-5`      | Mood scoring                               | $3.00 / $15.00 per MTok |
 | **OpenAI**    | `text-embedding-3-large` | Chunking, search, entity dedup (1024 dims) | $0.13 per MTok          |
@@ -486,7 +486,7 @@ For a ~500-word entry (~3.3 minutes spoken at ~150 wpm, ~3 handwritten pages):
 | -------------------- | -------------: | ---------------------- | ---------------------- |
 | Voice (current)      |        ~$0.020 | gpt-4o-transcribe      | 1 call, $0.006/min     |
 | Voice (budget)       |        ~$0.010 | gpt-4o-mini-transcribe | Half price, ~4-5% WER  |
-| Handwriting (Gemini) |        ~$0.042 | gemini-3-pro           | 3 OCR calls            |
+| Handwriting (Gemini) |        ~$0.032 | gemini-2.5-pro           | 3 OCR calls            |
 | Handwriting (Opus)   |        ~$0.093 | claude-opus-4-6        | 3 OCR calls            |
 
 Voice transcription is **2-5x cheaper** than handwriting OCR for the same content. After ingestion, the rest of the

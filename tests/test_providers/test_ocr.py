@@ -463,7 +463,7 @@ class TestGeminiOCRProvider:
         with patch("journal.providers.ocr.genai.Client"):
             provider = GeminiOCRProvider(
                 api_key="test-google-key",
-                model="gemini-3-pro",
+                model="gemini-2.5-pro",
             )
         return provider
 

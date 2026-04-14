@@ -33,7 +33,7 @@ class Config:
     )
 
     # OCR model — interpreted by the selected provider.
-    # Defaults depend on provider: claude-opus-4-6 for anthropic, gemini-3-pro for gemini.
+    # Defaults depend on provider: claude-opus-4-6 for anthropic, gemini-2.5-pro for gemini.
     # When unset, the factory in ocr.py picks the provider's default.
     ocr_model: str = field(
         default_factory=lambda: os.environ.get("OCR_MODEL", "")

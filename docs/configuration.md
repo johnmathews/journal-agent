@@ -48,7 +48,7 @@ See `docs/architecture.md` → "Chunking Strategies" for the algorithm and trade
 | Variable       | Default      | Description                                                                                                     |
 |----------------|--------------|-----------------------------------------------------------------------------------------------------------------|
 | `OCR_PROVIDER` | `anthropic`  | Which vision API to use for handwriting OCR. `"anthropic"` (Claude) or `"gemini"` (Google Gemini).              |
-| `OCR_MODEL`    | per-provider | Model name sent to the selected provider. Defaults: `claude-opus-4-6` (anthropic), `gemini-3-pro` (gemini).    |
+| `OCR_MODEL`    | per-provider | Model name sent to the selected provider. Defaults: `claude-opus-4-6` (anthropic), `gemini-2.5-pro` (gemini).    |
 
 When using `gemini`, the context-priming glossary (`OCR_CONTEXT_DIR`) is not applied — Gemini uses only the base system prompt.
 
@@ -56,7 +56,7 @@ When using `gemini`, the context-priming glossary (`OCR_CONTEXT_DIR`) is not app
 
 | Variable / Setting     | Default                  | Description                                             |
 |------------------------|--------------------------|---------------------------------------------------------|
-| `OCR_MODEL`            | `claude-opus-4-6` / `gemini-3-pro` | Vision model for OCR (depends on `OCR_PROVIDER`)  |
+| `OCR_MODEL`            | `claude-opus-4-6` / `gemini-2.5-pro` | Vision model for OCR (depends on `OCR_PROVIDER`)  |
 | `transcription_model`  | `gpt-4o-transcribe`      | OpenAI model for transcription                          |
 | `embedding_model`      | `text-embedding-3-large` | OpenAI model for embeddings                             |
 | `embedding_dimensions` | `1024`                   | Embedding vector dimensions (reduced from 3072)         |
