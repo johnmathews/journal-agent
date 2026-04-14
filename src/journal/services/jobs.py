@@ -89,7 +89,7 @@ def _is_transient(exc: Exception) -> bool:
 
 
 # Retry schedule: 3 min, 6 min, 12 min (exponential backoff)
-_RETRY_DELAYS_SECONDS = [180, 360, 720]
+_RETRY_DELAYS_SECONDS = [180, 360, 720, 1440, 2880]
 
 
 # --------------------------------------------------------------------
