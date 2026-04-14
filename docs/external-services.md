@@ -16,19 +16,19 @@ This shows every external API call for the current production configuration.
 
 Each page is OCR'd individually, then the combined text flows through chunking, embedding, and enrichment.
 
-| Step | What happens | API call | Provider | Model |
-|-----:|-------------|----------|----------|-------|
-| 1 | **OCR page 1** — image → text | 1 LLM call | Google | `gemini-3-pro` |
-| 2 | **OCR page 2** | 1 LLM call | Google | `gemini-3-pro` |
-| 3 | **OCR page 3** | 1 LLM call | Google | `gemini-3-pro` |
-| 4 | Date extraction from OCR text | — local | — | — |
-| 5 | Entry + page records saved to SQLite | — local | — | — |
-| 6 | **Semantic chunking** — embed all sentences, cosine similarity finds topic boundaries | 1 embedding call | OpenAI | `text-embedding-3-large` |
-| 7 | **Chunk embedding** — embed final chunks for vector search | 1 embedding call | OpenAI | `text-embedding-3-large` |
-| 8 | Chunks + vectors stored in ChromaDB | — local | — | — |
-| 9 | **Mood scoring** — text scored on 7 emotional dimensions | 1 LLM call | Anthropic | `claude-sonnet-4-5` |
-| 10 | **Entity extraction** — people, places, activities, relationships | 1 LLM call | Anthropic | `claude-opus-4-6` |
-| 11 | **Entity dedup** — compare new entities to existing by embedding similarity | 1 embedding call | OpenAI | `text-embedding-3-large` |
+| Step | What happens                                                                          | API call         | Provider  | Model                    |
+| ---: | ------------------------------------------------------------------------------------- | ---------------- | --------- | ------------------------ |
+|    1 | **OCR page 1** — image → text                                                         | 1 LLM call       | Google    | `gemini-3-pro`           |
+|    2 | **OCR page 2**                                                                        | 1 LLM call       | Google    | `gemini-3-pro`           |
+|    3 | **OCR page 3**                                                                        | 1 LLM call       | Google    | `gemini-3-pro`           |
+|    4 | Date extraction from OCR text                                                         | — local          | —         | —                        |
+|    5 | Entry + page records saved to SQLite                                                  | — local          | —         | —                        |
+|    6 | **Semantic chunking** — embed all sentences, cosine similarity finds topic boundaries | 1 embedding call | OpenAI    | `text-embedding-3-large` |
+|    7 | **Chunk embedding** — embed final chunks for vector search                            | 1 embedding call | OpenAI    | `text-embedding-3-large` |
+|    8 | Chunks + vectors stored in ChromaDB                                                   | — local          | —         | —                        |
+|    9 | **Mood scoring** — text scored on 7 emotional dimensions                              | 1 LLM call       | Anthropic | `claude-sonnet-4-5`      |
+|   10 | **Entity extraction** — people, places, activities, relationships                     | 1 LLM call       | Anthropic | `claude-opus-4-6`        |
+|   11 | **Entity dedup** — compare new entities to existing by embedding similarity           | 1 embedding call | OpenAI    | `text-embedding-3-large` |
 
 **Total: 8 API calls** — 3 OCR + 2 LLM enrichment + 3 embedding.
 
@@ -36,80 +36,80 @@ Each page is OCR'd individually, then the combined text flows through chunking, 
 
 When you edit the entry text and save, re-processing runs as background jobs:
 
-| Step | What happens | API call | Provider | Model |
-|-----:|-------------|----------|----------|-------|
-| 1 | Updated text saved to SQLite | — local | — | — |
-| 2 | **Re-chunk** — re-embed sentences for new topic boundaries | 1 embedding call | OpenAI | `text-embedding-3-large` |
-| 3 | **Re-embed chunks** — store updated vectors in ChromaDB | 1 embedding call | OpenAI | `text-embedding-3-large` |
-| 4 | **Entity re-extraction** — extract from corrected text | 1 LLM call | Anthropic | `claude-opus-4-6` |
-| 5 | **Entity dedup** | 1 embedding call | OpenAI | `text-embedding-3-large` |
-| 6 | **Mood re-scoring** | 1 LLM call | Anthropic | `claude-sonnet-4-5` |
+| Step | What happens                                               | API call         | Provider  | Model                    |
+| ---: | ---------------------------------------------------------- | ---------------- | --------- | ------------------------ |
+|    1 | Updated text saved to SQLite                               | — local          | —         | —                        |
+|    2 | **Re-chunk** — re-embed sentences for new topic boundaries | 1 embedding call | OpenAI    | `text-embedding-3-large` |
+|    3 | **Re-embed chunks** — store updated vectors in ChromaDB    | 1 embedding call | OpenAI    | `text-embedding-3-large` |
+|    4 | **Entity re-extraction** — extract from corrected text     | 1 LLM call       | Anthropic | `claude-opus-4-6`        |
+|    5 | **Entity dedup**                                           | 1 embedding call | OpenAI    | `text-embedding-3-large` |
+|    6 | **Mood re-scoring**                                        | 1 LLM call       | Anthropic | `claude-sonnet-4-5`      |
 
 **Total: 5 API calls** — 2 LLM + 3 embedding.
 
 ### Full lifecycle: upload + review = 13 API calls
 
-| Type | Upload | Save | Total | Provider |
-|------|-------:|-----:|------:|----------|
-| Vision LLM (OCR) | 3 | 0 | **3** | Google |
-| LLM (entity extraction) | 1 | 1 | **2** | Anthropic |
-| LLM (mood scoring) | 1 | 1 | **2** | Anthropic |
-| Embedding (chunking) | 1 | 1 | **2** | OpenAI |
-| Embedding (chunk storage) | 1 | 1 | **2** | OpenAI |
-| Embedding (entity dedup) | 1 | 1 | **2** | OpenAI |
-| **Total** | **8** | **5** | **13** | |
+| Type                      | Upload |  Save |  Total | Provider  |
+| ------------------------- | -----: | ----: | -----: | --------- |
+| Vision LLM (OCR)          |      3 |     0 |  **3** | Google    |
+| LLM (entity extraction)   |      1 |     1 |  **2** | Anthropic |
+| LLM (mood scoring)        |      1 |     1 |  **2** | Anthropic |
+| Embedding (chunking)      |      1 |     1 |  **2** | OpenAI    |
+| Embedding (chunk storage) |      1 |     1 |  **2** | OpenAI    |
+| Embedding (entity dedup)  |      1 |     1 |  **2** | OpenAI    |
+| **Total**                 |  **8** | **5** | **13** |           |
 
 ### Cost estimate: 3-page, 500-word entry (upload + review)
 
 Assumes ~170 words per page, ~25 sentences total, ~4 chunks, ~8 entities with relationships.
 
-| Step | Input tokens | Output tokens | Model | Cost |
-|------|------------:|-------------:|-------|-----:|
-| **OCR** (3 pages × 660 in + 220 out) | 1,980 | 660 | Gemini 3 Pro ($2/$12) | $0.012 |
-| **Semantic chunking** (25 sentences) | 650 | — | embedding-3-large ($0.13) | <$0.001 |
-| **Chunk embedding** (4 chunks) | 850 | — | embedding-3-large ($0.13) | <$0.001 |
-| **Entity extraction** | 1,550 | 500 | Claude Opus 4.6 ($5/$25) | $0.020 |
-| **Entity dedup** (8 names) | 30 | — | embedding-3-large ($0.13) | <$0.001 |
-| **Mood scoring** | 1,750 | 200 | Claude Sonnet 4.5 ($3/$15) | $0.008 |
-| **Re-chunk + re-embed** (on save) | 1,500 | — | embedding-3-large ($0.13) | <$0.001 |
-| **Entity re-extraction** (on save) | 1,550 | 500 | Claude Opus 4.6 ($5/$25) | $0.020 |
-| **Entity dedup** (on save) | 30 | — | embedding-3-large ($0.13) | <$0.001 |
-| **Mood re-scoring** (on save) | 1,750 | 200 | Claude Sonnet 4.5 ($3/$15) | $0.008 |
-| | | | **Total** | **~$0.07** |
+| Step                                 | Input tokens | Output tokens | Model                      |       Cost |
+| ------------------------------------ | -----------: | ------------: | -------------------------- | ---------: |
+| **OCR** (3 pages × 2,100 in + 800 out) |       6,300 |         2,400 | Gemini 3 Pro ($2/$12)      |     $0.042 |
+| **Semantic chunking** (25 sentences) |          650 |             — | embedding-3-large ($0.13)  |    <$0.001 |
+| **Chunk embedding** (4 chunks)       |          850 |             — | embedding-3-large ($0.13)  |    <$0.001 |
+| **Entity extraction**                |        1,550 |           500 | Claude Opus 4.6 ($5/$25)   |     $0.020 |
+| **Entity dedup** (8 names)           |           30 |             — | embedding-3-large ($0.13)  |    <$0.001 |
+| **Mood scoring**                     |        1,750 |           200 | Claude Sonnet 4.5 ($3/$15) |     $0.008 |
+| **Re-chunk + re-embed** (on save)    |        1,500 |             — | embedding-3-large ($0.13)  |    <$0.001 |
+| **Entity re-extraction** (on save)   |        1,550 |           500 | Claude Opus 4.6 ($5/$25)   |     $0.020 |
+| **Entity dedup** (on save)           |           30 |             — | embedding-3-large ($0.13)  |    <$0.001 |
+| **Mood re-scoring** (on save)        |        1,750 |           200 | Claude Sonnet 4.5 ($3/$15) |     $0.008 |
+|                                      |              |               | **Total**                  | **~$0.10** |
 
-Cost breakdown by provider: **Anthropic ~$0.056** (80%), **Google ~$0.012** (17%), **OpenAI ~$0.002** (3%).
+Cost breakdown by provider: **Anthropic ~$0.056** (56%), **Google ~$0.042** (42%), **OpenAI ~$0.002** (2%).
 
-Entity extraction dominates cost. OCR is the second-largest item. Embeddings are negligible.
+Entity extraction and OCR dominate cost at roughly equal shares. Embeddings are negligible.
 
 ### Other entry types
 
-| Input type | Difference from handwritten page |
-|-----------|----------------------------------|
-| **Voice note** | Steps 1-3 replaced by 1 transcription call (OpenAI `gpt-4o-transcribe`, ~$0.001/min). Rest is identical. |
-| **Typed text** | No step 1-3. Text goes straight to chunking. Saves the OCR cost entirely. |
-| **Single-page image** | 1 OCR call instead of 3. Total upload cost drops by ~$0.008. |
+| Input type            | Difference from handwritten page                                                                         |
+| --------------------- | -------------------------------------------------------------------------------------------------------- |
+| **Voice note**        | Steps 1-3 replaced by 1 transcription call (OpenAI `gpt-4o-transcribe`, ~$0.006/min). Rest is identical. |
+| **Typed text**        | No step 1-3. Text goes straight to chunking. Saves the OCR cost entirely.                                |
+| **Single-page image** | 1 OCR call instead of 3. Total upload cost drops by ~$0.028.                                             |
 
 ### Querying (no ingestion)
 
-| Action | API calls | Cost |
-|--------|-----------|------|
-| Semantic search | 1 embedding call (embed query → ChromaDB cosine) | <$0.001 |
-| Keyword search | 0 (FTS5, local) | $0 |
-| Stats / dashboard | 0 (SQL, local) | $0 |
+| Action            | API calls                                        | Cost    |
+| ----------------- | ------------------------------------------------ | ------- |
+| Semantic search   | 1 embedding call (OpenAI) + local ChromaDB cosine search | <$0.001 |
+| Keyword search    | 0 (FTS5, local)                                  | $0      |
+| Stats / dashboard | 0 (SQL, local)                                   | $0      |
 
 ---
 
 ## Current Production Stack
 
-| Provider | Model | Used for | Price |
-|----------|-------|----------|-------|
-| **Google** | `gemini-3-pro` | OCR (handwriting) | $2.00 / $12.00 per MTok |
-| **Anthropic** | `claude-opus-4-6` | Entity extraction | $5.00 / $25.00 per MTok |
-| **Anthropic** | `claude-sonnet-4-5` | Mood scoring | $3.00 / $15.00 per MTok |
-| **OpenAI** | `text-embedding-3-large` | Chunking, search, entity dedup (1024 dims) | $0.13 per MTok |
-| **OpenAI** | `gpt-4o-transcribe` | Voice transcription | $0.006 / min |
-| **ChromaDB** | HNSW cosine | Vector storage | Self-hosted |
-| **SQLite** | FTS5 | Structured storage + keyword search | Local |
+| Provider      | Model                    | Used for                                   | Price                   |
+| ------------- | ------------------------ | ------------------------------------------ | ----------------------- |
+| **Google**    | `gemini-3-pro`           | OCR (handwriting)                          | $2.00 / $12.00 per MTok |
+| **Anthropic** | `claude-opus-4-6`        | Entity extraction                          | $5.00 / $25.00 per MTok |
+| **Anthropic** | `claude-sonnet-4-5`      | Mood scoring                               | $3.00 / $15.00 per MTok |
+| **OpenAI**    | `text-embedding-3-large` | Chunking, search, entity dedup (1024 dims) | $0.13 per MTok          |
+| **OpenAI**    | `gpt-4o-transcribe`      | Voice transcription                        | $0.006 / min            |
+| **ChromaDB**  | HNSW cosine              | Vector storage                             | Self-hosted             |
+| **SQLite**    | FTS5                     | Structured storage + keyword search        | Local                   |
 
 ---
 
@@ -123,17 +123,17 @@ Photos of handwritten journal pages are sent to a vision-capable LLM which retur
 implementation supports context-priming (a glossary of proper nouns injected into the system prompt) and marks uncertain
 regions with `⟪/⟫` sentinels.
 
-**Current:** Anthropic Claude Opus 4.6 (primary), Google Gemini 3 Pro (switchable alternative).
+**Current:** Google Gemini 3 Pro (primary), Anthropic Claude Opus 4.6 (switchable alternative).
 
 #### Cloud API Options
 
 | Provider      | Model                 | Input $/MTok | Output $/MTok | Context | Batch   | Handwriting Score | Notes                                             |
 | ------------- | --------------------- | ------------ | ------------- | ------- | ------- | ----------------- | ------------------------------------------------- |
-| **Anthropic** | Claude Opus 4.6       | $5.00        | $25.00        | 1M      | 50% off | ~91%+             | Prompt caching for glossary. Current primary.     |
+| **Anthropic** | Claude Opus 4.6       | $5.00        | $25.00        | 1M      | 50% off | ~91%+             | Prompt caching for glossary. Switchable alternative.     |
 | **Anthropic** | Claude Sonnet 4.6     | $3.00        | $15.00        | 1M      | 50% off | ~91%              | Cheaper, similar quality for OCR.                 |
 | **Anthropic** | Claude Haiku 4.5      | $1.00        | $5.00         | 200K    | 50% off | —                 | Untested on cursive; worth benchmarking.          |
 | **Google**    | Gemini 3.1 Pro        | $2.00        | $12.00        | 1M      | 50% off | ~100%             | Top handwriting benchmark score.                  |
-| **Google**    | Gemini 3 Pro          | $2.00        | $12.00        | 1M      | 50% off | 100%              | Current alt provider. Best-in-class cursive.      |
+| **Google**    | Gemini 3 Pro          | $2.00        | $12.00        | 1M      | 50% off | 100%              | Current primary. Best-in-class cursive.      |
 | **Google**    | Gemini 2.5 Pro        | $1.25        | $10.00        | 1M      | 50% off | 95%               | Strong quality, lower cost.                       |
 | **Google**    | Gemini 2.5 Flash      | $0.30        | $2.50         | 1M      | 50% off | —                 | Budget option, quality TBD on cursive.            |
 | **Google**    | Gemini 2.5 Flash-Lite | $0.10        | $0.40         | 1M      | 50% off | —                 | Ultra-budget. Free tier available.                |
@@ -464,6 +464,53 @@ retrieved chunks, rather than just returning raw results. This would use the sam
 
 ---
 
+## Cost Comparisons
+
+### OCR Provider: Gemini 3 Pro vs Claude Opus 4.6
+
+Per handwritten page (~1,600 image tokens + ~500 system prompt tokens in, ~800 tokens out):
+
+| Model             | Per page | Per page (batch 50% off) | 3-page entry |
+| ----------------- | -------: | -----------------------: | -----------: |
+| Gemini 3 Pro      |  ~$0.014 |                  ~$0.007 |      ~$0.042 |
+| Claude Opus 4.6   |  ~$0.031 |                  ~$0.015 |      ~$0.093 |
+
+Gemini 3 Pro is **~55% cheaper** per page ($0.014 vs $0.031). Over a 3-page entry, that saves ~$0.05 on OCR. At 1
+entry/day, switching from Opus to Gemini saves ~$1.50/month on OCR alone.
+
+### Input Method: Handwriting OCR vs Voice Transcription
+
+For a ~500-word entry (~3.3 minutes spoken at ~150 wpm, ~3 handwritten pages):
+
+| Input method         | Ingestion cost | Model                  | Notes                  |
+| -------------------- | -------------: | ---------------------- | ---------------------- |
+| Voice (current)      |        ~$0.020 | gpt-4o-transcribe      | 1 call, $0.006/min     |
+| Voice (budget)       |        ~$0.010 | gpt-4o-mini-transcribe | Half price, ~4-5% WER  |
+| Handwriting (Gemini) |        ~$0.042 | gemini-3-pro           | 3 OCR calls            |
+| Handwriting (Opus)   |        ~$0.093 | claude-opus-4-6        | 3 OCR calls            |
+
+Voice transcription is **2-5x cheaper** than handwriting OCR for the same content. After ingestion, the rest of the
+pipeline (chunking, embedding, mood scoring, entity extraction) is identical regardless of input method — ~$0.028 for
+enrichment.
+
+### Cost of Editing/Reviewing an Entry
+
+When you edit OCR text and save, the system re-runs enrichment but skips OCR/transcription:
+
+| Step                          | API call    | Provider               |      Cost |
+| ----------------------------- | ----------- | ---------------------- | --------: |
+| Re-chunk (re-embed sentences) | 1 embedding | OpenAI                 |   <$0.001 |
+| Re-embed chunks               | 1 embedding | OpenAI                 |   <$0.001 |
+| Entity re-extraction          | 1 LLM call  | Anthropic (Opus 4.6)   |    $0.020 |
+| Entity dedup                  | 1 embedding | OpenAI                 |   <$0.001 |
+| Mood re-scoring               | 1 LLM call  | Anthropic (Sonnet 4.5) |    $0.008 |
+| **Total**                     | **5 calls** |                        | **~$0.030** |
+
+Editing costs ~$0.03 regardless of the original input method, because the expensive ingestion step (OCR or
+transcription) does not repeat. Entity extraction (~$0.020) is the largest single cost in the edit cycle.
+
+---
+
 ## Cost Optimisation Strategies
 
 ### Batch APIs
@@ -532,7 +579,7 @@ tiktoken>=0.9,<1            # Token counting (cl100k_base)
   │  Page 2 ──► Gemini 3 Pro ──► text ──┼──► combined text   │
   │  Page 3 ──► Gemini 3 Pro ──► text ─┘     (~500 words)   │
   │                                                          │
-  │  3 LLM calls (Google)                        cost: $0.01 │
+  │  3 LLM calls (Google)                        cost: $0.04 │
   └────────────────────────┬─────────────────────────────────┘
                            │
                            ▼
@@ -561,7 +608,7 @@ tiktoken>=0.9,<1            # Token counting (cl100k_base)
   │  Predicate normalisation                     (planned)   │
   └──────────────────────────────────────────────────────────┘
 
-  TOTAL UPLOAD: 8 API calls, ~$0.04
+  TOTAL UPLOAD: 8 API calls, ~$0.07
 
   ═══════════ AFTER OCR REVIEW + SAVE ═══════════
 
@@ -579,5 +626,5 @@ tiktoken>=0.9,<1            # Token counting (cl100k_base)
   └──────────────────────────────────────────────────────────┘
 
   TOTAL SAVE: 5 API calls, ~$0.03
-  TOTAL LIFECYCLE: 13 API calls, ~$0.07
+  TOTAL LIFECYCLE: 13 API calls, ~$0.10
 ```
