@@ -1,0 +1,113 @@
+# SQLite Threading and Connection Safety
+
+This document records a production-grade threading bug found in the job repository, how it was diagnosed, and the
+patterns that prevent it. It applies to any code that shares a `sqlite3.Connection` across threads.
+
+## The bug
+
+`SQLiteJobRepository` methods were called from two threads simultaneously:
+
+- **API handler thread** (Starlette/ASGI) — calls `create()` when a user submits a job via POST
+- **Executor thread** (`JobRunner`'s single-worker `ThreadPoolExecutor`) — calls `mark_running()`, `update_progress()`,
+  `mark_succeeded()` as the job executes
+
+Both threads issued `execute()` + `commit()` on the **same `sqlite3.Connection`**. When the timing aligned, the
+concurrent commits produced:
+
+```
+sqlite3.OperationalError: not an error
+```
+
+This surfaced as an intermittent 500 on job submission — roughly 1 in 5 runs under test load.
+
+## Why it was hard to find
+
+1. **Production hid it.** Real LLM calls take seconds, so the API handler thread's `create()` almost never overlaps
+   with the executor thread's `mark_running()`. The race window is microseconds.
+
+2. **Tests hid it too.** Fake services complete instantly, making the race much more likely — but the test used
+   `raise_server_exceptions=False` (needed for other tests that assert on error responses), so the 500 was silently
+   swallowed. The test saw `total == 1` instead of `total == 2` and the failure message pointed at the wrong thing.
+
+3. **The error message is misleading.** `"not an error"` is SQLite's way of saying "the connection was used
+   concurrently in an unsafe way." It does not explain what went wrong.
+
+4. **`check_same_thread=False` suppresses the only guard.** Python's `sqlite3` module raises `ProgrammingError` by
+   default when a connection is used from a different thread. Setting `check_same_thread=False` disables this check
+   entirely — it does not make the connection thread-safe.
+
+## The fix
+
+A `threading.Lock` in `SQLiteJobRepository` wraps every `execute()` + `commit()` pair:
+
+```python
+class SQLiteJobRepository:
+    def __init__(self, conn: sqlite3.Connection) -> None:
+        self._conn = conn
+        self._lock = threading.Lock()
+
+    def create(self, job_type: str, params: dict) -> Job:
+        ...
+        with self._lock:
+            self._conn.execute("INSERT INTO jobs ...", (...))
+            self._conn.commit()
+        ...
+```
+
+This serializes all DB access through one lock, which is the correct approach for a single shared connection. The
+`JobRunner`'s single-worker executor already serialized *its own* writes, but `create()` runs on the caller's thread —
+outside the executor — so the executor's serialization was insufficient.
+
+## Rules for SQLite connections in this codebase
+
+1. **One connection = one lock.** If a `sqlite3.Connection` is used with `check_same_thread=False`, the code that
+   owns it must also own a `threading.Lock` and hold it for every `execute()` + `commit()` pair.
+
+2. **`check_same_thread=False` is not thread safety.** It only disables Python's runtime check. The underlying
+   SQLite C library does not serialize access on a single connection — that is the caller's responsibility.
+
+3. **WAL mode does not help here.** WAL allows concurrent *readers* across *different connections*. It does not
+   make concurrent *writes* on the *same connection* safe.
+
+4. **Hold the lock across execute + commit, not just one of them.** A lock around only `execute()` still leaves
+   a window where another thread can call `execute()` between the first thread's `execute()` and `commit()`,
+   interleaving their implicit transactions.
+
+5. **Reads need the lock too.** A `SELECT` on a connection with a pending uncommitted `INSERT` from another thread
+   can see inconsistent state or trigger the same `OperationalError`.
+
+## How the bug was diagnosed
+
+1. **Added status code assertions** to the test's POST calls. This surfaced that the second POST was returning 500
+   instead of 202 — proving the server was erroring, not silently losing data.
+
+2. **Temporarily set `raise_server_exceptions=True`** on the `TestClient`. This produced the full stack trace ending
+   at `self._conn.commit()` with `sqlite3.OperationalError: not an error`.
+
+3. **Stress-tested** by running the test file 50 times in a loop. Before the fix: ~20% failure rate. After: 0/50.
+
+## How to stress-test for threading races
+
+When investigating flaky tests that involve threads (executor pools, background workers, async handlers):
+
+```bash
+# Run a single test file N times, stop on first failure
+for i in $(seq 1 50); do
+  result=$(uv run pytest tests/test_file.py -x -q 2>&1)
+  if echo "$result" | grep -q "FAILED"; then
+    echo "Failed on run $i"
+    echo "$result"
+    break
+  fi
+done
+```
+
+If a test fails intermittently (say 1 in 10 runs), a 50-run loop will almost certainly catch it. If it passes 50
+times, the fix is likely correct.
+
+## Files involved
+
+- `src/journal/db/jobs_repository.py` — the lock lives here
+- `src/journal/db/connection.py` — creates connections with `check_same_thread=False`
+- `src/journal/services/jobs.py` — `JobRunner` calls repository methods from the executor thread
+- `src/journal/api.py` — API handlers call `submit_*()` (which calls `create()`) from the ASGI thread
