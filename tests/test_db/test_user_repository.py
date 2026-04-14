@@ -181,6 +181,10 @@ class TestLockUser:
         user = user_repo.create_user("lock@example.com", "Lock")
         assert user_repo.get_lock_status(user.id) is None
 
+        # lock_user is conditional — only applies when failed_login_attempts >= 5
+        for _ in range(5):
+            user_repo.increment_failed_logins(user.id)
+
         future = (datetime.now(UTC) + timedelta(hours=1)).strftime(
             "%Y-%m-%dT%H:%M:%SZ"
         )

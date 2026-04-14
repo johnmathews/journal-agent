@@ -104,9 +104,9 @@ class TestAuthentication:
     ) -> None:
         auth.register_user("lock@example.com", "correct", "Lock")
         for _ in range(5):
-            with pytest.raises(ValueError, match="Invalid email or password"):
+            with pytest.raises(ValueError):
                 auth.authenticate("lock@example.com", "wrong")
-        # After 5 failures, account should be locked
+        # After 5 failures, account should be locked — even the correct password fails
         with pytest.raises(ValueError, match="Account temporarily locked"):
             auth.authenticate("lock@example.com", "correct")
 

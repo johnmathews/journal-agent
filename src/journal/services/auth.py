@@ -129,13 +129,7 @@ class AuthService:
         """
         lock_until = datetime.now(UTC) + timedelta(minutes=_LOCKOUT_MINUTES)
         lock_until_str = lock_until.strftime("%Y-%m-%dT%H:%M:%SZ")
-        # Atomic conditional lock: only locks if threshold reached
-        self._repo._conn.execute(  # type: ignore[attr-error]
-            "UPDATE users SET locked_until = ? "
-            "WHERE id = ? AND failed_login_attempts >= ?",
-            (lock_until_str, user_id, _MAX_FAILED_ATTEMPTS),
-        )
-        self._repo._conn.commit()  # type: ignore[attr-error]
+        self._repo.lock_user(user_id, lock_until_str)
 
     # ── Sessions ────────────────────────────────────────────────────────
 
@@ -286,7 +280,10 @@ class AuthService:
             raise ValueError("User not found")
         # Clear any lockout from previous failed attempts
         self._repo.reset_failed_logins(user.id)
-        log.info("Password reset for user %d (%s)", user.id, email)
+        # Invalidate all existing sessions — an attacker with a stolen
+        # session must not survive a password reset.
+        self._repo.delete_user_sessions(user.id)
+        log.info("Password reset for user %d (%s) — all sessions revoked", user.id, email)
         return updated
 
     def verify_email(self, token: str) -> User:

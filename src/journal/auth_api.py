@@ -204,9 +204,10 @@ def register_auth_routes(
                 status_code=400,
             )
 
-        if len(password) < 8:
+        if len(password) < 8 or len(password) > 1024:
             return JSONResponse(
-                {"error": "weak_password", "message": "Password must be at least 8 characters"},
+                {"error": "weak_password",
+                 "message": "Password must be between 8 and 1024 characters"},
                 status_code=400,
             )
 
@@ -363,9 +364,10 @@ def register_auth_routes(
                 status_code=400,
             )
 
-        if len(password) < 8:
+        if len(password) < 8 or len(password) > 1024:
             return JSONResponse(
-                {"error": "weak_password", "message": "Password must be at least 8 characters"},
+                {"error": "weak_password",
+                 "message": "Password must be between 8 and 1024 characters"},
                 status_code=400,
             )
 

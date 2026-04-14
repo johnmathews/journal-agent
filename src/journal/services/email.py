@@ -6,6 +6,7 @@ async SMTP library is unnecessary.
 """
 
 import asyncio
+import html
 import logging
 import smtplib
 from email.mime.multipart import MIMEMultipart
@@ -51,26 +52,30 @@ class EmailService:
         self, to: str, token: str, base_url: str
     ) -> None:
         """Send an email-verification link to the given address."""
-        link = f"{base_url}/verify-email?token={token}"
-        html = (
+        safe_base = html.escape(base_url, quote=True)
+        safe_token = html.escape(token, quote=True)
+        link = f"{safe_base}/verify-email?token={safe_token}"
+        body = (
             "<h2>Verify your email</h2>"
             "<p>Click the link below to verify your email address:</p>"
             f'<p><a href="{link}">Verify Email</a></p>'
             "<p>This link expires in 24 hours.</p>"
             "<p>If you didn't create an account, you can ignore this email.</p>"
         )
-        await self.send(to, "Verify your email - Journal Insights", html)
+        await self.send(to, "Verify your email - Journal Insights", body)
 
     async def send_password_reset_email(
         self, to: str, token: str, base_url: str
     ) -> None:
         """Send a password-reset link to the given address."""
-        link = f"{base_url}/reset-password?token={token}"
-        html = (
+        safe_base = html.escape(base_url, quote=True)
+        safe_token = html.escape(token, quote=True)
+        link = f"{safe_base}/reset-password?token={safe_token}"
+        body = (
             "<h2>Reset your password</h2>"
             "<p>Click the link below to reset your password:</p>"
             f'<p><a href="{link}">Reset Password</a></p>'
             "<p>This link expires in 30 minutes.</p>"
             "<p>If you didn't request this, you can ignore this email.</p>"
         )
-        await self.send(to, "Reset your password - Journal Insights", html)
+        await self.send(to, "Reset your password - Journal Insights", body)

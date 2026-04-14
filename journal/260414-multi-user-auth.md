@@ -81,13 +81,22 @@ client → CORS → AuthenticationMiddleware → RequireAuthMiddleware → route
 
 ## Test Coverage
 
-- Backend: 968 tests (157 new), ruff clean
-- Frontend: 672+ tests, ESLint clean, builds successfully
+- Backend: 969 tests (158 new), ruff clean
+- Frontend: 787 tests (115 new), ESLint clean, all coverage thresholds met
 
-## Remaining Work
+## Post-Deployment Fixes
 
-- Deploy with `JOURNAL_SECRET_KEY` and SMTP credentials
-- Set admin user email/password via first login or CLI
-- Run `uv run journal migrate-chromadb` on existing deployments
-- Full user-scoping of all query methods (currently create_entry and create_entity have user_id;
-  remaining query methods pass through with default user_id=1 until auth is enforced in production)
+- **h11 LocalProtocolError on logout**: `JSONResponse(None, 204)` serialized "null" body conflicting
+  with HTTP 204 zero-content-length. Changed logout/revoke to return 200 with `{"ok": true}`.
+- **Auth store response envelope**: Backend returns `{"user": {...}}` but store assigned the whole
+  response. Fixed to extract `resp.user`.
+- **Admin dashboard field mismatch**: Frontend expected `entries_count`/`cost_estimate`/`last_activity`
+  but backend returned `entry_count`/`job_count`/`last_entry_at`. Aligned frontend to backend.
+- **Cross-join word count inflation**: Double LEFT JOIN on entries + jobs caused word_count to be
+  multiplied by job count. Fixed with subquery aggregation.
+- **Number formatting locale**: `toLocaleString()` used European locale (periods). Switched to
+  explicit `en-US` (commas).
+- **Cost estimation**: Added `cost_estimate` (all-time) and `cost_this_week` (7-day) columns to
+  admin dashboard, computed from per-job-type approximate costs.
+- **Bearer token cleanup**: Removed `40-journal-config.sh` token injection, `config.js`, and
+  `JOURNAL_API_TOKEN` references from webapp docker-compose.

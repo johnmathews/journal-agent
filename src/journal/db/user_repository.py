@@ -220,13 +220,19 @@ class SQLiteUserRepository:
             self._conn.commit()
 
     def lock_user(self, user_id: int, until: str) -> None:
+        """Conditionally lock a user if their failed attempts meet the threshold.
+
+        Only sets ``locked_until`` when ``failed_login_attempts >= 5``.
+        """
         with self._lock:
-            self._conn.execute(
-                "UPDATE users SET locked_until = ? WHERE id = ?",
+            cursor = self._conn.execute(
+                "UPDATE users SET locked_until = ? "
+                "WHERE id = ? AND failed_login_attempts >= 5",
                 (until, user_id),
             )
             self._conn.commit()
-        log.warning("Locked user %d until %s", user_id, until)
+        if cursor.rowcount > 0:
+            log.warning("Locked user %d until %s", user_id, until)
 
     def get_lock_status(self, user_id: int) -> str | None:
         with self._lock:
