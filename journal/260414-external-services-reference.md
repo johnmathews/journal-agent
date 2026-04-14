@@ -22,6 +22,21 @@ The document is organised by processing stage (Ingestion, Enrichment, Embedding,
 - Self-hosted OCR is not yet viable at <3 GB for cursive handwriting
 - Summarisation identified as a useful planned task (individual entries + weekly/monthly digests)
 
+## Flaky test fix: test_patch_text_queues_mood_scoring
+
+The CI run for the docs commit exposed a flaky test. `TestPatchMoodScoring::test_patch_text_queues_mood_scoring`
+intermittently failed because the test's SQLite connection was missing `PRAGMA busy_timeout=5000`.
+
+Root cause: the PATCH handler submits three background jobs (reprocess-embeddings, entity-extraction, mood-scoring)
+via a single-worker `ThreadPoolExecutor`. The `jobs.create()` call in the request thread and the `mark_running()` call
+in the executor thread both write to SQLite. Without `busy_timeout`, the loser of the write lock gets `SQLITE_BUSY`
+immediately instead of retrying — and the PATCH handler's `try/except` silently swallows it, leaving `mood_job_id`
+as `None`.
+
+Fixed by replacing manual `sqlite3.connect()` + PRAGMA calls with `get_connection()` in 4 test files
+(`test_api.py`, `test_api_ingest.py`, `test_api_jobs.py`, `test_mcp_server.py`). This ensures test connections
+mirror production PRAGMAs exactly. Verified with 20 consecutive runs — all pass.
+
 ## Motivation
 
 Needed a single reference showing which LLMs power which pipeline stages, what alternatives exist across providers,
