@@ -49,6 +49,45 @@ if TYPE_CHECKING:
 log = logging.getLogger(__name__)
 
 
+def _friendly_error(exc: Exception) -> str:
+    """Map known external-service exceptions to user-friendly messages.
+
+    The raw exception is already logged by the caller; this produces a
+    short message suitable for display in the webapp UI.
+    """
+    msg = str(exc)
+    # Google Gemini API errors
+    if "503" in msg and ("UNAVAILABLE" in msg or "high demand" in msg):
+        return (
+            "Google's OCR service is temporarily overloaded. "
+            "Please wait a minute and try again."
+        )
+    if "429" in msg and "RESOURCE_EXHAUSTED" in msg:
+        return (
+            "Google API rate limit exceeded. "
+            "Please wait a minute and try again."
+        )
+    if "404" in msg and "is not found for API version" in msg:
+        return (
+            "The configured OCR model was not found. "
+            "Check the OCR_MODEL setting."
+        )
+    # OpenAI API errors
+    if "openai" in msg.lower() and ("rate_limit" in msg.lower() or "429" in msg):
+        return (
+            "OpenAI rate limit exceeded. "
+            "Please wait a moment and try again."
+        )
+    # Anthropic API errors
+    if "overloaded" in msg.lower() and ("anthropic" in msg.lower() or "529" in msg):
+        return (
+            "Anthropic's API is temporarily overloaded. "
+            "Please wait a moment and try again."
+        )
+    # Fall through — return the raw message for unexpected errors
+    return msg
+
+
 # --------------------------------------------------------------------
 # Param validation
 # --------------------------------------------------------------------
@@ -324,7 +363,7 @@ class JobRunner:
                 "Entity extraction job %s failed", job_id
             )
             try:
-                self._jobs.mark_failed(job_id, str(exc))
+                self._jobs.mark_failed(job_id, _friendly_error(exc))
             except Exception:  # noqa: BLE001 — last-resort bookkeeping
                 log.exception(
                     "Failed to record failure for job %s", job_id
@@ -386,7 +425,7 @@ class JobRunner:
             # Clean up any remaining image data
             self._pending_images.pop(job_id, None)
             try:
-                self._jobs.mark_failed(job_id, str(exc))
+                self._jobs.mark_failed(job_id, _friendly_error(exc))
             except Exception:  # noqa: BLE001 — last-resort bookkeeping
                 log.exception("Failed to record failure for job %s", job_id)
 
@@ -415,7 +454,7 @@ class JobRunner:
         except Exception as exc:  # noqa: BLE001 — terminal-state guard
             log.exception("Mood score entry job %s failed", job_id)
             try:
-                self._jobs.mark_failed(job_id, str(exc))
+                self._jobs.mark_failed(job_id, _friendly_error(exc))
             except Exception:  # noqa: BLE001 — last-resort bookkeeping
                 log.exception("Failed to record failure for job %s", job_id)
 
@@ -440,7 +479,7 @@ class JobRunner:
         except Exception as exc:  # noqa: BLE001 — terminal-state guard
             log.exception("Reprocess embeddings job %s failed", job_id)
             try:
-                self._jobs.mark_failed(job_id, str(exc))
+                self._jobs.mark_failed(job_id, _friendly_error(exc))
             except Exception:  # noqa: BLE001 — last-resort bookkeeping
                 log.exception("Failed to record failure for job %s", job_id)
 
@@ -476,7 +515,7 @@ class JobRunner:
         except Exception as exc:  # noqa: BLE001 — terminal-state guard
             log.exception("Mood backfill job %s failed", job_id)
             try:
-                self._jobs.mark_failed(job_id, str(exc))
+                self._jobs.mark_failed(job_id, _friendly_error(exc))
             except Exception:  # noqa: BLE001 — last-resort bookkeeping
                 log.exception(
                     "Failed to record failure for job %s", job_id

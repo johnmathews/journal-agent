@@ -14,7 +14,7 @@ from journal.db.jobs_repository import SQLiteJobRepository
 from journal.db.migrations import run_migrations
 from journal.models import ExtractionResult
 from journal.services.backfill import MoodBackfillResult
-from journal.services.jobs import JobRunner
+from journal.services.jobs import JobRunner, _friendly_error
 
 if TYPE_CHECKING:
     from collections.abc import Callable
@@ -247,6 +247,44 @@ def runner_factory(jobs_repo, threadsafe_conn):
 
 
 # --------------------------------------------------------------------
+# Friendly error mapping
+# --------------------------------------------------------------------
+
+
+class TestFriendlyError:
+    """Tests for _friendly_error — maps raw exceptions to UI messages."""
+
+    def test_google_503_overloaded(self) -> None:
+        exc = Exception(
+            "503 UNAVAILABLE. {'error': {'message': 'This model is currently "
+            "experiencing high demand.'}}"
+        )
+        msg = _friendly_error(exc)
+        assert "temporarily overloaded" in msg
+        assert "wait" in msg.lower()
+
+    def test_google_429_rate_limit(self) -> None:
+        exc = Exception(
+            "429 RESOURCE_EXHAUSTED. {'error': {'message': 'You exceeded your "
+            "current quota'}}"
+        )
+        msg = _friendly_error(exc)
+        assert "rate limit" in msg.lower()
+        assert "wait" in msg.lower()
+
+    def test_google_404_model_not_found(self) -> None:
+        exc = Exception(
+            "404 NOT_FOUND. {'error': {'message': 'models/gemini-99 "
+            "is not found for API version v1beta'}}"
+        )
+        msg = _friendly_error(exc)
+        assert "OCR_MODEL" in msg
+
+    def test_unknown_error_passes_through(self) -> None:
+        exc = Exception("something completely unexpected")
+        assert _friendly_error(exc) == "something completely unexpected"
+
+
 # Happy path — entity extraction
 # --------------------------------------------------------------------
 
