@@ -437,6 +437,19 @@ def cmd_extract_entities(args, config):
                 print(f"  [entry {r.entry_id}] {w}")
 
 
+def cmd_migrate_chromadb(args, config):
+    """Add user_id to all ChromaDB vectors for multi-tenant migration."""
+    from journal.db.chromadb_migration import backfill_user_id
+
+    updated = backfill_user_id(
+        host=config.chromadb_host,
+        port=config.chromadb_port,
+        collection_name=config.chromadb_collection,
+        admin_user_id=1,
+    )
+    print(f"Updated {updated} ChromaDB documents with user_id=1")
+
+
 def cmd_stats(args, config):
     """Show journal statistics."""
     _, query, _ = _build_services(config)
@@ -732,6 +745,12 @@ def main():
     )
     p_seed.add_argument("--count", type=int, help="Number of sample entries (default: all 5)")
 
+    # migrate-chromadb
+    subparsers.add_parser(
+        "migrate-chromadb",
+        help="Add user_id metadata to all ChromaDB vectors (multi-tenant migration)",
+    )
+
     # extract-entities
     p_extract = subparsers.add_parser(
         "extract-entities",
@@ -763,5 +782,6 @@ def main():
         "eval-chunking": cmd_eval_chunking,
         "seed": cmd_seed,
         "extract-entities": cmd_extract_entities,
+        "migrate-chromadb": cmd_migrate_chromadb,
     }
     commands[args.command](args, config)

@@ -273,3 +273,29 @@ class Job:
     created_at: str
     started_at: str | None
     finished_at: str | None
+
+
+@dataclass
+class User:
+    id: int
+    email: str
+    display_name: str
+    is_admin: bool = False
+    is_active: bool = True
+    email_verified: bool = False
+    created_at: str = ""
+    updated_at: str = ""
+
+
+@dataclass
+class ApiKeyInfo:
+    """API key metadata returned to the user. Never includes the hash."""
+
+    id: int
+    user_id: int
+    key_prefix: str
+    name: str
+    created_at: str = ""
+    expires_at: str | None = None
+    last_used_at: str | None = None
+    revoked_at: str | None = None

@@ -1,0 +1,306 @@
+"""Authentication service — password hashing, sessions, API keys, and tokens."""
+
+import hashlib
+import logging
+import secrets
+from datetime import UTC, datetime, timedelta
+
+from argon2 import PasswordHasher
+from argon2.exceptions import VerifyMismatchError
+from itsdangerous import BadSignature, SignatureExpired, URLSafeTimedSerializer
+
+from journal.db.user_repository import UserRepository
+from journal.models import ApiKeyInfo, User
+
+log = logging.getLogger(__name__)
+
+# Lock account after this many consecutive failed login attempts.
+_MAX_FAILED_ATTEMPTS = 5
+# Duration of account lockout after exceeding failed attempts.
+_LOCKOUT_MINUTES = 15
+
+
+class AuthService:
+    """Orchestrates password hashing, session management, and API key lifecycle.
+
+    Uses ``UserRepository`` for persistence and ``argon2-cffi`` for password
+    hashing. The service never stores or returns raw passwords or API keys
+    after initial creation.
+    """
+
+    def __init__(
+        self,
+        user_repo: UserRepository,
+        secret_key: str,
+        session_expiry_days: int = 7,
+    ) -> None:
+        self._repo = user_repo
+        self._ph = PasswordHasher()
+        self._serializer = URLSafeTimedSerializer(secret_key)
+        self._session_expiry_days = session_expiry_days
+
+    # ── Password hashing ────────────────────────────────────────────────
+
+    def hash_password(self, password: str) -> str:
+        """Hash a password using Argon2id."""
+        return self._ph.hash(password)
+
+    def verify_password(self, password_hash: str, password: str) -> bool:
+        """Verify a password against its Argon2id hash."""
+        try:
+            return self._ph.verify(password_hash, password)
+        except VerifyMismatchError:
+            return False
+
+    # ── User registration ───────────────────────────────────────────────
+
+    def register_user(self, email: str, password: str, display_name: str) -> User:
+        """Create a new user with hashed password.
+
+        Raises ``ValueError`` if the email is already registered.
+        """
+        existing = self._repo.get_user_by_email(email)
+        if existing:
+            raise ValueError("Email already registered")
+        password_hash = self.hash_password(password)
+        return self._repo.create_user(email, display_name, password_hash)
+
+    # ── Authentication ──────────────────────────────────────────────────
+
+    def authenticate(self, email: str, password: str) -> User:
+        """Verify email + password and return the authenticated user.
+
+        Raises ``ValueError`` on failure (bad credentials, locked account,
+        disabled account). Handles lockout after repeated failures.
+        """
+        user = self._repo.get_user_by_email(email)
+        if not user:
+            raise ValueError("Invalid email or password")
+
+        # Check lockout
+        locked_until = self._repo.get_lock_status(user.id)
+        if locked_until:
+            now = datetime.now(UTC).strftime("%Y-%m-%dT%H:%M:%SZ")
+            if locked_until > now:
+                raise ValueError("Account temporarily locked. Try again later.")
+            # Lock expired — reset counters
+            self._repo.reset_failed_logins(user.id)
+
+        if not user.is_active:
+            raise ValueError("Account is disabled")
+
+        # Fetch password hash separately (User model deliberately excludes it)
+        stored_hash = self._repo.get_password_hash(user.id)
+        if not stored_hash:
+            raise ValueError("Invalid email or password")
+
+        if not self.verify_password(stored_hash, password):
+            self._repo.increment_failed_logins(user.id)
+            # Check if we should lock the account
+            # Re-read the user to get the current failed_login_attempts count
+            # (the increment just happened in the DB). We use get_lock_status
+            # indirectly — the repo tracks attempts in the users table, so we
+            # query the count to decide whether to lock.
+            row = self._repo.get_user_by_id(user.id)
+            if row:
+                # We need the raw count — read it via get_password_hash's
+                # sibling. For now, lock after _MAX_FAILED_ATTEMPTS by
+                # checking if the increment pushed us over the threshold.
+                # The simplest approach: read failed_login_attempts.
+                # Since we don't expose it on User, we count increments.
+                self._maybe_lock_after_failure(user.id)
+            raise ValueError("Invalid email or password")
+
+        # Success — reset any accumulated failures
+        self._repo.reset_failed_logins(user.id)
+        log.info("User %d (%s) authenticated successfully", user.id, user.email)
+        return user
+
+    def _maybe_lock_after_failure(self, user_id: int) -> None:
+        """Lock the account if failed attempts have reached the threshold.
+
+        This is called after incrementing the counter, so the DB already
+        reflects the latest failure. We read ``locked_until`` and
+        ``failed_login_attempts`` indirectly: if ``get_lock_status`` is
+        still None (not yet locked), we try locking. The repository's
+        ``increment_failed_logins`` bumps the counter; we issue a
+        conditional UPDATE that only sets ``locked_until`` when the
+        counter >= threshold.
+        """
+        lock_until = datetime.now(UTC) + timedelta(minutes=_LOCKOUT_MINUTES)
+        lock_until_str = lock_until.strftime("%Y-%m-%dT%H:%M:%SZ")
+        # Atomic conditional lock: only locks if threshold reached
+        self._repo._conn.execute(  # type: ignore[attr-error]
+            "UPDATE users SET locked_until = ? "
+            "WHERE id = ? AND failed_login_attempts >= ?",
+            (lock_until_str, user_id, _MAX_FAILED_ATTEMPTS),
+        )
+        self._repo._conn.commit()  # type: ignore[attr-error]
+
+    # ── Sessions ────────────────────────────────────────────────────────
+
+    def create_session(
+        self,
+        user_id: int,
+        user_agent: str | None = None,
+        ip_address: str | None = None,
+    ) -> str:
+        """Create a new session and return the session token."""
+        token = secrets.token_urlsafe(32)
+        expires = datetime.now(UTC) + timedelta(days=self._session_expiry_days)
+        expires_str = expires.strftime("%Y-%m-%dT%H:%M:%SZ")
+        self._repo.create_session(token, user_id, expires_str, user_agent, ip_address)
+        return token
+
+    def validate_session(self, token: str) -> User | None:
+        """Look up a session token and return the associated user.
+
+        Returns ``None`` if the session is expired or does not exist.
+        Updates ``last_seen_at`` on valid sessions.
+        """
+        session = self._repo.get_session(token)
+        if not session:
+            return None
+        self._repo.update_session_last_seen(token)
+        return User(
+            id=session["user_id"],
+            email=session["email"],
+            display_name=session["display_name"],
+            is_admin=bool(session["is_admin"]),
+            is_active=bool(session["is_active"]),
+            email_verified=bool(session["email_verified"]),
+        )
+
+    def logout(self, token: str) -> None:
+        """Delete a session (log out)."""
+        self._repo.delete_session(token)
+
+    def logout_all(self, user_id: int) -> int:
+        """Delete all sessions for a user. Returns the count deleted."""
+        return self._repo.delete_user_sessions(user_id)
+
+    # ── API Keys ────────────────────────────────────────────────────────
+
+    def create_api_key(
+        self, user_id: int, name: str, expires_days: int | None = None
+    ) -> tuple[str, ApiKeyInfo]:
+        """Generate a new API key.
+
+        Returns ``(full_key, key_info)``. The full key is shown to the user
+        exactly once — it is never stored or retrievable after creation.
+        """
+        full_key = "jnl_" + secrets.token_urlsafe(32)
+        prefix = full_key[:12]  # "jnl_" + 8 chars
+        key_hash = hashlib.sha256(full_key.encode()).hexdigest()
+        expires_at: str | None = None
+        if expires_days:
+            expires = datetime.now(UTC) + timedelta(days=expires_days)
+            expires_at = expires.strftime("%Y-%m-%dT%H:%M:%SZ")
+        key_id = self._repo.create_api_key(user_id, prefix, key_hash, name, expires_at)
+        info = ApiKeyInfo(
+            id=key_id,
+            user_id=user_id,
+            key_prefix=prefix,
+            name=name,
+            expires_at=expires_at,
+        )
+        return full_key, info
+
+    def validate_api_key(self, key: str) -> User | None:
+        """Look up an API key by its SHA-256 hash and return the owning user.
+
+        Returns ``None`` if the key is revoked, expired, or does not exist.
+        Updates ``last_used_at`` on valid keys.
+        """
+        key_hash = hashlib.sha256(key.encode()).hexdigest()
+        result = self._repo.get_api_key_by_hash(key_hash)
+        if not result:
+            return None
+        self._repo.update_api_key_last_used(result["key_id"])
+        return User(
+            id=result["user_id"],
+            email=result["email"],
+            display_name=result["display_name"],
+            is_admin=bool(result["is_admin"]),
+            is_active=bool(result["is_active"]),
+            email_verified=bool(result["email_verified"]),
+        )
+
+    def list_api_keys(self, user_id: int) -> list[ApiKeyInfo]:
+        """List all API keys for a user (metadata only, no hashes)."""
+        return self._repo.list_api_keys(user_id)
+
+    def revoke_api_key(self, key_id: int, user_id: int) -> bool:
+        """Revoke an API key. Returns True if it was active and is now revoked."""
+        return self._repo.revoke_api_key(key_id, user_id)
+
+    # ── Token generation (password reset / email verification) ──────────
+
+    def generate_reset_token(self, email: str) -> str:
+        """Generate a signed password-reset token for the given email."""
+        return self._serializer.dumps(email, salt="password-reset")
+
+    def validate_reset_token(self, token: str, max_age: int = 1800) -> str:
+        """Validate a password-reset token and return the email.
+
+        Raises ``ValueError`` if the token is invalid or expired (30 min default).
+        """
+        try:
+            email: str = self._serializer.loads(
+                token, salt="password-reset", max_age=max_age
+            )
+            return email
+        except (BadSignature, SignatureExpired) as e:
+            raise ValueError("Invalid or expired reset token") from e
+
+    def generate_verification_token(self, email: str) -> str:
+        """Generate a signed email-verification token."""
+        return self._serializer.dumps(email, salt="email-verification")
+
+    def validate_verification_token(self, token: str, max_age: int = 86400) -> str:
+        """Validate an email-verification token and return the email.
+
+        Raises ``ValueError`` if the token is invalid or expired (24h default).
+        """
+        try:
+            email: str = self._serializer.loads(
+                token, salt="email-verification", max_age=max_age
+            )
+            return email
+        except (BadSignature, SignatureExpired) as e:
+            raise ValueError("Invalid or expired verification token") from e
+
+    def reset_password(self, token: str, new_password: str) -> User:
+        """Validate a reset token and set a new password.
+
+        Raises ``ValueError`` if the token is invalid/expired or the user
+        is not found.
+        """
+        email = self.validate_reset_token(token)
+        user = self._repo.get_user_by_email(email)
+        if not user:
+            raise ValueError("User not found")
+        new_hash = self.hash_password(new_password)
+        updated = self._repo.update_user(user.id, password_hash=new_hash)
+        if not updated:
+            raise ValueError("User not found")
+        # Clear any lockout from previous failed attempts
+        self._repo.reset_failed_logins(user.id)
+        log.info("Password reset for user %d (%s)", user.id, email)
+        return updated
+
+    def verify_email(self, token: str) -> User:
+        """Validate a verification token and mark the user's email as verified.
+
+        Raises ``ValueError`` if the token is invalid/expired or the user
+        is not found.
+        """
+        email = self.validate_verification_token(token)
+        user = self._repo.get_user_by_email(email)
+        if not user:
+            raise ValueError("User not found")
+        updated = self._repo.update_user(user.id, email_verified=True)
+        if not updated:
+            raise ValueError("User not found")
+        log.info("Email verified for user %d (%s)", user.id, email)
+        return updated

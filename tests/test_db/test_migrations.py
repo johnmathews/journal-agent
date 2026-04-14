@@ -87,8 +87,8 @@ def test_entry_chunks_has_expected_columns(db_conn):
 
 def test_entry_chunks_cascade_delete(db_conn):
     db_conn.execute(
-        "INSERT INTO entries (entry_date, source_type, raw_text, word_count)"
-        " VALUES ('2026-03-22', 'ocr', 'x', 1)"
+        "INSERT INTO entries (user_id, entry_date, source_type, raw_text, word_count)"
+        " VALUES (1, '2026-03-22', 'ocr', 'x', 1)"
     )
     entry_id = db_conn.execute("SELECT last_insert_rowid() AS id").fetchone()["id"]
     db_conn.execute(
@@ -148,8 +148,8 @@ def test_entry_uncertain_spans_index_exists(db_conn):
 
 def test_entry_uncertain_spans_cascade_delete(db_conn):
     db_conn.execute(
-        "INSERT INTO entries (entry_date, source_type, raw_text, word_count)"
-        " VALUES ('2026-03-22', 'ocr', 'hello world', 2)"
+        "INSERT INTO entries (user_id, entry_date, source_type, raw_text, word_count)"
+        " VALUES (1, '2026-03-22', 'ocr', 'hello world', 2)"
     )
     entry_id = db_conn.execute("SELECT last_insert_rowid() AS id").fetchone()["id"]
     db_conn.execute(
@@ -169,8 +169,8 @@ def test_entry_uncertain_spans_cascade_delete(db_conn):
 
 def test_entry_uncertain_spans_check_constraints(db_conn):
     db_conn.execute(
-        "INSERT INTO entries (entry_date, source_type, raw_text, word_count)"
-        " VALUES ('2026-03-22', 'ocr', 'hello world', 2)"
+        "INSERT INTO entries (user_id, entry_date, source_type, raw_text, word_count)"
+        " VALUES (1, '2026-03-22', 'ocr', 'hello world', 2)"
     )
     entry_id = db_conn.execute("SELECT last_insert_rowid() AS id").fetchone()["id"]
     db_conn.commit()

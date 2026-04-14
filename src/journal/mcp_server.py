@@ -11,6 +11,7 @@ from mcp.server.fastmcp import Context, FastMCP
 from mcp.server.transport_security import TransportSecuritySettings
 
 from journal.api import register_api_routes
+from journal.auth_api import register_admin_routes, register_auth_routes
 from journal.config import load_config
 from journal.db.connection import get_connection
 from journal.db.jobs_repository import SQLiteJobRepository
@@ -200,6 +201,32 @@ def _init_services() -> dict:
 
     atexit.register(_shutdown_job_runner)
 
+    # Auth infrastructure — user repository, auth service, optional email.
+    from journal.db.user_repository import SQLiteUserRepository
+    from journal.services.auth import AuthService
+    from journal.services.email import EmailService
+
+    user_repo = SQLiteUserRepository(conn)
+    auth_service = AuthService(
+        user_repo=user_repo,
+        secret_key=config.secret_key,
+        session_expiry_days=config.session_expiry_days,
+    )
+    log.info("  Auth service initialized")
+
+    email_service: EmailService | None = None
+    if config.smtp_username and config.smtp_password:
+        email_service = EmailService(
+            smtp_host=config.smtp_host,
+            smtp_port=config.smtp_port,
+            smtp_username=config.smtp_username,
+            smtp_password=config.smtp_password,
+            from_email=config.smtp_from_email,
+        )
+        log.info("  Email service initialized (from=%s)", config.smtp_from_email)
+    else:
+        log.info("  Email service disabled (SMTP credentials not configured)")
+
     _services = {
         "ingestion": ingestion_service,
         "query": QueryService(
@@ -210,22 +237,16 @@ def _init_services() -> dict:
         ),
         "entity_store": entity_store,
         "entity_extraction": entity_extraction_service,
-        # Jobs surfaces — consumed by API handlers and MCP tool
-        # wrappers via `services_getter()`.
         "job_repository": job_repository,
         "job_runner": job_runner,
-        # `/health` reads these to build its payload. Keeping them on
-        # the services dict avoids a separate getter and matches the
-        # existing lookup style the api.py routes use.
         "config": config,
         "stats": stats_collector,
-        # Mood scoring surfaces (optional — absent when disabled).
-        # `mood_dimensions` powers the `/api/dashboard/mood-dimensions`
-        # endpoint; `mood_scoring` is the service (not currently read
-        # by routes but exposed for symmetry with `ingestion` /
-        # `entity_extraction`).
         "mood_dimensions": mood_dimensions,
         "mood_scoring": mood_scoring_service,
+        # Auth services — used by auth_api.py routes.
+        "auth_service": auth_service,
+        "email_service": email_service,
+        "user_repo": user_repo,
     }
 
     entry_count = repo.count_entries()
@@ -243,6 +264,8 @@ mcp = FastMCP("journal", lifespan=lifespan)
 
 # Register REST API routes — they access the shared _services dict directly.
 register_api_routes(mcp, lambda: _services)
+register_auth_routes(mcp, lambda: _services)
+register_admin_routes(mcp, lambda: _services)
 
 
 def _get_query(ctx: Context) -> QueryService:
@@ -1100,29 +1123,28 @@ def journal_get_entity_relationships(
 
 
 def main() -> None:
-    """Run the MCP server with REST API, bearer-token auth, and optional CORS."""
+    """Run the MCP server with REST API, session/key auth, and optional CORS."""
     import anyio
     import uvicorn
     from starlette.middleware.cors import CORSMiddleware
 
-    from journal.auth import BearerTokenMiddleware
+    from journal.auth import build_auth_middleware_stack
 
     config = load_config()
 
-    # Fail-closed: refuse to start without an API bearer token. A missing
-    # token means every REST and MCP call would be unauthenticated, which
-    # is the exact vulnerability this middleware closes.
-    if not config.api_bearer_token:
+    # Fail-closed: refuse to start without a secret key for session
+    # tokens and signed URLs. Generate one with:
+    #     python -c "import secrets; print(secrets.token_urlsafe(32))"
+    if not config.secret_key:
         raise RuntimeError(
-            "JOURNAL_API_TOKEN is not set. The API and MCP endpoints "
-            "require a bearer token — generate one with:\n"
-            "    python -c \"import secrets; print(secrets.token_urlsafe(32))\"\n"
-            "and add it to your .env file as JOURNAL_API_TOKEN=..."
+            "JOURNAL_SECRET_KEY is not set. The auth system requires "
+            "a secret key — generate one with:\n"
+            '    python -c "import secrets; print(secrets.token_urlsafe(32))"\n'
+            "and add it to your .env file as JOURNAL_SECRET_KEY=..."
         )
 
     # DNS rebinding protection is always on. `mcp_allowed_hosts` defaults
-    # to loopback in config.py, so there is no path that disables it. The
-    # only configurable is which hosts are trusted.
+    # to loopback in config.py, so there is no path that disables it.
     mcp.settings.host = config.mcp_host
     mcp.settings.port = config.mcp_port
     allowed_origins = [f"http://{h}" for h in config.mcp_allowed_hosts]
@@ -1138,7 +1160,7 @@ def main() -> None:
 
     # Initialize services eagerly so REST API routes work immediately,
     # without waiting for the first MCP session to connect.
-    _init_services()
+    services = _init_services()
 
     # Build the Starlette app from FastMCP (includes MCP routes + custom_routes)
     app = mcp.streamable_http_app()
@@ -1148,41 +1170,26 @@ def main() -> None:
         methods = getattr(route, "methods", None)
         log.info("  Route: %s %s", route.path, methods or "(all)")
 
-    # Middleware stack: the FIRST add_middleware call is the OUTERMOST
-    # wrapper (Starlette iterates user_middleware in reverse at build
-    # time, so the first entry is the one requests hit first). We want
-    # CORS outermost so that 401 responses from the auth middleware
-    # still carry Access-Control-Allow-Origin headers — otherwise the
-    # browser swallows them as a CORS error instead of surfacing the
-    # 401, and the webapp has no way to distinguish the two.
+    # Middleware stack: CORS outermost so that 401/403 responses still
+    # carry Access-Control-Allow-Origin headers — otherwise the browser
+    # swallows them as a CORS error.
     #
     # Request flow:
-    #   client -> CORS -> BearerToken -> route -> BearerToken -> CORS -> client
-    #
-    # CORS handles OPTIONS preflight itself (it short-circuits before
-    # BearerToken sees them), and BearerToken also allows OPTIONS through
-    # as a belt-and-braces defence.
+    #   client -> CORS -> AuthenticationMiddleware -> RequireAuth -> route
     if config.api_cors_origins:
         app.add_middleware(
             CORSMiddleware,
             allow_origins=config.api_cors_origins,
             allow_methods=["GET", "PATCH", "DELETE", "POST", "OPTIONS"],
             allow_headers=["Content-Type", "Authorization"],
+            allow_credentials=True,
         )
 
-    # `/health` is intentionally unauthenticated. The server binds to
-    # loopback only (see docs/security.md), so any caller that can reach
-    # it already has a shell on the box; the field we'd worry about
-    # leaking — most-frequent search terms — is deliberately not
-    # surfaced in the payload. See docs/api.md.
-    app.add_middleware(
-        BearerTokenMiddleware,
-        token=config.api_bearer_token,
-        exempt_paths={"/health"},
-    )
-    log.info(
-        "Bearer token auth middleware installed (exempt paths: /health)"
-    )
+    # Session + API key authentication middleware. Replaces the old
+    # single bearer token approach with per-user auth.
+    auth_service = services["auth_service"]
+    app = build_auth_middleware_stack(app, auth_service)
+    log.info("Auth middleware installed (session + API key)")
 
     async def _serve() -> None:
         uvi_config = uvicorn.Config(

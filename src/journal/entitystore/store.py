@@ -44,6 +44,7 @@ class EntityStore(Protocol):
         canonical_name: str,
         description: str,
         first_seen: str,
+        user_id: int = 1,
     ) -> Entity: ...
 
     def add_alias(self, entity_id: int, alias: str) -> None: ...
@@ -233,12 +234,13 @@ class SQLiteEntityStore:
         canonical_name: str,
         description: str,
         first_seen: str,
+        user_id: int = 1,
     ) -> Entity:
         cursor = self._conn.execute(
             "INSERT INTO entities"
-            " (entity_type, canonical_name, description, first_seen)"
-            " VALUES (?, ?, ?, ?)",
-            (entity_type, canonical_name.strip(), description, first_seen),
+            " (user_id, entity_type, canonical_name, description, first_seen)"
+            " VALUES (?, ?, ?, ?, ?)",
+            (user_id, entity_type, canonical_name.strip(), description, first_seen),
         )
         self._conn.commit()
         entity_id = cursor.lastrowid

@@ -85,6 +85,7 @@ class EntryRepository(Protocol):
     def create_entry(
         self, entry_date: str, source_type: str, raw_text: str, word_count: int,
         final_text: str | None = None,
+        user_id: int = 1,
     ) -> Entry: ...
 
     def get_entry(self, entry_id: int) -> Entry | None: ...
@@ -229,13 +230,15 @@ class SQLiteEntryRepository:
     def create_entry(
         self, entry_date: str, source_type: str, raw_text: str, word_count: int,
         final_text: str | None = None,
+        user_id: int = 1,
     ) -> Entry:
         actual_final = final_text if final_text is not None else raw_text
         sql = (
-            "INSERT INTO entries (entry_date, source_type, raw_text, final_text, word_count)"
-            " VALUES (?, ?, ?, ?, ?)"
+            "INSERT INTO entries"
+            " (user_id, entry_date, source_type, raw_text, final_text, word_count)"
+            " VALUES (?, ?, ?, ?, ?, ?)"
         )
-        params = (entry_date, source_type, raw_text, actual_final, word_count)
+        params = (user_id, entry_date, source_type, raw_text, actual_final, word_count)
         cursor = self._conn.execute(sql, params)
         self._conn.commit()
         entry_id = cursor.lastrowid
