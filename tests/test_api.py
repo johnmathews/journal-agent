@@ -1312,6 +1312,7 @@ class TestSettings:
         assert "transcription" in data
         assert "embedding" in data
         assert "chunking" in data
+        assert "entity_extraction" in data
         assert "features" in data
         # OCR block
         assert data["ocr"]["provider"] == "anthropic"
@@ -1319,6 +1320,9 @@ class TestSettings:
         # Chunking block
         assert isinstance(data["chunking"]["max_tokens"], int)
         assert isinstance(data["chunking"]["embed_metadata_prefix"], bool)
+        # Entity extraction block
+        assert data["entity_extraction"]["model"] == "claude-opus-4-6"
+        assert isinstance(data["entity_extraction"]["dedup_similarity_threshold"], float)
         # Features block
         assert isinstance(data["features"]["mood_scoring"], bool)
         assert isinstance(data["features"]["journal_author_name"], str)

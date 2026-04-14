@@ -665,6 +665,10 @@ def register_api_routes(
                     "decisive_percentile": config.chunking_decisive_percentile,
                     "embed_metadata_prefix": config.chunking_embed_metadata_prefix,
                 },
+                "entity_extraction": {
+                    "model": config.entity_extraction_model,
+                    "dedup_similarity_threshold": config.entity_dedup_similarity_threshold,
+                },
                 "features": {
                     "mood_scoring": config.enable_mood_scoring,
                     "mood_scorer_model": config.mood_scorer_model,
