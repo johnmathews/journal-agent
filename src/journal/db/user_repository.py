@@ -411,4 +411,55 @@ class SQLiteUserRepository:
                 "GROUP BY u.id "
                 "ORDER BY u.created_at DESC"
             ).fetchall()
-        return [dict(r) for r in rows]
+
+            # Compute per-user cost estimates from job type breakdown.
+            # Approximate per-job costs (USD) based on typical token usage:
+            #   ingest_images/ingest_audio: ~$0.02 (OCR/transcription + embedding)
+            #   entity_extraction: ~$0.03 (Claude Opus prompt)
+            #   mood_score_entry: ~$0.005 (Claude Sonnet prompt)
+            #   mood_backfill: ~$0.005 per entry scored (estimate from job count)
+            #   reprocess_embeddings: ~$0.01 (OpenAI embedding calls)
+            cost_per_type = {
+                "ingest_images": 0.02,
+                "ingest_audio": 0.02,
+                "entity_extraction": 0.03,
+                "mood_score_entry": 0.005,
+                "mood_backfill": 0.005,
+                "reprocess_embeddings": 0.01,
+            }
+
+            cost_rows = self._conn.execute(
+                "SELECT j.user_id, j.type, COUNT(*) AS cnt, "
+                "MAX(j.created_at) AS last_job_at "
+                "FROM jobs j "
+                "GROUP BY j.user_id, j.type"
+            ).fetchall()
+
+            # Also get this-week job costs
+            week_cost_rows = self._conn.execute(
+                "SELECT j.user_id, j.type, COUNT(*) AS cnt "
+                "FROM jobs j "
+                "WHERE j.created_at >= date('now', '-7 days') "
+                "GROUP BY j.user_id, j.type"
+            ).fetchall()
+
+        # Build per-user cost maps
+        user_costs: dict[int, float] = {}
+        for cr in cost_rows:
+            uid = cr["user_id"]
+            rate = cost_per_type.get(cr["type"], 0.01)
+            user_costs[uid] = user_costs.get(uid, 0.0) + cr["cnt"] * rate
+
+        user_week_costs: dict[int, float] = {}
+        for cr in week_cost_rows:
+            uid = cr["user_id"]
+            rate = cost_per_type.get(cr["type"], 0.01)
+            user_week_costs[uid] = user_week_costs.get(uid, 0.0) + cr["cnt"] * rate
+
+        result = []
+        for r in rows:
+            d = dict(r)
+            d["cost_estimate"] = round(user_costs.get(d["id"], 0.0), 2)
+            d["cost_this_week"] = round(user_week_costs.get(d["id"], 0.0), 2)
+            result.append(d)
+        return result
