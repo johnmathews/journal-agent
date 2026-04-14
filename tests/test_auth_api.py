@@ -204,7 +204,7 @@ class TestLogout:
             "/api/auth/logout",
             cookies={"session_id": session_id},
         )
-        assert resp.status_code == 204
+        assert resp.status_code == 200
         # Session should be deleted
         assert auth_service.validate_session(session_id) is None
 
@@ -220,7 +220,7 @@ class TestLogout:
             "/api/auth/logout",
             cookies={"session_id": session_id},
         )
-        assert resp.status_code == 204
+        assert resp.status_code == 200
 
 
 # ---------------------------------------------------------------------------
@@ -684,7 +684,7 @@ class TestApiKeys:
             f"/api/auth/api-keys/{key_info.id}",
             cookies={"session_id": session_id},
         )
-        assert resp.status_code == 204
+        assert resp.status_code == 200
 
     def test_revoke_nonexistent_api_key(
         self,

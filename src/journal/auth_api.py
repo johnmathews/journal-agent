@@ -153,7 +153,7 @@ def register_auth_routes(
         if session_id:
             auth_service.logout(session_id)
 
-        response = JSONResponse(None, status_code=204)
+        response = JSONResponse({"ok": True})
         clear_session_cookie(response)
         return response
 
@@ -553,7 +553,7 @@ def register_auth_routes(
             )
 
         log.info("Revoked API key %d for user %d", key_id, user.user_id)
-        return JSONResponse(None, status_code=204)
+        return JSONResponse({"ok": True})
 
 
 # ---------------------------------------------------------------------------
