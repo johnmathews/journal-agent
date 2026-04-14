@@ -168,6 +168,41 @@ class Config:
         )
     )
 
+    # Authentication
+    secret_key: str = field(
+        default_factory=lambda: os.environ.get("JOURNAL_SECRET_KEY", "")
+    )
+    registration_enabled: bool = field(
+        default_factory=lambda: os.environ.get(
+            "REGISTRATION_ENABLED", "false"
+        ).lower() in ("1", "true", "yes", "on")
+    )
+    session_expiry_days: int = field(
+        default_factory=lambda: int(os.environ.get("SESSION_EXPIRY_DAYS", "7"))
+    )
+
+    # Email (SMTP)
+    smtp_host: str = field(
+        default_factory=lambda: os.environ.get("SMTP_HOST", "smtp.gmail.com")
+    )
+    smtp_port: int = field(
+        default_factory=lambda: int(os.environ.get("SMTP_PORT", "465"))
+    )
+    smtp_username: str = field(
+        default_factory=lambda: os.environ.get("SMTP_USERNAME", "")
+    )
+    smtp_password: str = field(
+        default_factory=lambda: os.environ.get("SMTP_PASSWORD", "")
+    )
+    smtp_from_email: str = field(
+        default_factory=lambda: os.environ.get("SMTP_FROM_EMAIL", "")
+    )
+
+    # App base URL (for email links)
+    app_base_url: str = field(
+        default_factory=lambda: os.environ.get("APP_BASE_URL", "http://localhost:5173")
+    )
+
     # Entity extraction
     entity_extraction_model: str = "claude-opus-4-6"
     entity_extraction_max_tokens: int = 4096

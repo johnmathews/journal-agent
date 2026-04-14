@@ -1,0 +1,414 @@
+"""Repository interface and SQLite implementation for users, sessions, and API keys."""
+
+import logging
+import sqlite3
+import threading
+from datetime import UTC, datetime
+from typing import Any, Protocol, runtime_checkable
+
+from journal.models import ApiKeyInfo, User
+
+log = logging.getLogger(__name__)
+
+
+def _now_iso() -> str:
+    return datetime.now(UTC).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
+def _row_to_user(row: sqlite3.Row) -> User:
+    return User(
+        id=row["id"],
+        email=row["email"],
+        display_name=row["display_name"],
+        is_admin=bool(row["is_admin"]),
+        is_active=bool(row["is_active"]),
+        email_verified=bool(row["email_verified"]),
+        created_at=row["created_at"],
+        updated_at=row["updated_at"],
+    )
+
+
+@runtime_checkable
+class UserRepository(Protocol):
+    # Users
+    def create_user(
+        self,
+        email: str,
+        display_name: str,
+        password_hash: str | None = None,
+        is_admin: bool = False,
+    ) -> User: ...
+
+    def get_user_by_id(self, user_id: int) -> User | None: ...
+
+    def get_user_by_email(self, email: str) -> User | None: ...
+
+    def get_password_hash(self, user_id: int) -> str | None: ...
+
+    def update_user(self, user_id: int, **fields: Any) -> User | None: ...
+
+    def list_users(self) -> list[User]: ...
+
+    def increment_failed_logins(self, user_id: int) -> None: ...
+
+    def reset_failed_logins(self, user_id: int) -> None: ...
+
+    def lock_user(self, user_id: int, until: str) -> None: ...
+
+    def get_lock_status(self, user_id: int) -> str | None: ...
+
+    # Sessions
+    def create_session(
+        self,
+        session_id: str,
+        user_id: int,
+        expires_at: str,
+        user_agent: str | None = None,
+        ip_address: str | None = None,
+    ) -> None: ...
+
+    def get_session(self, session_id: str) -> dict | None: ...
+
+    def update_session_last_seen(self, session_id: str) -> None: ...
+
+    def delete_session(self, session_id: str) -> None: ...
+
+    def delete_user_sessions(self, user_id: int) -> int: ...
+
+    def cleanup_expired_sessions(self) -> int: ...
+
+    # API Keys
+    def create_api_key(
+        self,
+        user_id: int,
+        key_prefix: str,
+        key_hash: str,
+        name: str,
+        expires_at: str | None = None,
+    ) -> int: ...
+
+    def get_api_key_by_hash(self, key_hash: str) -> dict | None: ...
+
+    def list_api_keys(self, user_id: int) -> list[ApiKeyInfo]: ...
+
+    def revoke_api_key(self, key_id: int, user_id: int) -> bool: ...
+
+    def update_api_key_last_used(self, key_id: int) -> None: ...
+
+    # Admin queries
+    def get_user_stats(self) -> list[dict]: ...
+
+
+class SQLiteUserRepository:
+    """SQLite-backed repository for users, sessions, and API keys.
+
+    All methods are thread-safe: a ``threading.Lock`` serialises access
+    to the shared ``sqlite3.Connection``.
+    """
+
+    def __init__(self, conn: sqlite3.Connection) -> None:
+        self._conn = conn
+        self._lock = threading.Lock()
+
+    # ── Users ───────────────────────────────────────────────────────────
+
+    def create_user(
+        self,
+        email: str,
+        display_name: str,
+        password_hash: str | None = None,
+        is_admin: bool = False,
+    ) -> User:
+        now = _now_iso()
+        with self._lock:
+            cursor = self._conn.execute(
+                "INSERT INTO users (email, display_name, password_hash, is_admin, "
+                "created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?)",
+                (email, display_name, password_hash, int(is_admin), now, now),
+            )
+            self._conn.commit()
+            user_id = cursor.lastrowid
+        log.info("Created user %d (%s)", user_id, email)
+        user = self.get_user_by_id(user_id)  # type: ignore[arg-type]
+        assert user is not None
+        return user
+
+    def get_user_by_id(self, user_id: int) -> User | None:
+        with self._lock:
+            row = self._conn.execute(
+                "SELECT * FROM users WHERE id = ?", (user_id,)
+            ).fetchone()
+        return _row_to_user(row) if row else None
+
+    def get_user_by_email(self, email: str) -> User | None:
+        with self._lock:
+            row = self._conn.execute(
+                "SELECT * FROM users WHERE email = ?", (email,)
+            ).fetchone()
+        return _row_to_user(row) if row else None
+
+    def get_password_hash(self, user_id: int) -> str | None:
+        with self._lock:
+            row = self._conn.execute(
+                "SELECT password_hash FROM users WHERE id = ?", (user_id,)
+            ).fetchone()
+        if row is None:
+            return None
+        return row["password_hash"]
+
+    def update_user(self, user_id: int, **fields: Any) -> User | None:
+        if not fields:
+            return self.get_user_by_id(user_id)
+
+        # Allowlist of columns that can be updated
+        allowed = {
+            "email",
+            "display_name",
+            "password_hash",
+            "is_admin",
+            "is_active",
+            "email_verified",
+        }
+        invalid = set(fields) - allowed
+        if invalid:
+            raise ValueError(f"Cannot update fields: {invalid}")
+
+        # Convert booleans to int for SQLite storage
+        params: list[Any] = []
+        set_clauses: list[str] = []
+        for col, val in fields.items():
+            set_clauses.append(f"{col} = ?")
+            if isinstance(val, bool):
+                params.append(int(val))
+            else:
+                params.append(val)
+        set_clauses.append("updated_at = ?")
+        params.append(_now_iso())
+        params.append(user_id)
+
+        sql = f"UPDATE users SET {', '.join(set_clauses)} WHERE id = ?"
+        with self._lock:
+            cursor = self._conn.execute(sql, params)
+            self._conn.commit()
+        if cursor.rowcount == 0:
+            return None
+        return self.get_user_by_id(user_id)
+
+    def list_users(self) -> list[User]:
+        with self._lock:
+            rows = self._conn.execute(
+                "SELECT * FROM users ORDER BY created_at DESC"
+            ).fetchall()
+        return [_row_to_user(r) for r in rows]
+
+    def increment_failed_logins(self, user_id: int) -> None:
+        with self._lock:
+            self._conn.execute(
+                "UPDATE users SET failed_login_attempts = failed_login_attempts + 1 "
+                "WHERE id = ?",
+                (user_id,),
+            )
+            self._conn.commit()
+
+    def reset_failed_logins(self, user_id: int) -> None:
+        with self._lock:
+            self._conn.execute(
+                "UPDATE users SET failed_login_attempts = 0, locked_until = NULL "
+                "WHERE id = ?",
+                (user_id,),
+            )
+            self._conn.commit()
+
+    def lock_user(self, user_id: int, until: str) -> None:
+        with self._lock:
+            self._conn.execute(
+                "UPDATE users SET locked_until = ? WHERE id = ?",
+                (until, user_id),
+            )
+            self._conn.commit()
+        log.warning("Locked user %d until %s", user_id, until)
+
+    def get_lock_status(self, user_id: int) -> str | None:
+        with self._lock:
+            row = self._conn.execute(
+                "SELECT locked_until FROM users WHERE id = ?", (user_id,)
+            ).fetchone()
+        if row is None:
+            return None
+        return row["locked_until"]
+
+    # ── Sessions ────────────────────────────────────────────────────────
+
+    def create_session(
+        self,
+        session_id: str,
+        user_id: int,
+        expires_at: str,
+        user_agent: str | None = None,
+        ip_address: str | None = None,
+    ) -> None:
+        now = _now_iso()
+        with self._lock:
+            self._conn.execute(
+                "INSERT INTO user_sessions (id, user_id, created_at, expires_at, "
+                "last_seen_at, user_agent, ip_address) VALUES (?, ?, ?, ?, ?, ?, ?)",
+                (session_id, user_id, now, expires_at, now, user_agent, ip_address),
+            )
+            self._conn.commit()
+        log.info("Created session for user %d", user_id)
+
+    def get_session(self, session_id: str) -> dict | None:
+        """Return session data joined with user info, or None if expired/missing."""
+        with self._lock:
+            row = self._conn.execute(
+                "SELECT s.*, u.email, u.display_name, u.is_admin, u.is_active, "
+                "u.email_verified "
+                "FROM user_sessions s "
+                "JOIN users u ON u.id = s.user_id "
+                "WHERE s.id = ? AND s.expires_at > datetime('now')",
+                (session_id,),
+            ).fetchone()
+        if row is None:
+            return None
+        return dict(row)
+
+    def update_session_last_seen(self, session_id: str) -> None:
+        now = _now_iso()
+        with self._lock:
+            self._conn.execute(
+                "UPDATE user_sessions SET last_seen_at = ? WHERE id = ?",
+                (now, session_id),
+            )
+            self._conn.commit()
+
+    def delete_session(self, session_id: str) -> None:
+        with self._lock:
+            self._conn.execute(
+                "DELETE FROM user_sessions WHERE id = ?", (session_id,)
+            )
+            self._conn.commit()
+
+    def delete_user_sessions(self, user_id: int) -> int:
+        with self._lock:
+            cursor = self._conn.execute(
+                "DELETE FROM user_sessions WHERE user_id = ?", (user_id,)
+            )
+            self._conn.commit()
+        count = cursor.rowcount
+        if count:
+            log.info("Deleted %d session(s) for user %d", count, user_id)
+        return count
+
+    def cleanup_expired_sessions(self) -> int:
+        with self._lock:
+            cursor = self._conn.execute(
+                "DELETE FROM user_sessions WHERE expires_at <= datetime('now')"
+            )
+            self._conn.commit()
+        count = cursor.rowcount
+        if count:
+            log.info("Cleaned up %d expired session(s)", count)
+        return count
+
+    # ── API Keys ────────────────────────────────────────────────────────
+
+    def create_api_key(
+        self,
+        user_id: int,
+        key_prefix: str,
+        key_hash: str,
+        name: str,
+        expires_at: str | None = None,
+    ) -> int:
+        with self._lock:
+            cursor = self._conn.execute(
+                "INSERT INTO api_keys (user_id, key_prefix, key_hash, name, expires_at) "
+                "VALUES (?, ?, ?, ?, ?)",
+                (user_id, key_prefix, key_hash, name, expires_at),
+            )
+            self._conn.commit()
+            key_id = cursor.lastrowid
+        log.info("Created API key %d for user %d", key_id, user_id)
+        return key_id  # type: ignore[return-value]
+
+    def get_api_key_by_hash(self, key_hash: str) -> dict | None:
+        """Return API key data joined with user info, or None if revoked/expired/missing."""
+        with self._lock:
+            row = self._conn.execute(
+                "SELECT k.id AS key_id, k.user_id, k.key_prefix, k.name, "
+                "k.created_at, k.expires_at, k.last_used_at, k.revoked_at, "
+                "u.email, u.display_name, u.is_admin, u.is_active, u.email_verified "
+                "FROM api_keys k "
+                "JOIN users u ON u.id = k.user_id "
+                "WHERE k.key_hash = ? "
+                "AND k.revoked_at IS NULL "
+                "AND (k.expires_at IS NULL OR k.expires_at > datetime('now'))",
+                (key_hash,),
+            ).fetchone()
+        if row is None:
+            return None
+        return dict(row)
+
+    def list_api_keys(self, user_id: int) -> list[ApiKeyInfo]:
+        with self._lock:
+            rows = self._conn.execute(
+                "SELECT id, user_id, key_prefix, name, created_at, expires_at, "
+                "last_used_at, revoked_at "
+                "FROM api_keys WHERE user_id = ? ORDER BY created_at DESC",
+                (user_id,),
+            ).fetchall()
+        return [
+            ApiKeyInfo(
+                id=r["id"],
+                user_id=r["user_id"],
+                key_prefix=r["key_prefix"],
+                name=r["name"],
+                created_at=r["created_at"],
+                expires_at=r["expires_at"],
+                last_used_at=r["last_used_at"],
+                revoked_at=r["revoked_at"],
+            )
+            for r in rows
+        ]
+
+    def revoke_api_key(self, key_id: int, user_id: int) -> bool:
+        now = _now_iso()
+        with self._lock:
+            cursor = self._conn.execute(
+                "UPDATE api_keys SET revoked_at = ? "
+                "WHERE id = ? AND user_id = ? AND revoked_at IS NULL",
+                (now, key_id, user_id),
+            )
+            self._conn.commit()
+        if cursor.rowcount > 0:
+            log.info("Revoked API key %d for user %d", key_id, user_id)
+            return True
+        return False
+
+    def update_api_key_last_used(self, key_id: int) -> None:
+        now = _now_iso()
+        with self._lock:
+            self._conn.execute(
+                "UPDATE api_keys SET last_used_at = ? WHERE id = ?",
+                (now, key_id),
+            )
+            self._conn.commit()
+
+    # ── Admin queries ───────────────────────────────────────────────────
+
+    def get_user_stats(self) -> list[dict]:
+        with self._lock:
+            rows = self._conn.execute(
+                "SELECT u.id, u.email, u.display_name, u.is_admin, u.is_active, "
+                "u.email_verified, u.created_at, "
+                "COUNT(DISTINCT e.id) AS entry_count, "
+                "COALESCE(SUM(e.word_count), 0) AS total_words, "
+                "MAX(e.created_at) AS last_entry_at, "
+                "COUNT(DISTINCT j.id) AS job_count "
+                "FROM users u "
+                "LEFT JOIN entries e ON e.user_id = u.id "
+                "LEFT JOIN jobs j ON j.user_id = u.id "
+                "GROUP BY u.id "
+                "ORDER BY u.created_at DESC"
+            ).fetchall()
+        return [dict(r) for r in rows]
