@@ -101,6 +101,7 @@ _ENTITY_EXTRACTION_KEYS: dict[str, type | tuple[type, ...]] = {
     "start_date": str,
     "end_date": str,
     "stale_only": bool,
+    "user_id": int,
 }
 
 _MOOD_BACKFILL_KEYS: dict[str, type | tuple[type, ...]] = {
@@ -228,11 +229,16 @@ class JobRunner:
         `stale_only`. Unknown keys or wrong types raise
         `ValueError` before a row is inserted.
         """
+        # Inject user_id into params so the extraction worker can scope
+        # batch queries and entity creation to the correct user.
+        run_params = {**params}
+        if user_id is not None:
+            run_params["user_id"] = user_id
         _validate_params(
-            params, _ENTITY_EXTRACTION_KEYS, job_type="entity_extraction"
+            run_params, _ENTITY_EXTRACTION_KEYS, job_type="entity_extraction"
         )
-        job = self._jobs.create("entity_extraction", params, user_id=user_id)
-        self._executor.submit(self._run_entity_extraction, job.id, params)
+        job = self._jobs.create("entity_extraction", run_params, user_id=user_id)
+        self._executor.submit(self._run_entity_extraction, job.id, run_params)
         return job
 
     def submit_mood_backfill(
@@ -373,6 +379,7 @@ class JobRunner:
                 self._jobs.update_progress(job_id, current, total)
 
             entry_id = params.get("entry_id")
+            job_user_id = params.get("user_id")
             if entry_id is not None:
                 # Single-entry path: extract_from_entry has no
                 # native on_progress hook, so bracket the call with
@@ -389,6 +396,7 @@ class JobRunner:
                     end_date=params.get("end_date"),
                     stale_only=bool(params.get("stale_only", False)),
                     on_progress=progress_callback,
+                    user_id=job_user_id,
                 )
 
             summary: dict[str, Any] = {

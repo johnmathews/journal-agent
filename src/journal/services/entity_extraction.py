@@ -280,6 +280,7 @@ class EntityExtractionService:
         stale_only: bool = False,
         *,
         on_progress: Callable[[int, int], None] | None = None,
+        user_id: int | None = None,
     ) -> list[ExtractionResult]:
         """Run extraction across many entries with filter support.
 
@@ -296,12 +297,15 @@ class EntityExtractionService:
                 processed — whether it succeeded or failed. A raising
                 callback is logged and swallowed: a broken progress
                 sink must never break the batch.
+            user_id: When set, only entries belonging to this user are
+                included in the batch.
         """
         ids = self._resolve_batch_ids(
             entry_ids=entry_ids,
             start_date=start_date,
             end_date=end_date,
             stale_only=stale_only,
+            user_id=user_id,
         )
         log.info("Extracting entities for %d entries", len(ids))
 
@@ -338,6 +342,7 @@ class EntityExtractionService:
         start_date: str | None,
         end_date: str | None,
         stale_only: bool,
+        user_id: int | None = None,
     ) -> list[int]:
         """Figure out which entry ids to extract for a batch run."""
         if entry_ids:
@@ -357,6 +362,9 @@ class EntityExtractionService:
 
         sql = "SELECT id FROM entries WHERE 1=1"
         params: list[object] = []
+        if user_id is not None:
+            sql += " AND user_id = ?"
+            params.append(user_id)
         if start_date:
             sql += " AND entry_date >= ?"
             params.append(start_date)

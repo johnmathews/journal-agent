@@ -63,6 +63,7 @@ class FakeEntityExtractionService:
         stale_only: bool = False,
         *,
         on_progress: Callable[[int, int], None] | None = None,
+        user_id: int | None = None,
     ) -> list[ExtractionResult]:
         self.batch_calls.append(
             {

@@ -87,6 +87,7 @@ class FakeExtractionService:
         stale_only: bool = False,
         *,
         on_progress: Callable[[int, int], None] | None = None,
+        user_id: int | None = None,
     ) -> list[ExtractionResult]:
         total = len(self._batch_results)
         if on_progress is not None:
@@ -480,7 +481,7 @@ class TestJobDetailRoute:
         }
         assert set(payload.keys()) == expected_keys
         assert payload["id"] == job_id
-        assert payload["params"] == {"stale_only": True}
+        assert payload["params"]["stale_only"] is True
         assert payload["error_message"] is None
         assert payload["started_at"] is not None
         assert payload["finished_at"] is not None
