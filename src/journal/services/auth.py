@@ -133,29 +133,47 @@ class AuthService:
 
     # ── Sessions ────────────────────────────────────────────────────────
 
+    @staticmethod
+    def _hash_session_token(token: str) -> str:
+        """SHA-256 hash a raw session token for DB storage/lookup.
+
+        Mirrors the API-key hashing pattern: the raw token is shown
+        once (in the cookie), and only the hash is persisted.  If the
+        SQLite file is ever exposed, an attacker cannot impersonate a
+        user without brute-forcing the 256-bit token.
+        """
+        return hashlib.sha256(token.encode()).hexdigest()
+
     def create_session(
         self,
         user_id: int,
         user_agent: str | None = None,
         ip_address: str | None = None,
     ) -> str:
-        """Create a new session and return the session token."""
+        """Create a new session and return the raw session token.
+
+        The raw token is returned to the caller (for the cookie).
+        Only the SHA-256 hash is stored in ``user_sessions.id``.
+        """
         token = secrets.token_urlsafe(32)
+        token_hash = self._hash_session_token(token)
         expires = datetime.now(UTC) + timedelta(days=self._session_expiry_days)
         expires_str = expires.strftime("%Y-%m-%dT%H:%M:%SZ")
-        self._repo.create_session(token, user_id, expires_str, user_agent, ip_address)
+        self._repo.create_session(token_hash, user_id, expires_str, user_agent, ip_address)
         return token
 
     def validate_session(self, token: str) -> User | None:
         """Look up a session token and return the associated user.
 
-        Returns ``None`` if the session is expired or does not exist.
+        Hashes the incoming token before the DB lookup. Returns
+        ``None`` if the session is expired or does not exist.
         Updates ``last_seen_at`` on valid sessions.
         """
-        session = self._repo.get_session(token)
+        token_hash = self._hash_session_token(token)
+        session = self._repo.get_session(token_hash)
         if not session:
             return None
-        self._repo.update_session_last_seen(token)
+        self._repo.update_session_last_seen(token_hash)
         return User(
             id=session["user_id"],
             email=session["email"],
@@ -166,8 +184,8 @@ class AuthService:
         )
 
     def logout(self, token: str) -> None:
-        """Delete a session (log out)."""
-        self._repo.delete_session(token)
+        """Delete a session (log out). Hashes the token before delete."""
+        self._repo.delete_session(self._hash_session_token(token))
 
     def logout_all(self, user_id: int) -> int:
         """Delete all sessions for a user. Returns the count deleted."""
