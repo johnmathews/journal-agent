@@ -149,7 +149,19 @@ class TestFinalTextUsage:
 
 
 class TestMCPToolModuleImports:
-    """Verify new MCP tool functions are importable."""
+    """Verify MCP tool functions are importable."""
+
+    def test_ingest_media_tool_exists(self):
+        from journal.mcp_server import journal_ingest_media
+        assert callable(journal_ingest_media)
+
+    def test_ingest_media_from_url_tool_exists(self):
+        from journal.mcp_server import journal_ingest_media_from_url
+        assert callable(journal_ingest_media_from_url)
+
+    def test_ingest_text_tool_exists(self):
+        from journal.mcp_server import journal_ingest_text
+        assert callable(journal_ingest_text)
 
     def test_ingest_multi_page_tool_exists(self):
         from journal.mcp_server import journal_ingest_multi_page
@@ -164,7 +176,6 @@ class TestMCPToolModuleImports:
         assert callable(journal_update_entry_text)
 
     def test_batch_job_tools_exist(self):
-        """Work Unit 5b — async batch-job MCP tool wrappers."""
         from journal.mcp_server import (
             journal_backfill_mood_scores_batch,
             journal_extract_entities_batch,
@@ -337,3 +348,94 @@ class TestBatchJobTools:
         assert status["progress_total"] == 1
         assert status["result"]["processed"] == 1
         assert status["error_message"] is None
+
+
+class TestIngestTextTool:
+    """Integration tests for the journal_ingest_text MCP tool."""
+
+    @pytest.fixture
+    def ingest_ctx(self, db_conn):
+        from journal.db.repository import SQLiteEntryRepository
+        from journal.services.chunking import FixedTokenChunker
+        from journal.services.ingestion import IngestionService
+        from journal.vectorstore.store import InMemoryVectorStore
+
+        mock_emb = MagicMock()
+        mock_emb.embed_texts.return_value = [[0.1, 0.2, 0.3]]
+
+        service = IngestionService(
+            repository=SQLiteEntryRepository(db_conn),
+            vector_store=InMemoryVectorStore(),
+            ocr_provider=MagicMock(),
+            transcription_provider=MagicMock(),
+            embeddings_provider=mock_emb,
+            chunker=FixedTokenChunker(max_tokens=150, overlap_tokens=40),
+        )
+
+        ctx = MagicMock()
+        ctx.request_context.lifespan_context = {"ingestion": service}
+        return ctx
+
+    def test_creates_entry_from_text(self, ingest_ctx):
+        from journal.mcp_server import journal_ingest_text
+
+        result = journal_ingest_text(
+            text="Had a great day hiking in the mountains",
+            date="2026-04-15",
+            ctx=ingest_ctx,
+        )
+        assert "Text entry created successfully" in result
+        assert "2026-04-15" in result
+        assert "text_entry" in result
+
+    def test_defaults_date_to_today(self, ingest_ctx):
+        from journal.mcp_server import journal_ingest_text
+
+        result = journal_ingest_text(
+            text="A simple entry without a date",
+            ctx=ingest_ctx,
+        )
+        assert "Text entry created successfully" in result
+        assert "ID:" in result
+
+    def test_custom_source_type(self, ingest_ctx):
+        from journal.mcp_server import journal_ingest_text
+
+        result = journal_ingest_text(
+            text="Imported from a text file",
+            date="2026-04-15",
+            source_type="imported_text_file",
+            ctx=ingest_ctx,
+        )
+        assert "imported_text_file" in result
+
+    def test_empty_text_returns_error(self, ingest_ctx):
+        from journal.mcp_server import journal_ingest_text
+
+        result = journal_ingest_text(
+            text="   ",
+            date="2026-04-15",
+            ctx=ingest_ctx,
+        )
+        assert "Error:" in result
+        assert "empty" in result.lower()
+
+    def test_reports_word_count(self, ingest_ctx):
+        from journal.mcp_server import journal_ingest_text
+
+        result = journal_ingest_text(
+            text="one two three four five",
+            date="2026-04-15",
+            ctx=ingest_ctx,
+        )
+        assert "Words: 5" in result
+
+    def test_reports_preview(self, ingest_ctx):
+        from journal.mcp_server import journal_ingest_text
+
+        result = journal_ingest_text(
+            text="Had a great day hiking in the mountains",
+            date="2026-04-15",
+            ctx=ingest_ctx,
+        )
+        assert "hiking" in result

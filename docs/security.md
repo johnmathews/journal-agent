@@ -87,7 +87,7 @@ behind a reverse proxy.
 
 ### SSRF protection on URL ingestion
 
-`journal_ingest_from_url` and `journal_ingest_multi_page_from_url` accept arbitrary URLs as parameters. Before any socket
+`journal_ingest_media_from_url` and `journal_ingest_multi_page_from_url` accept arbitrary URLs as parameters. Before any socket
 is opened, `IngestionService._download` calls `_validate_public_url`, which:
 
 1. Rejects any scheme that isn't `http` or `https` (blocks `file://`, `gopher://`, `ftp://`, etc.).

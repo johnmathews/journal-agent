@@ -507,7 +507,7 @@ def journal_get_topic_frequency(
 
 
 @mcp.tool()
-def journal_ingest_from_url(
+def journal_ingest_media_from_url(
     source_type: str,
     url: str,
     media_type: str | None = None,
@@ -517,7 +517,10 @@ def journal_ingest_from_url(
 ) -> str:
     """Ingest a SINGLE journal page image or voice note by URL.
 
-    Preferred over journal_ingest_entry when the file is available at a URL,
+    Use this for media files (images for OCR, audio for transcription).
+    For plain text entries, use `journal_ingest_text` instead.
+
+    Preferred over journal_ingest_media when the file is available at a URL,
     since it avoids base64-encoding large files as tool parameters.
 
     IMPORTANT: If you have multiple photos that are pages of the *same* journal
@@ -536,7 +539,7 @@ def journal_ingest_from_url(
     from datetime import date as date_type
 
     log.info(
-        "Tool call: journal_ingest_from_url(source_type=%s, url=%s, date=%s)",
+        "Tool call: journal_ingest_media_from_url(source_type=%s, url=%s, date=%s)",
         source_type, url, date,
     )
     service = _get_ingestion(ctx)
@@ -564,7 +567,7 @@ def journal_ingest_from_url(
 
 
 @mcp.tool()
-def journal_ingest_entry(
+def journal_ingest_media(
     source_type: str,
     data_base64: str,
     media_type: str,
@@ -572,7 +575,11 @@ def journal_ingest_entry(
     language: str = "en",
     ctx: Context = None,  # type: ignore[assignment]
 ) -> str:
-    """Ingest a journal entry from an image or voice note.
+    """Ingest a journal entry from a base64-encoded image or voice note.
+
+    Use this for media files (images for OCR, audio for transcription).
+    For plain text entries, use `journal_ingest_text` instead.
+    When the file is available at a URL, prefer `journal_ingest_media_from_url`.
 
     Args:
         source_type: Either "image" (for handwritten page OCR) or "voice" (for audio transcription).
@@ -585,7 +592,7 @@ def journal_ingest_entry(
     from datetime import date as date_type
 
     log.info(
-        "Tool call: journal_ingest_entry(source_type=%s, media_type=%s, date=%s, size=%d)",
+        "Tool call: journal_ingest_media(source_type=%s, media_type=%s, date=%s, size=%d)",
         source_type, media_type, date, len(data_base64),
     )
     service = _get_ingestion(ctx)
@@ -602,6 +609,57 @@ def journal_ingest_entry(
 
     return (
         f"Entry ingested successfully.\n"
+        f"  ID: {entry.id}\n"
+        f"  Date: {entry.entry_date}\n"
+        f"  Source: {entry.source_type}\n"
+        f"  Words: {entry.word_count}\n"
+        f"  Chunks: {entry.chunk_count}\n"
+        f"  Preview: {entry.final_text[:200]}..."
+    )
+
+
+@mcp.tool()
+def journal_ingest_text(
+    text: str,
+    date: str | None = None,
+    source_type: str = "text_entry",
+    ctx: Context = None,  # type: ignore[assignment]
+) -> str:
+    """Create a journal entry from plain text.
+
+    Use this when you already have the text content (typed, dictated, or
+    pasted). No OCR or transcription is performed — the text is stored
+    directly, chunked, embedded, and indexed.
+
+    For handwritten page images use `journal_ingest_media` or
+    `journal_ingest_media_from_url`. For audio recordings use those same
+    tools with source_type="voice".
+
+    Args:
+        text: The journal entry text content.
+        date: Date of the journal entry (ISO 8601, e.g. "2026-03-22").
+            Defaults to today.
+        source_type: Entry source type. Defaults to "text_entry".
+    """
+    from datetime import date as date_type
+
+    log.info(
+        "Tool call: journal_ingest_text(date=%s, source_type=%s, chars=%d)",
+        date, source_type, len(text),
+    )
+    service = _get_ingestion(ctx)
+    user_id = _user_id(ctx)
+    entry_date = date or date_type.today().isoformat()
+
+    try:
+        entry = service.ingest_text(
+            text, entry_date, source_type, skip_mood=True, user_id=user_id,
+        )
+    except ValueError as e:
+        return f"Error: {e}"
+
+    return (
+        f"Text entry created successfully.\n"
         f"  ID: {entry.id}\n"
         f"  Date: {entry.entry_date}\n"
         f"  Source: {entry.source_type}\n"

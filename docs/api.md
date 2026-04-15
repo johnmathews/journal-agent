@@ -1244,10 +1244,26 @@ Count how often a topic, person, or place appears.
 
 ## Ingestion Tools
 
-### journal_ingest_from_url
+### journal_ingest_text
 
-Ingest a **single** journal page image or voice note by downloading it from a URL. This is the preferred ingestion method
-for MCP clients like Nanoclaw, since it avoids base64-encoding large files as tool parameters.
+Create a journal entry from plain text. No OCR or transcription — the text is stored directly, chunked, embedded, and
+indexed.
+
+| Parameter     | Type   | Required | Default        | Description                              |
+| ------------- | ------ | -------- | -------------- | ---------------------------------------- |
+| `text`        | string | yes      |                | The journal entry text content           |
+| `date`        | string | no       | today          | Entry date (ISO 8601)                    |
+| `source_type` | string | no       | "text_entry"   | Entry source type                        |
+
+For handwritten page images or audio recordings, use `journal_ingest_media_from_url` or `journal_ingest_media` instead.
+
+### journal_ingest_media_from_url
+
+Ingest a **single** journal page image or voice note by downloading it from a URL. This is the preferred media ingestion
+method for MCP clients like Nanoclaw, since it avoids base64-encoding large files as tool parameters.
+
+> **Renamed:** Previously `journal_ingest_from_url`. Updated 2026-04-15 for clarity alongside the new
+> `journal_ingest_text` tool.
 
 | Parameter     | Type   | Required | Default | Description                                        |
 | ------------- | ------ | -------- | ------- | -------------------------------------------------- |
@@ -1278,13 +1294,16 @@ entries from URL-based clients (e.g. Slack-driven agents).
 | `media_types` | list[string] | no       |         | Per-URL MIME type overrides (same length as `urls`) |
 | `date`        | string       | no       | today   | Entry date (ISO 8601)                               |
 
-Slack file URLs are authenticated the same way as in `journal_ingest_from_url`. If a page within the batch matches an
-already-ingested file hash, ingestion fails with an "already ingested" error before any entry is created.
+Slack file URLs are authenticated the same way as in `journal_ingest_media_from_url`. If a page within the batch matches
+an already-ingested file hash, ingestion fails with an "already ingested" error before any entry is created.
 
-### journal_ingest_entry
+### journal_ingest_media
 
-Ingest a journal entry from base64-encoded data. Use `journal_ingest_from_url` instead when the file is available at a
-URL — this avoids MCP tool parameter size limits.
+Ingest a journal entry from a base64-encoded image or voice note. Use `journal_ingest_media_from_url` instead when the
+file is available at a URL — this avoids MCP tool parameter size limits.
+
+> **Renamed:** Previously `journal_ingest_entry`. Updated 2026-04-15 for clarity alongside the new
+> `journal_ingest_text` tool.
 
 | Parameter     | Type   | Required | Default | Description                      |
 | ------------- | ------ | -------- | ------- | -------------------------------- |
