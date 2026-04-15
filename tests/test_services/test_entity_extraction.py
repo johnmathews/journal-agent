@@ -8,6 +8,7 @@ from unittest.mock import MagicMock
 import pytest
 
 from journal.db.repository import SQLiteEntryRepository
+from journal.db.user_repository import SQLiteUserRepository
 from journal.entitystore.store import SQLiteEntityStore
 from journal.providers.extraction import RawExtractionResult
 from journal.services.entity_extraction import EntityExtractionService
@@ -89,6 +90,7 @@ def _make_service(
     author_name: str = "John",
     threshold: float = 0.88,
     embeddings: MagicMock | None = None,
+    user_repo: SQLiteUserRepository | None = None,
 ) -> EntityExtractionService:
     if embeddings is None:
         embeddings = MagicMock()
@@ -100,6 +102,7 @@ def _make_service(
         embeddings_provider=embeddings,
         author_name=author_name,
         dedup_similarity_threshold=threshold,
+        user_repo=user_repo,
     )
 
 
@@ -450,3 +453,159 @@ class TestBatchProgressCallback:
         assert any(
             "Progress callback failed" in rec.message for rec in caplog.records
         )
+
+
+class TestMultiUserAuthorName:
+    """Entity extraction should use the entry owner's display name, not
+    the global default, when resolving first-person pronouns."""
+
+    @pytest.fixture
+    def user_repo(self, db_conn: sqlite3.Connection) -> SQLiteUserRepository:
+        return SQLiteUserRepository(db_conn)
+
+    def test_extraction_uses_owner_display_name(
+        self,
+        repo: SQLiteEntryRepository,
+        entity_store: SQLiteEntityStore,
+        user_repo: SQLiteUserRepository,
+    ) -> None:
+        """When user 'Demo User' writes 'I visited Paris', the LLM
+        should be told the author is 'Demo User', not 'John'."""
+        demo = user_repo.create_user("demo@example.com", "Demo User")
+        entry = repo.create_entry(
+            "2026-04-15", "photo", "I visited Paris today.", 5,
+            user_id=demo.id,
+        )
+
+        extractor = MagicMock()
+        extractor.extract_entities.return_value = _raw(
+            entities=[
+                _entity("Demo User", "person", quote="I visited"),
+                _entity("Paris", "place", quote="Paris"),
+            ],
+            relationships=[
+                _rel("Demo User", "visited", "Paris", "I visited Paris"),
+            ],
+        )
+        service = _make_service(
+            repo, entity_store, extractor,
+            author_name="John",
+            user_repo=user_repo,
+        )
+        result = service.extract_from_entry(entry.id)
+
+        # Verify the LLM was called with the correct author name.
+        call_kwargs = extractor.extract_entities.call_args
+        assert call_kwargs.kwargs["author_name"] == "Demo User"
+
+        # Verify relationships were created correctly.
+        assert result.relationships_created == 1
+        assert result.warnings == []
+
+    def test_extraction_falls_back_to_default_without_user_repo(
+        self,
+        repo: SQLiteEntryRepository,
+        entity_store: SQLiteEntityStore,
+    ) -> None:
+        """Without a user_repo, falls back to the global author_name."""
+        entry = repo.create_entry(
+            "2026-04-15", "photo", "I visited Paris.", 3,
+        )
+        extractor = MagicMock()
+        extractor.extract_entities.return_value = _raw()
+        service = _make_service(
+            repo, entity_store, extractor,
+            author_name="John",
+            user_repo=None,
+        )
+        service.extract_from_entry(entry.id)
+
+        call_kwargs = extractor.extract_entities.call_args
+        assert call_kwargs.kwargs["author_name"] == "John"
+
+    def test_author_entity_created_with_correct_name_for_non_default_user(
+        self,
+        repo: SQLiteEntryRepository,
+        entity_store: SQLiteEntityStore,
+        user_repo: SQLiteUserRepository,
+    ) -> None:
+        """When the LLM emits a relationship with the author as subject,
+        the auto-created author entity should use the user's display
+        name, not the global default."""
+        harry = user_repo.create_user("harry@example.com", "Harry")
+        entry = repo.create_entry(
+            "2026-04-15", "photo", "I played squash today.", 4,
+            user_id=harry.id,
+        )
+
+        extractor = MagicMock()
+        extractor.extract_entities.return_value = _raw(
+            entities=[_entity("squash", "activity", quote="squash")],
+            relationships=[
+                _rel("Harry", "plays", "squash", "I played squash"),
+            ],
+        )
+        service = _make_service(
+            repo, entity_store, extractor,
+            author_name="John",
+            user_repo=user_repo,
+        )
+        result = service.extract_from_entry(entry.id)
+
+        # Harry should have been auto-created, not John.
+        harry_entity = entity_store.get_entity_by_name("Harry", "person")
+        john_entity = entity_store.get_entity_by_name("John", "person")
+        assert harry_entity is not None
+        assert john_entity is None
+        assert result.relationships_created == 1
+
+    def test_two_users_get_separate_author_entities(
+        self,
+        repo: SQLiteEntryRepository,
+        entity_store: SQLiteEntityStore,
+        user_repo: SQLiteUserRepository,
+    ) -> None:
+        """Entries from different users should create distinct author
+        entities with each user's display name."""
+        john = user_repo.create_user("john@example.com", "John")
+        demo = user_repo.create_user("demo@example.com", "Demo")
+
+        entry_john = repo.create_entry(
+            "2026-04-15", "photo", "I went to the gym.", 6,
+            user_id=john.id,
+        )
+        entry_demo = repo.create_entry(
+            "2026-04-15", "photo", "I went to the park.", 6,
+            user_id=demo.id,
+        )
+
+        extractor = MagicMock()
+        extractor.extract_entities.side_effect = [
+            _raw(
+                entities=[
+                    _entity("John", "person", quote="I went"),
+                    _entity("gym", "place", quote="the gym"),
+                ],
+                relationships=[_rel("John", "visited", "gym")],
+            ),
+            _raw(
+                entities=[
+                    _entity("Demo", "person", quote="I went"),
+                    _entity("park", "place", quote="the park"),
+                ],
+                relationships=[_rel("Demo", "visited", "park")],
+            ),
+        ]
+        service = _make_service(
+            repo, entity_store, extractor,
+            author_name="John",
+            user_repo=user_repo,
+        )
+
+        service.extract_from_entry(entry_john.id)
+        service.extract_from_entry(entry_demo.id)
+
+        # Verify the LLM was called with the correct author for each.
+        calls = extractor.extract_entities.call_args_list
+        assert calls[0].kwargs["author_name"] == "John"
+        assert calls[1].kwargs["author_name"] == "Demo"

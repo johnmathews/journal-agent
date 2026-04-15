@@ -115,6 +115,7 @@ _MOOD_BACKFILL_MODES = frozenset({"stale-only", "force"})
 
 _INGEST_IMAGES_KEYS: dict[str, type | tuple[type, ...]] = {
     "entry_date": str,
+    "user_id": int,
 }
 
 _MOOD_SCORE_ENTRY_KEYS: dict[str, type | tuple[type, ...]] = {
@@ -128,6 +129,7 @@ _REPROCESS_EMBEDDINGS_KEYS: dict[str, type | tuple[type, ...]] = {
 _INGEST_AUDIO_KEYS: dict[str, type | tuple[type, ...]] = {
     "entry_date": str,
     "source_type": str,
+    "user_id": int,
 }
 
 
@@ -286,7 +288,9 @@ class JobRunner:
         """
         if not images:
             raise ValueError("At least one image is required")
-        params = {"entry_date": entry_date}
+        params: dict[str, Any] = {"entry_date": entry_date}
+        if user_id is not None:
+            params["user_id"] = user_id
         _validate_params(params, _INGEST_IMAGES_KEYS, job_type="ingest_images")
         job = self._jobs.create(
             "ingest_images", {**params, "page_count": len(images)}, user_id=user_id,
@@ -342,7 +346,9 @@ class JobRunner:
         """
         if not recordings:
             raise ValueError("At least one audio recording is required")
-        params = {"entry_date": entry_date, "source_type": source_type}
+        params: dict[str, Any] = {"entry_date": entry_date, "source_type": source_type}
+        if user_id is not None:
+            params["user_id"] = user_id
         _validate_params(params, _INGEST_AUDIO_KEYS, job_type="ingest_audio")
         job = self._jobs.create(
             "ingest_audio", {**params, "recording_count": len(recordings)},
@@ -457,6 +463,7 @@ class JobRunner:
                 (data, media_type) for data, media_type, _filename in images_with_names
             ]
             entry_date = params["entry_date"]
+            job_user_id: int | None = params.get("user_id")
             total = len(images)
 
             def progress_callback(current: int, total_pages: int) -> None:
@@ -476,12 +483,14 @@ class JobRunner:
                         self._jobs.update_progress(job_id, 0, total)
                         entry = self._ingestion.ingest_image(
                             images[0][0], images[0][1], entry_date,
+                            user_id=job_user_id or 1,
                         )
                         self._jobs.update_progress(job_id, 1, total)
                     else:
                         self._jobs.update_progress(job_id, 0, total)
                         entry = self._ingestion.ingest_multi_page_entry(
                             images, entry_date, on_progress=progress_callback,
+                            user_id=job_user_id or 1,
                         )
                     last_exc = None
                     break  # success
@@ -512,7 +521,9 @@ class JobRunner:
             # Queue entity extraction as a follow-up job. Mood scoring
             # already happens inline inside ingest_image / ingest_multi_page_entry.
             try:
-                ej = self.submit_entity_extraction({"entry_id": entry.id})
+                ej = self.submit_entity_extraction(
+                    {"entry_id": entry.id}, user_id=job_user_id,
+                )
                 log.info(
                     "Image ingestion job %s — queued entity extraction %s for entry %d",
                     job_id, ej.id, entry.id,
@@ -652,6 +663,7 @@ class JobRunner:
                 for data, media_type, _filename in recordings_with_names
             ]
             entry_date = params["entry_date"]
+            job_user_id: int | None = params.get("user_id")
             total = len(recordings)
 
             def progress_callback(current: int, total_recs: int) -> None:
@@ -672,6 +684,7 @@ class JobRunner:
                         recordings, entry_date,
                         source_type=params.get("source_type", "voice"),
                         on_progress=progress_callback,
+                        user_id=job_user_id or 1,
                     )
                     last_exc = None
                     break  # success
@@ -701,7 +714,9 @@ class JobRunner:
 
             # Queue entity extraction as a follow-up job.
             try:
-                ej = self.submit_entity_extraction({"entry_id": entry.id})
+                ej = self.submit_entity_extraction(
+                    {"entry_id": entry.id}, user_id=job_user_id,
+                )
                 log.info(
                     "Audio ingestion job %s — queued entity extraction %s for entry %d",
                     job_id, ej.id, entry.id,

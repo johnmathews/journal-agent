@@ -25,6 +25,7 @@ if TYPE_CHECKING:
     from collections.abc import Callable
 
     from journal.db.repository import EntryRepository
+    from journal.db.user_repository import UserRepository
     from journal.entitystore.store import EntityStore
     from journal.providers.embeddings import EmbeddingsProvider
     from journal.providers.extraction import ExtractionProvider
@@ -82,6 +83,7 @@ class EntityExtractionService:
         embeddings_provider: EmbeddingsProvider,
         author_name: str = "John",
         dedup_similarity_threshold: float = 0.88,
+        user_repo: UserRepository | None = None,
     ) -> None:
         self._repo = repository
         self._store = entity_store
@@ -89,10 +91,21 @@ class EntityExtractionService:
         self._embeddings = embeddings_provider
         self._author_name = author_name
         self._threshold = dedup_similarity_threshold
+        self._user_repo = user_repo
 
     # ------------------------------------------------------------------
     # Public API
     # ------------------------------------------------------------------
+
+    def _get_author_name(self, user_id: int | None) -> str:
+        """Look up the display name for a user, falling back to the
+        global default when the user repo is unavailable or the user
+        is not found."""
+        if user_id and self._user_repo is not None:
+            user = self._user_repo.get_user_by_id(user_id)
+            if user is not None:
+                return user.display_name
+        return self._author_name
 
     def extract_from_entry(self, entry_id: int) -> ExtractionResult:
         entry = self._repo.get_entry(entry_id)
@@ -100,15 +113,17 @@ class EntityExtractionService:
             raise ValueError(f"Entry {entry_id} not found")
 
         user_id = entry.user_id or None
+        author_name = self._get_author_name(user_id)
         run_id = str(uuid.uuid4())
         log.info(
-            "Extracting entities from entry %d (run=%s)", entry_id, run_id
+            "Extracting entities from entry %d (run=%s, author=%s)",
+            entry_id, run_id, author_name,
         )
 
         raw = self._extractor.extract_entities(
             entry_text=entry.final_text or entry.raw_text,
             entry_date=entry.entry_date,
-            author_name=self._author_name,
+            author_name=author_name,
         )
 
         # Idempotency: clear any prior extraction results for this
@@ -171,7 +186,7 @@ class EntityExtractionService:
 
             # If this extracted entity IS the author, cache the id so
             # the relationships step doesn't need to look them up.
-            if canonical.lower() == self._author_name.lower():
+            if canonical.lower() == author_name.lower():
                 author_entity_id = entity_id
 
             # Add any newly-seen aliases to the store. Idempotent.
@@ -213,11 +228,12 @@ class EntityExtractionService:
                 resolved,
                 entry_date=entry.entry_date,
                 author_entity_id=author_entity_id,
+                author_name=author_name,
                 user_id=user_id,
             )
             # Refresh the cached author id in case the relationship
             # step was what created the author entity.
-            if subject.lower() == self._author_name.lower():
+            if subject.lower() == author_name.lower():
                 author_entity_id = subject_id
 
             object_id, object_warn = self._resolve_for_relationship(
@@ -225,9 +241,10 @@ class EntityExtractionService:
                 resolved,
                 entry_date=entry.entry_date,
                 author_entity_id=author_entity_id,
+                author_name=author_name,
                 user_id=user_id,
             )
-            if obj.lower() == self._author_name.lower():
+            if obj.lower() == author_name.lower():
                 author_entity_id = object_id
 
             if subject_warn:
@@ -465,6 +482,7 @@ class EntityExtractionService:
         resolved: dict[str, int],
         entry_date: str,
         author_entity_id: int | None,
+        author_name: str | None = None,
         user_id: int | None = None,
     ) -> tuple[int | None, str | None]:
         """Look up a subject/object name for a relationship row.
@@ -475,22 +493,23 @@ class EntityExtractionService:
           3. Author name fallback is handled again in case the LLM
              spelled it differently
         """
+        effective_author = author_name or self._author_name
         lower = name.strip().lower()
         if not lower:
             return None, "skipped relationship with empty name"
 
-        if lower == self._author_name.lower():
+        if lower == effective_author.lower():
             if author_entity_id is not None:
                 return author_entity_id, None
             # Author wasn't in the extracted entity list — create one.
             existing = self._store.get_entity_by_name(
-                self._author_name, "person", user_id=user_id,
+                effective_author, "person", user_id=user_id,
             )
             if existing is not None:
                 return existing.id, None
             author = self._store.create_entity(
                 entity_type="person",
-                canonical_name=self._author_name,
+                canonical_name=effective_author,
                 description="Journal author",
                 first_seen=entry_date,
                 user_id=user_id or 1,

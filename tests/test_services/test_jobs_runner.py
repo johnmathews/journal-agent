@@ -637,7 +637,8 @@ class FakeIngestionService:
         self.reprocess_calls: list[int] = []
 
     def ingest_image(
-        self, image_data: bytes, media_type: str, date: str
+        self, image_data: bytes, media_type: str, date: str,
+        *, user_id: int = 1,
     ) -> Any:
         self.ingest_image_calls.append((image_data, media_type, date))
         return self._entry
@@ -648,6 +649,7 @@ class FakeIngestionService:
         date: str,
         *,
         on_progress: Callable[[int, int], None] | None = None,
+        user_id: int = 1,
     ) -> Any:
         self.multi_page_calls.append(len(images))
         for i in range(len(images)):
@@ -663,6 +665,7 @@ class FakeIngestionService:
         *,
         source_type: str = "voice",
         on_progress: Callable[[int, int], None] | None = None,
+        user_id: int = 1,
     ) -> Any:
         self.multi_voice_calls.append(len(recordings))
         for i in range(len(recordings)):

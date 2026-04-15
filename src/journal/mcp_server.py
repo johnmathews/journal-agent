@@ -145,6 +145,12 @@ def _init_services() -> dict:
             "(JOURNAL_ENABLE_MOOD_SCORING unset or false)"
         )
 
+    # User repository — created early so entity extraction can look up
+    # per-user display names for the LLM author prompt.
+    from journal.db.user_repository import SQLiteUserRepository
+
+    user_repo = SQLiteUserRepository(conn)
+
     entity_extraction_service = EntityExtractionService(
         repository=repo,
         entity_store=entity_store,
@@ -152,6 +158,7 @@ def _init_services() -> dict:
         embeddings_provider=embeddings,
         author_name=config.journal_author_name,
         dedup_similarity_threshold=config.entity_dedup_similarity_threshold,
+        user_repo=user_repo,
     )
 
     # Ingestion service — created before the JobRunner so the runner
@@ -202,12 +209,11 @@ def _init_services() -> dict:
 
     atexit.register(_shutdown_job_runner)
 
-    # Auth infrastructure — user repository, auth service, optional email.
-    from journal.db.user_repository import SQLiteUserRepository
+    # Auth infrastructure — auth service, optional email.
+    # (user_repo already created above for entity extraction.)
     from journal.services.auth import AuthService
     from journal.services.email import EmailService
 
-    user_repo = SQLiteUserRepository(conn)
     auth_service = AuthService(
         user_repo=user_repo,
         secret_key=config.secret_key,
@@ -834,7 +840,7 @@ def journal_extract_entities(
     user_id = _user_id(ctx)
     try:
         if entry_id is not None:
-            results = [service.extract_from_entry(entry_id, user_id=user_id)]
+            results = [service.extract_from_entry(entry_id)]
         else:
             results = service.extract_batch(
                 start_date=start_date,
