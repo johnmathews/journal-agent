@@ -1,8 +1,7 @@
 # Security
 
 This document describes the security posture of journal-server: what it protects, what it does not, and how to deploy it
-safely. It is deliberately narrow — this is a single-user personal tool, not a multi-tenant SaaS, and the defences match
-that threat model.
+safely. The server supports multiple users with per-user data isolation.
 
 ## Threat model
 
@@ -17,7 +16,7 @@ Realistic adversaries:
 2. **A malicious webpage** open in the user's browser making cross-origin `fetch()` calls to the MCP endpoint via DNS
    rebinding.
 3. **A stolen or lost VM disk image / backup tape** containing the SQLite database and ChromaDB data directory.
-4. **Another local user** on the developer's workstation reading the SQLite file directly.
+4. **Another authenticated user** accessing data belonging to a different user through the API.
 
 Explicitly out of scope:
 
@@ -30,20 +29,34 @@ Explicitly out of scope:
 
 ## Defences in place
 
-### API bearer token (REQUIRED)
+### Multi-user authentication
 
-Every request to `/api/*` and `/mcp` must carry `Authorization: Bearer <token>` matching `JOURNAL_API_TOKEN`. The server
-refuses to start without a token set — there is no "auth off" mode.
+Two authentication mechanisms, checked in order by the middleware:
 
-- Generate a token with:
-  ```bash
-  python -c "import secrets; print(secrets.token_urlsafe(32))"
-  ```
-- Add it to your `.env` as `JOURNAL_API_TOKEN=...`.
-- Set the same value in any client (webapp, Slack bot, MCP client).
-- Comparison is constant-time (`hmac.compare_digest`) so a timing attack cannot recover the token one byte at a time.
-- `OPTIONS` requests are allowed through without a token so CORS preflight works for the webapp. Every other HTTP method
-  must authenticate.
+1. **Cookie sessions** — used by the web frontend (httpOnly, Secure, SameSite=Lax, 7-day expiry)
+2. **API keys (bearer tokens)** — used by MCP clients and external API consumers (format: `jnl_<random>`)
+
+See [auth.md](auth.md) for the full authentication architecture (registration, login, password reset, account lockout).
+
+### Per-user data isolation
+
+Every read, update, and delete query filters by `user_id`. A user can never see, modify, or delete another user's data
+through any API endpoint or MCP tool. Isolation is enforced at the repository layer (SQL `WHERE user_id = ?`) and the
+vector store layer (ChromaDB `where` filter on `user_id` metadata).
+
+Admin users (`is_admin=true`) can see all jobs via the jobs API, but cannot access other users' entries or entities.
+
+### Session and API key storage
+
+- **Session tokens** are SHA-256 hashed before storage in `user_sessions.id`. The raw token is returned once (in the
+  Set-Cookie header) and never stored. If the SQLite file is exposed, an attacker cannot impersonate active users.
+- **API keys** follow the same pattern: SHA-256 hashed before storage in `api_keys.key_hash`. Only the 12-char prefix
+  is stored for display purposes.
+
+### Account lockout
+
+After 5 consecutive failed login attempts, the account is locked for 15 minutes. The counter resets on successful login.
+Lockout is enforced at the repository layer (thread-safe).
 
 ### Loopback port binding + reverse proxy expected
 
@@ -138,14 +151,19 @@ For the sake of informed consent:
 - **Storage at rest** is not encrypted. If you need encryption at rest, put the bind-mount parent directory on an
   encrypted volume (APFS encrypted, LUKS, ZFS native encryption) or migrate the SQLite file to SQLCipher.
 - **Backup encryption** is the user's responsibility — see above.
-- **Rate limiting** on expensive endpoints (OCR, transcription, embeddings) is not implemented. A legitimate client with
-  the bearer token that runs wild could burn API credits. The bearer token is the only gate.
+- **App-level rate limiting** on auth endpoints is not yet implemented (Traefik handles network-level rate limiting).
+  See [security-roadmap.md](security-roadmap.md) Tier 2 for planned improvements.
+- **Password complexity** is minimal (8–1024 chars, no other constraints). See security roadmap Tier 2.
+- **Password reset tokens** are stateless (itsdangerous) and can be reused within the 30-minute window. See security
+  roadmap Tier 2.
 
 ## Security-relevant files
 
-- `src/journal/auth.py` — `BearerTokenMiddleware`
+- `src/journal/auth.py` — `SessionOrKeyBackend`, `RequireAuthMiddleware`, contextvar propagation for MCP tools
+- `src/journal/services/auth.py` — `AuthService` (password hashing, session management, API keys, token signing)
+- `src/journal/db/user_repository.py` — user, session, and API key persistence
 - `src/journal/mcp_server.py` — DNS rebinding config, middleware wiring, fail-closed startup check
 - `src/journal/services/ingestion.py` — `_validate_public_url` SSRF check
-- `src/journal/config.py` — `api_bearer_token`, `mcp_allowed_hosts`
+- `src/journal/config.py` — `secret_key`, `mcp_allowed_hosts`
 - `docker-compose.yml` — loopback port binding, ChromaDB isolation
-- `.env.example` — auth token requirement and allowed hosts default
+- `docs/security-roadmap.md` — prioritised list of remaining security improvements

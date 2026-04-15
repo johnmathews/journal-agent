@@ -31,10 +31,11 @@ The frontend checks `GET /api/auth/config` to show/hide the registration link.
 ## Login Flow (Web)
 
 1. User submits email + password to `POST /api/auth/login`
-2. Server verifies via Argon2id, creates a session row in `user_sessions`
-3. Response includes `Set-Cookie: session_id=<token>; HttpOnly; Secure; SameSite=Lax`
-4. All subsequent requests automatically include the cookie
-5. Sessions expire after 7 days (configurable via `SESSION_EXPIRY_DAYS`)
+2. Server verifies via Argon2id, generates a random session token (`secrets.token_urlsafe(32)`)
+3. Only the SHA-256 hash of the token is stored in `user_sessions.id` — the raw token is never persisted
+4. Response includes `Set-Cookie: session_id=<raw_token>; HttpOnly; Secure; SameSite=Lax`
+5. On each request, the middleware hashes the cookie value and looks up the hash in the DB
+6. Sessions expire after 7 days (configurable via `SESSION_EXPIRY_DAYS`)
 
 ## Login Flow (MCP / API)
 

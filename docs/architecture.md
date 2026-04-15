@@ -213,7 +213,7 @@ local database operations. No LLM is involved in any query path — see "How Sea
 
 ### SQLite
 
-- `entries` — Core table (date, source_type, raw_text, final_text, word_count, chunk_count)
+- `entries` — Core table (user_id, date, source_type, raw_text, final_text, word_count, chunk_count)
 - `entry_pages` — Per-page OCR text for multi-page entries (entry_id, page_number, raw_text, source_file_id)
 - `entry_chunks` — Per-chunk text with character offsets into the source (entry_id, chunk_index, chunk_text, char_start,
   char_end, token_count). Populated at ingestion time (migration 0003); used by the webapp chunk-overlay feature and by
@@ -228,7 +228,7 @@ local database operations. No LLM is involved in any query path — see "How Sea
 - Single collection `journal_entries` with cosine distance
 - Documents: text chunks from entries
 - Embeddings: 1024-dimensional OpenAI vectors
-- Metadata: `entry_id`, `entry_date`, `chunk_index`
+- Metadata: `entry_id`, `entry_date`, `chunk_index`, `user_id`
 
 ## Initialization
 
