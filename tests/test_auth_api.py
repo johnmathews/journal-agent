@@ -529,6 +529,64 @@ class TestVerifyEmail:
         assert resp.status_code == 400
         assert resp.json()["error"] == "missing_token"
 
+    def test_verify_email_post_not_allowed(self, client: TestClient) -> None:
+        """Regression: webapp previously sent POST — server only accepts GET."""
+        resp = client.post(
+            "/api/auth/verify-email",
+            json={"token": "some-token"},
+        )
+        assert resp.status_code == 405
+
+    def test_full_register_verify_access_flow(
+        self,
+        client: TestClient,
+        auth_service: AuthService,
+        user_repo: SQLiteUserRepository,
+    ) -> None:
+        """Regression: full register → verify → access protected endpoint flow.
+
+        Previously, email verification never completed because:
+        1. The webapp router redirected authenticated users away from /verify-email
+        2. The webapp sent POST instead of GET
+        3. The auth store wasn't refreshed after verification
+
+        This test ensures the server-side flow works end-to-end: register a user,
+        confirm they get 403 on protected endpoints, verify their email, then
+        confirm they get 200.
+        """
+        # Register and get session
+        resp = client.post(
+            "/api/auth/register",
+            json={
+                "email": "newuser@example.com",
+                "password": "securepassword",
+                "display_name": "New User",
+            },
+        )
+        assert resp.status_code == 201
+        session_id = resp.cookies.get("session_id")
+        assert session_id
+
+        # Make user admin so we can test a real protected endpoint
+        user = user_repo.get_user_by_email("newuser@example.com")
+        assert user is not None
+        user_repo.update_user(user.id, is_admin=True)
+
+        # Unverified user gets 403 on protected endpoints
+        client.cookies.set("session_id", session_id)
+        resp = client.get("/api/admin/users")
+        assert resp.status_code == 403
+        assert resp.json()["message"] == "Please verify your email"
+
+        # Generate verification token and verify via GET
+        token = auth_service.generate_verification_token("newuser@example.com")
+        resp = client.get(f"/api/auth/verify-email?token={token}")
+        assert resp.status_code == 200
+
+        # Now the same session should have access
+        resp = client.get("/api/admin/users")
+        assert resp.status_code == 200
+
 
 # ---------------------------------------------------------------------------
 # Resend verification tests
