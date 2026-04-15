@@ -1808,7 +1808,7 @@ def register_api_routes(
             offset = 0
 
         mentions = entity_store.get_mentions_for_entity(
-            entity_id, limit=limit, offset=offset
+            entity_id, limit=limit, offset=offset, user_id=user_id,
         )
         mention_payload: list[dict[str, Any]] = []
         for m in mentions:
@@ -1850,7 +1850,7 @@ def register_api_routes(
             )
 
         outgoing, incoming = entity_store.get_relationships_for_entity(
-            entity_id
+            entity_id, user_id=user_id,
         )
         log.info(
             "GET /api/entities/%d/relationships — %d out, %d in",
@@ -2045,9 +2045,8 @@ def register_api_routes(
             limit = 50
 
         candidates = entity_store.list_merge_candidates(
-            status=status, limit=limit
+            status=status, limit=limit, user_id=user_id,
         )
-        # Filter to only show candidates where both entities belong to the user
         items = [
             {
                 "id": c.id,
@@ -2059,7 +2058,6 @@ def register_api_routes(
                 "created_at": c.created_at,
             }
             for c in candidates
-            if c.entity_a.user_id == user_id and c.entity_b.user_id == user_id
         ]
         log.info(
             "GET /api/entities/merge-candidates — %d candidates", len(items)
@@ -2080,6 +2078,8 @@ def register_api_routes(
                 {"error": "Server not initialized"}, status_code=503
             )
         entity_store: EntityStore = services["entity_store"]
+        user = get_authenticated_user(request)
+        user_id = user.user_id
         candidate_id = int(request.path_params["candidate_id"])
 
         try:
@@ -2094,6 +2094,15 @@ def register_api_routes(
             return JSONResponse(
                 {"error": "'status' must be 'accepted' or 'dismissed'"},
                 status_code=400,
+            )
+
+        # Verify the user owns both entities in the candidate
+        candidates = entity_store.list_merge_candidates(
+            status="pending", limit=1000, user_id=user_id,
+        )
+        if not any(c.id == candidate_id for c in candidates):
+            return JSONResponse(
+                {"error": "Merge candidate not found"}, status_code=404
             )
 
         try:

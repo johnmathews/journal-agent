@@ -108,6 +108,7 @@ _MOOD_BACKFILL_KEYS: dict[str, type | tuple[type, ...]] = {
     "mode": str,
     "start_date": str,
     "end_date": str,
+    "user_id": int,
 }
 
 _MOOD_BACKFILL_MODES = frozenset({"stale-only", "force"})
@@ -251,20 +252,23 @@ class JobRunner:
         and `end_date`. Unknown keys or wrong types raise
         `ValueError` before a row is inserted.
         """
+        run_params = {**params}
+        if user_id is not None:
+            run_params["user_id"] = user_id
         _validate_params(
-            params, _MOOD_BACKFILL_KEYS, job_type="mood_backfill"
+            run_params, _MOOD_BACKFILL_KEYS, job_type="mood_backfill"
         )
-        if "mode" not in params:
+        if "mode" not in run_params:
             raise ValueError(
                 "Param 'mode' is required for mood_backfill"
             )
-        if params["mode"] not in _MOOD_BACKFILL_MODES:
+        if run_params["mode"] not in _MOOD_BACKFILL_MODES:
             raise ValueError(
                 f"Param 'mode' must be one of "
-                f"{sorted(_MOOD_BACKFILL_MODES)}, got {params['mode']!r}"
+                f"{sorted(_MOOD_BACKFILL_MODES)}, got {run_params['mode']!r}"
             )
-        job = self._jobs.create("mood_backfill", params, user_id=user_id)
-        self._executor.submit(self._run_mood_backfill, job.id, params)
+        job = self._jobs.create("mood_backfill", run_params, user_id=user_id)
+        self._executor.submit(self._run_mood_backfill, job.id, run_params)
         return job
 
     def submit_image_ingestion(
@@ -606,6 +610,7 @@ class JobRunner:
                 start_date=params.get("start_date"),
                 end_date=params.get("end_date"),
                 on_progress=progress_callback,
+                user_id=params.get("user_id"),
             )
 
             summary: dict[str, Any] = {

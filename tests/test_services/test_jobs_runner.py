@@ -123,6 +123,7 @@ class FakeMoodBackfill:
         start_date: str | None = None,
         end_date: str | None = None,
         on_progress: Callable[[int, int], None] | None = None,
+        user_id: int | None = None,
     ) -> MoodBackfillResult:
         self.calls.append(
             {

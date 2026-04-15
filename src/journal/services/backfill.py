@@ -185,6 +185,7 @@ def backfill_mood_scores(
     prune_retired: bool = False,
     dry_run: bool = False,
     on_progress: Callable[[int, int], None] | None = None,
+    user_id: int | None = None,
 ) -> MoodBackfillResult:
     """Backfill mood scores against the currently-loaded dimensions.
 
@@ -261,13 +262,16 @@ def backfill_mood_scores(
 
     # Pick the target entry set.
     if mode == "stale-only":
-        entry_ids = repository.get_entries_missing_mood_scores(dim_names)
+        entry_ids = repository.get_entries_missing_mood_scores(
+            dim_names, user_id=user_id,
+        )
     else:
         # Force mode: every entry (optionally date-windowed).
         entries = repository.list_entries(
             start_date=start_date,
             end_date=end_date,
             limit=1_000_000,
+            user_id=user_id,
         )
         entry_ids = [e.id for e in entries]
 

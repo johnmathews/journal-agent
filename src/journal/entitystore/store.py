@@ -89,7 +89,8 @@ class EntityStore(Protocol):
     ) -> EntityMention: ...
 
     def get_mentions_for_entity(
-        self, entity_id: int, limit: int = 50, offset: int = 0
+        self, entity_id: int, limit: int = 50, offset: int = 0,
+        user_id: int | None = None,
     ) -> list[EntityMention]: ...
 
     def get_mentions_for_entry(
@@ -110,7 +111,7 @@ class EntityStore(Protocol):
     ) -> EntityRelationship: ...
 
     def get_relationships_for_entity(
-        self, entity_id: int
+        self, entity_id: int, user_id: int | None = None,
     ) -> tuple[list[EntityRelationship], list[EntityRelationship]]: ...
 
     def get_relationships_for_entry(
@@ -152,7 +153,8 @@ class EntityStore(Protocol):
     ) -> None: ...
 
     def list_merge_candidates(
-        self, status: str = "pending", limit: int = 50
+        self, status: str = "pending", limit: int = 50,
+        user_id: int | None = None,
     ) -> list[MergeCandidate]: ...
 
     def resolve_merge_candidate(
@@ -422,13 +424,24 @@ class SQLiteEntityStore:
         return _row_to_mention(row)
 
     def get_mentions_for_entity(
-        self, entity_id: int, limit: int = 50, offset: int = 0
+        self, entity_id: int, limit: int = 50, offset: int = 0,
+        user_id: int | None = None,
     ) -> list[EntityMention]:
-        rows = self._conn.execute(
-            "SELECT * FROM entity_mentions WHERE entity_id = ?"
-            " ORDER BY created_at DESC, id DESC LIMIT ? OFFSET ?",
-            (entity_id, limit, offset),
-        ).fetchall()
+        if user_id is not None:
+            sql = (
+                "SELECT m.* FROM entity_mentions m"
+                " JOIN entries e ON e.id = m.entry_id"
+                " WHERE m.entity_id = ? AND e.user_id = ?"
+                " ORDER BY m.created_at DESC, m.id DESC LIMIT ? OFFSET ?"
+            )
+            params: tuple[object, ...] = (entity_id, user_id, limit, offset)
+        else:
+            sql = (
+                "SELECT * FROM entity_mentions WHERE entity_id = ?"
+                " ORDER BY created_at DESC, id DESC LIMIT ? OFFSET ?"
+            )
+            params = (entity_id, limit, offset)
+        rows = self._conn.execute(sql, params).fetchall()
         return [_row_to_mention(r) for r in rows]
 
     def get_mentions_for_entry(
@@ -484,18 +497,35 @@ class SQLiteEntityStore:
         return _row_to_relationship(row)
 
     def get_relationships_for_entity(
-        self, entity_id: int
+        self, entity_id: int, user_id: int | None = None,
     ) -> tuple[list[EntityRelationship], list[EntityRelationship]]:
-        outgoing_rows = self._conn.execute(
-            "SELECT * FROM entity_relationships"
-            " WHERE subject_entity_id = ? ORDER BY id",
-            (entity_id,),
-        ).fetchall()
-        incoming_rows = self._conn.execute(
-            "SELECT * FROM entity_relationships"
-            " WHERE object_entity_id = ? ORDER BY id",
-            (entity_id,),
-        ).fetchall()
+        if user_id is not None:
+            # Filter to relationships whose entry belongs to this user.
+            outgoing_rows = self._conn.execute(
+                "SELECT r.* FROM entity_relationships r"
+                " JOIN entries e ON e.id = r.entry_id"
+                " WHERE r.subject_entity_id = ? AND e.user_id = ?"
+                " ORDER BY r.id",
+                (entity_id, user_id),
+            ).fetchall()
+            incoming_rows = self._conn.execute(
+                "SELECT r.* FROM entity_relationships r"
+                " JOIN entries e ON e.id = r.entry_id"
+                " WHERE r.object_entity_id = ? AND e.user_id = ?"
+                " ORDER BY r.id",
+                (entity_id, user_id),
+            ).fetchall()
+        else:
+            outgoing_rows = self._conn.execute(
+                "SELECT * FROM entity_relationships"
+                " WHERE subject_entity_id = ? ORDER BY id",
+                (entity_id,),
+            ).fetchall()
+            incoming_rows = self._conn.execute(
+                "SELECT * FROM entity_relationships"
+                " WHERE object_entity_id = ? ORDER BY id",
+                (entity_id,),
+            ).fetchall()
         return (
             [_row_to_relationship(r) for r in outgoing_rows],
             [_row_to_relationship(r) for r in incoming_rows],
@@ -708,13 +738,25 @@ class SQLiteEntityStore:
         self._conn.commit()
 
     def list_merge_candidates(
-        self, status: str = "pending", limit: int = 50
+        self, status: str = "pending", limit: int = 50,
+        user_id: int | None = None,
     ) -> list[MergeCandidate]:
-        rows = self._conn.execute(
-            "SELECT * FROM entity_merge_candidates"
-            " WHERE status = ? ORDER BY similarity DESC LIMIT ?",
-            (status, limit),
-        ).fetchall()
+        if user_id is not None:
+            # Filter at DB level: both entities must belong to the user.
+            rows = self._conn.execute(
+                "SELECT c.* FROM entity_merge_candidates c"
+                " JOIN entities ea ON ea.id = c.entity_id_a"
+                " JOIN entities eb ON eb.id = c.entity_id_b"
+                " WHERE c.status = ? AND ea.user_id = ? AND eb.user_id = ?"
+                " ORDER BY c.similarity DESC LIMIT ?",
+                (status, user_id, user_id, limit),
+            ).fetchall()
+        else:
+            rows = self._conn.execute(
+                "SELECT * FROM entity_merge_candidates"
+                " WHERE status = ? ORDER BY similarity DESC LIMIT ?",
+                (status, limit),
+            ).fetchall()
         candidates: list[MergeCandidate] = []
         for row in rows:
             entity_a = self.get_entity(row["entity_id_a"])
