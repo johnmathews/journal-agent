@@ -285,7 +285,9 @@ class JobRunner:
         self._executor.submit(self._run_image_ingestion, job.id, params)
         return job
 
-    def submit_mood_score_entry(self, entry_id: int) -> Job:
+    def submit_mood_score_entry(
+        self, entry_id: int, *, user_id: int | None = None,
+    ) -> Job:
         """Queue a mood-scoring job for a single entry.
 
         Lighter than a full backfill — scores one entry and returns.
@@ -294,11 +296,13 @@ class JobRunner:
         """
         params = {"entry_id": entry_id}
         _validate_params(params, _MOOD_SCORE_ENTRY_KEYS, job_type="mood_score_entry")
-        job = self._jobs.create("mood_score_entry", params)
+        job = self._jobs.create("mood_score_entry", params, user_id=user_id)
         self._executor.submit(self._run_mood_score_entry, job.id, params)
         return job
 
-    def submit_reprocess_embeddings(self, entry_id: int) -> Job:
+    def submit_reprocess_embeddings(
+        self, entry_id: int, *, user_id: int | None = None,
+    ) -> Job:
         """Queue a re-embedding job for an entry after text is saved.
 
         Re-chunks the entry's text, calls the embedding provider, and
@@ -307,7 +311,7 @@ class JobRunner:
         """
         params = {"entry_id": entry_id}
         _validate_params(params, _REPROCESS_EMBEDDINGS_KEYS, job_type="reprocess_embeddings")
-        job = self._jobs.create("reprocess_embeddings", params)
+        job = self._jobs.create("reprocess_embeddings", params, user_id=user_id)
         self._executor.submit(self._run_reprocess_embeddings, job.id, params)
         return job
 

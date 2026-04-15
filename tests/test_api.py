@@ -476,7 +476,7 @@ class TestUpdateEntry:
         data = response.json()
         assert data["entity_extraction_job_id"] == "test-job-123"
         mock_runner.submit_entity_extraction.assert_called_once_with(
-            {"entry_id": entry.id}
+            {"entry_id": entry.id}, user_id=_TEST_USER_ID,
         )
 
     def test_patch_date_only_does_not_queue_extraction(

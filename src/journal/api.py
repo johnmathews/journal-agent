@@ -380,7 +380,7 @@ def register_api_routes(
             job_runner: JobRunner | None = services.get("job_runner")
             if job_runner is not None:
                 try:
-                    job = job_runner.submit_reprocess_embeddings(entry_id)
+                    job = job_runner.submit_reprocess_embeddings(entry_id, user_id=user_id)
                     reprocess_job_id = job.id
                     log.info(
                         "PATCH /api/entries/%d — queued reprocess-embeddings job %s",
@@ -396,7 +396,7 @@ def register_api_routes(
 
                 try:
                     job = job_runner.submit_entity_extraction(
-                        {"entry_id": entry_id}
+                        {"entry_id": entry_id}, user_id=user_id,
                     )
                     entity_extraction_job_id = job.id
                     log.info(
@@ -414,7 +414,7 @@ def register_api_routes(
                 config = services.get("config")
                 if config and config.enable_mood_scoring:
                     try:
-                        mood_job = job_runner.submit_mood_score_entry(entry_id)
+                        mood_job = job_runner.submit_mood_score_entry(entry_id, user_id=user_id)
                         mood_job_id = mood_job.id
                         log.info(
                             "PATCH /api/entries/%d — queued mood re-scoring job %s",
@@ -1198,7 +1198,7 @@ def register_api_routes(
         job_runner: JobRunner = services["job_runner"]
         if config and config.enable_mood_scoring:
             try:
-                mood_job = job_runner.submit_mood_score_entry(entry.id)
+                mood_job = job_runner.submit_mood_score_entry(entry.id, user_id=user_id)
                 mood_job_id = mood_job.id
             except Exception:
                 log.warning(
@@ -1206,7 +1206,7 @@ def register_api_routes(
                     exc_info=True,
                 )
         try:
-            ej = job_runner.submit_entity_extraction({"entry_id": entry.id})
+            ej = job_runner.submit_entity_extraction({"entry_id": entry.id}, user_id=user_id)
             entity_extraction_job_id = ej.id
         except Exception:
             log.warning(
@@ -1315,7 +1315,7 @@ def register_api_routes(
         job_runner: JobRunner = services["job_runner"]
         if config and config.enable_mood_scoring:
             try:
-                mood_job = job_runner.submit_mood_score_entry(entry.id)
+                mood_job = job_runner.submit_mood_score_entry(entry.id, user_id=user_id)
                 mood_job_id = mood_job.id
             except Exception:
                 log.warning(
@@ -1323,7 +1323,7 @@ def register_api_routes(
                     exc_info=True,
                 )
         try:
-            ej = job_runner.submit_entity_extraction({"entry_id": entry.id})
+            ej = job_runner.submit_entity_extraction({"entry_id": entry.id}, user_id=user_id)
             entity_extraction_job_id = ej.id
         except Exception:
             log.warning(
