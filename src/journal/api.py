@@ -78,10 +78,7 @@ def _entry_to_dict(
         "doubts_verified": verified,
         "uncertain_spans": []
         if verified
-        else [
-            {"char_start": start, "char_end": end}
-            for start, end in (uncertain_spans or [])
-        ],
+        else [{"char_start": start, "char_end": end} for start, end in (uncertain_spans or [])],
     }
 
 
@@ -171,7 +168,9 @@ def _job_to_dict(job: Job) -> dict[str, Any]:
 
 
 def _entry_summary(
-    entry: Any, page_count: int = 0, uncertain_span_count: int = 0,
+    entry: Any,
+    page_count: int = 0,
+    uncertain_span_count: int = 0,
 ) -> dict[str, Any]:
     """Convert an Entry to a summary dict (no text fields)."""
     return {
@@ -226,9 +225,7 @@ def register_api_routes(
         services = services_getter()
         if services is None:
             log.error("GET /api/entries — services not initialized")
-            return JSONResponse(
-                {"error": "Server not initialized"}, status_code=503
-            )
+            return JSONResponse({"error": "Server not initialized"}, status_code=503)
 
         query_svc: QueryService = services["query"]
         user = get_authenticated_user(request)
@@ -256,12 +253,14 @@ def register_api_routes(
             items.append(_entry_summary(entry, page_count, span_count))
 
         log.info("GET /api/entries — returned %d/%d entries (offset=%d)", len(items), total, offset)
-        return JSONResponse({
-            "items": items,
-            "total": total,
-            "limit": limit,
-            "offset": offset,
-        })
+        return JSONResponse(
+            {
+                "items": items,
+                "total": total,
+                "limit": limit,
+                "offset": offset,
+            }
+        )
 
     @mcp.custom_route(
         "/api/entries/{entry_id:int}",
@@ -272,9 +271,7 @@ def register_api_routes(
         """Get, update, or delete a single journal entry."""
         services = services_getter()
         if services is None:
-            return JSONResponse(
-                {"error": "Server not initialized"}, status_code=503
-            )
+            return JSONResponse({"error": "Server not initialized"}, status_code=503)
 
         entry_id = int(request.path_params["entry_id"])
         user = get_authenticated_user(request)
@@ -287,18 +284,14 @@ def register_api_routes(
         elif request.method == "DELETE":
             return await _delete_entry(services, entry_id, user_id)
         else:
-            return JSONResponse(
-                {"error": "Method not allowed"}, status_code=405
-            )
+            return JSONResponse({"error": "Method not allowed"}, status_code=405)
 
     async def _get_entry(services: dict, entry_id: int, user_id: int) -> JSONResponse:
         query_svc: QueryService = services["query"]
         entry = query_svc._repo.get_entry(entry_id, user_id=user_id)
         if entry is None:
             log.warning("GET /api/entries/%d — not found", entry_id)
-            return JSONResponse(
-                {"error": f"Entry {entry_id} not found"}, status_code=404
-            )
+            return JSONResponse({"error": f"Entry {entry_id} not found"}, status_code=404)
         page_count = query_svc._repo.get_page_count(entry_id)
         uncertain_spans = query_svc._repo.get_uncertain_spans(entry_id)
         log.info("GET /api/entries/%d — %s, %d words", entry_id, entry.entry_date, entry.word_count)
@@ -313,17 +306,13 @@ def register_api_routes(
         # Verify entry exists
         entry = query_svc._repo.get_entry(entry_id, user_id=user_id)
         if entry is None:
-            return JSONResponse(
-                {"error": f"Entry {entry_id} not found"}, status_code=404
-            )
+            return JSONResponse({"error": f"Entry {entry_id} not found"}, status_code=404)
 
         # Parse request body
         try:
             body = await request.json()
         except (json.JSONDecodeError, ValueError):
-            return JSONResponse(
-                {"error": "Invalid JSON body"}, status_code=400
-            )
+            return JSONResponse({"error": "Invalid JSON body"}, status_code=400)
 
         final_text = body.get("final_text")
         new_date = body.get("entry_date")
@@ -345,6 +334,7 @@ def register_api_routes(
                 )
             try:
                 import datetime as dt
+
                 dt.date.fromisoformat(new_date)
             except ValueError:
                 return JSONResponse(
@@ -396,7 +386,8 @@ def register_api_routes(
 
                 try:
                     job = job_runner.submit_entity_extraction(
-                        {"entry_id": entry_id}, user_id=user_id,
+                        {"entry_id": entry_id},
+                        user_id=user_id,
                     )
                     entity_extraction_job_id = job.id
                     log.info(
@@ -445,9 +436,7 @@ def register_api_routes(
         deleted = ingestion_svc.delete_entry(entry_id, user_id=user_id)
         if not deleted:
             log.warning("DELETE /api/entries/%d — not found", entry_id)
-            return JSONResponse(
-                {"error": f"Entry {entry_id} not found"}, status_code=404
-            )
+            return JSONResponse({"error": f"Entry {entry_id} not found"}, status_code=404)
         log.info("DELETE /api/entries/%d — deleted", entry_id)
         return JSONResponse({"deleted": True, "id": entry_id})
 
@@ -466,9 +455,7 @@ def register_api_routes(
         """
         services = services_getter()
         if services is None:
-            return JSONResponse(
-                {"error": "Server not initialized"}, status_code=503
-            )
+            return JSONResponse({"error": "Server not initialized"}, status_code=503)
 
         query_svc: QueryService = services["query"]
         user = get_authenticated_user(request)
@@ -477,21 +464,13 @@ def register_api_routes(
 
         ok = query_svc._repo.verify_doubts(entry_id, user_id=user_id)
         if not ok:
-            log.warning(
-                "POST /api/entries/%d/verify-doubts — not found", entry_id
-            )
-            return JSONResponse(
-                {"error": f"Entry {entry_id} not found"}, status_code=404
-            )
+            log.warning("POST /api/entries/%d/verify-doubts — not found", entry_id)
+            return JSONResponse({"error": f"Entry {entry_id} not found"}, status_code=404)
 
-        log.info(
-            "POST /api/entries/%d/verify-doubts — doubts verified", entry_id
-        )
+        log.info("POST /api/entries/%d/verify-doubts — doubts verified", entry_id)
         entry = query_svc._repo.get_entry(entry_id, user_id=user_id)
         page_count = query_svc._repo.get_page_count(entry_id)
-        return JSONResponse(
-            _entry_to_dict(entry, page_count, uncertain_spans=[])
-        )
+        return JSONResponse(_entry_to_dict(entry, page_count, uncertain_spans=[]))
 
     @mcp.custom_route(
         "/api/entries/{entry_id:int}/chunks",
@@ -508,9 +487,7 @@ def register_api_routes(
         """
         services = services_getter()
         if services is None:
-            return JSONResponse(
-                {"error": "Server not initialized"}, status_code=503
-            )
+            return JSONResponse({"error": "Server not initialized"}, status_code=503)
 
         query_svc: QueryService = services["query"]
         user = get_authenticated_user(request)
@@ -580,9 +557,7 @@ def register_api_routes(
         """
         services = services_getter()
         if services is None:
-            return JSONResponse(
-                {"error": "Server not initialized"}, status_code=503
-            )
+            return JSONResponse({"error": "Server not initialized"}, status_code=503)
 
         query_svc: QueryService = services["query"]
         user = get_authenticated_user(request)
@@ -621,9 +596,7 @@ def register_api_routes(
                 }
             )
 
-        log.info(
-            "GET /api/entries/%d/tokens — %d tokens", entry_id, len(tokens)
-        )
+        log.info("GET /api/entries/%d/tokens — %d tokens", entry_id, len(tokens))
         return JSONResponse(
             {
                 "entry_id": entry_id,
@@ -642,19 +615,13 @@ def register_api_routes(
         """
         services = services_getter()
         if services is None:
-            return JSONResponse(
-                {"error": "Server not initialized"}, status_code=503
-            )
+            return JSONResponse({"error": "Server not initialized"}, status_code=503)
         config = services.get("config")
         if config is None:
-            return JSONResponse(
-                {"error": "Config not available"}, status_code=503
-            )
+            return JSONResponse({"error": "Config not available"}, status_code=503)
         from journal.providers.ocr import _DEFAULT_MODELS
 
-        ocr_model = config.ocr_model or _DEFAULT_MODELS.get(
-            config.ocr_provider, ""
-        )
+        ocr_model = config.ocr_model or _DEFAULT_MODELS.get(config.ocr_provider, "")
         return JSONResponse(
             {
                 "ocr": {
@@ -724,9 +691,7 @@ def register_api_routes(
 
         # Ingestion stats block — pure SQL aggregation.
         try:
-            ingestion = query_svc._repo.get_ingestion_stats(
-                now=datetime.now(UTC)
-            )
+            ingestion = query_svc._repo.get_ingestion_stats(now=datetime.now(UTC))
             ingestion_dict: dict[str, Any] = asdict(ingestion)
         except sqlite3.Error as e:
             log.warning("GET /health — ingestion stats failed: %s", e)
@@ -762,12 +727,8 @@ def register_api_routes(
             check_chromadb(query_svc._vector_store),
         ]
         if config is not None:
-            checks.append(
-                check_api_key("anthropic", config.anthropic_api_key)
-            )
-            checks.append(
-                check_api_key("openai", config.openai_api_key)
-            )
+            checks.append(check_api_key("anthropic", config.anthropic_api_key))
+            checks.append(check_api_key("openai", config.openai_api_key))
 
         status = overall_status(checks)
         log.info(
@@ -800,9 +761,7 @@ def register_api_routes(
         """Get journal statistics."""
         services = services_getter()
         if services is None:
-            return JSONResponse(
-                {"error": "Server not initialized"}, status_code=503
-            )
+            return JSONResponse({"error": "Server not initialized"}, status_code=503)
 
         query_svc: QueryService = services["query"]
         user = get_authenticated_user(request)
@@ -838,9 +797,7 @@ def register_api_routes(
         """
         services = services_getter()
         if services is None:
-            return JSONResponse(
-                {"error": "Server not initialized"}, status_code=503
-            )
+            return JSONResponse({"error": "Server not initialized"}, status_code=503)
 
         query_svc: QueryService = services["query"]
         user = get_authenticated_user(request)
@@ -872,8 +829,7 @@ def register_api_routes(
             )
 
         log.info(
-            "GET /api/dashboard/writing-stats — bin=%s from=%s to=%s "
-            "returned %d non-empty buckets",
+            "GET /api/dashboard/writing-stats — bin=%s from=%s to=%s returned %d non-empty buckets",
             bin_param,
             start_date,
             end_date,
@@ -912,9 +868,7 @@ def register_api_routes(
         """
         services = services_getter()
         if services is None:
-            return JSONResponse(
-                {"error": "Server not initialized"}, status_code=503
-            )
+            return JSONResponse({"error": "Server not initialized"}, status_code=503)
 
         dimensions = services.get("mood_dimensions") or ()
         payload = [
@@ -960,9 +914,7 @@ def register_api_routes(
         """
         services = services_getter()
         if services is None:
-            return JSONResponse(
-                {"error": "Server not initialized"}, status_code=503
-            )
+            return JSONResponse({"error": "Server not initialized"}, status_code=503)
 
         query_svc: QueryService = services["query"]
         user = get_authenticated_user(request)
@@ -998,8 +950,7 @@ def register_api_routes(
             trends = [t for t in trends if t.dimension == dimension_filter]
 
         log.info(
-            "GET /api/dashboard/mood-trends — bin=%s from=%s to=%s "
-            "dim=%s returned %d buckets",
+            "GET /api/dashboard/mood-trends — bin=%s from=%s to=%s dim=%s returned %d buckets",
             bin_param,
             start_date,
             end_date,
@@ -1032,9 +983,7 @@ def register_api_routes(
         """
         services = services_getter()
         if services is None:
-            return JSONResponse(
-                {"error": "Server not initialized"}, status_code=503
-            )
+            return JSONResponse({"error": "Server not initialized"}, status_code=503)
 
         query_svc: QueryService = services["query"]
         user = get_authenticated_user(request)
@@ -1095,9 +1044,7 @@ def register_api_routes(
             # FTS5 raises this on malformed queries (unterminated
             # quotes, bare operators like `AND`, etc.). Surface as a
             # 400 rather than a 500 so clients can tell the user.
-            log.info(
-                "GET /api/search — invalid FTS5 query %r: %s", q, e
-            )
+            log.info("GET /api/search — invalid FTS5 query %r: %s", q, e)
             return JSONResponse(
                 {
                     "error": "invalid_query",
@@ -1147,9 +1094,7 @@ def register_api_routes(
         """
         services = _require_services()
         if services is None:
-            return JSONResponse(
-                {"error": "Server not initialized"}, status_code=503
-            )
+            return JSONResponse({"error": "Server not initialized"}, status_code=503)
 
         ingestion_svc: IngestionService = services["ingestion"]
         user = get_authenticated_user(request)
@@ -1158,9 +1103,7 @@ def register_api_routes(
         try:
             body = await request.json()
         except (json.JSONDecodeError, ValueError):
-            return JSONResponse(
-                {"error": "Invalid JSON body"}, status_code=400
-            )
+            return JSONResponse({"error": "Invalid JSON body"}, status_code=400)
 
         if not isinstance(body, dict):
             return JSONResponse(
@@ -1185,7 +1128,11 @@ def register_api_routes(
 
         try:
             entry = ingestion_svc.ingest_text(
-                text, entry_date, source_type, skip_mood=True, user_id=user_id,
+                text,
+                entry_date,
+                source_type,
+                skip_mood=True,
+                user_id=user_id,
             )
         except ValueError as e:
             log.warning("POST /api/entries/ingest/text — %s", e)
@@ -1217,7 +1164,8 @@ def register_api_routes(
         page_count = ingestion_svc._repo.get_page_count(entry.id)
         log.info(
             "POST /api/entries/ingest/text — created entry %d (%d words)",
-            entry.id, entry.word_count,
+            entry.id,
+            entry.word_count,
         )
         return JSONResponse(
             {
@@ -1246,9 +1194,7 @@ def register_api_routes(
 
         services = _require_services()
         if services is None:
-            return JSONResponse(
-                {"error": "Server not initialized"}, status_code=503
-            )
+            return JSONResponse({"error": "Server not initialized"}, status_code=503)
 
         ingestion_svc: IngestionService = services["ingestion"]
         user = get_authenticated_user(request)
@@ -1301,11 +1247,17 @@ def register_api_routes(
         user_date = fields.get("entry_date")
         text_date = extract_date_from_text(content)
         filename_date = extract_date_from_filename(uploaded.filename)
-        entry_date = text_date or filename_date or user_date or datetime.now(UTC).strftime("%Y-%m-%d")
+        entry_date = (
+            text_date or filename_date or user_date or datetime.now(UTC).strftime("%Y-%m-%d")
+        )
 
         try:
             entry = ingestion_svc.ingest_text(
-                content, entry_date, "imported_text_file", skip_mood=True, user_id=user_id,
+                content,
+                entry_date,
+                "imported_text_file",
+                skip_mood=True,
+                user_id=user_id,
             )
         except ValueError as e:
             log.warning("POST /api/entries/ingest/file — %s", e)
@@ -1314,7 +1266,10 @@ def register_api_routes(
         # Store source file metadata for dedup
         file_hash = hashlib.sha256(uploaded.data).hexdigest()
         ingestion_svc._store_source_file(
-            entry.id, f"upload:{uploaded.filename}", uploaded.content_type, file_hash,
+            entry.id,
+            f"upload:{uploaded.filename}",
+            uploaded.content_type,
+            file_hash,
         )
 
         # Fire async post-ingestion jobs
@@ -1343,7 +1298,9 @@ def register_api_routes(
         page_count = ingestion_svc._repo.get_page_count(entry.id)
         log.info(
             "POST /api/entries/ingest/file — created entry %d from %s (%d words)",
-            entry.id, uploaded.filename, entry.word_count,
+            entry.id,
+            uploaded.filename,
+            entry.word_count,
         )
         return JSONResponse(
             {
@@ -1372,9 +1329,7 @@ def register_api_routes(
 
         services = _require_services()
         if services is None:
-            return JSONResponse(
-                {"error": "Server not initialized"}, status_code=503
-            )
+            return JSONResponse({"error": "Server not initialized"}, status_code=503)
         user = get_authenticated_user(request)
         user_id = user.user_id
 
@@ -1411,9 +1366,7 @@ def register_api_routes(
                 )
             if len(uploaded.data) > max_file_size:
                 return JSONResponse(
-                    {
-                        "error": f"File '{uploaded.filename}' exceeds 10 MB limit"
-                    },
+                    {"error": f"File '{uploaded.filename}' exceeds 10 MB limit"},
                     status_code=400,
                 )
             total_size += len(uploaded.data)
@@ -1435,7 +1388,8 @@ def register_api_routes(
 
         log.info(
             "POST /api/entries/ingest/images — queued job %s (%d images)",
-            job.id, len(images),
+            job.id,
+            len(images),
         )
         return JSONResponse(
             {"job_id": job.id, "status": job.status},
@@ -1462,9 +1416,7 @@ def register_api_routes(
 
         services = _require_services()
         if services is None:
-            return JSONResponse(
-                {"error": "Server not initialized"}, status_code=503
-            )
+            return JSONResponse({"error": "Server not initialized"}, status_code=503)
         user = get_authenticated_user(request)
         user_id = user.user_id
 
@@ -1485,9 +1437,16 @@ def register_api_routes(
             )
 
         allowed_types = {
-            "audio/mpeg", "audio/mp3", "audio/mp4", "audio/wav",
-            "audio/x-wav", "audio/webm", "audio/ogg", "audio/flac",
-            "audio/x-m4a", "audio/m4a",
+            "audio/mpeg",
+            "audio/mp3",
+            "audio/mp4",
+            "audio/wav",
+            "audio/x-wav",
+            "audio/webm",
+            "audio/ogg",
+            "audio/flac",
+            "audio/x-m4a",
+            "audio/m4a",
         }
         max_file_size = 100 * 1024 * 1024  # 100 MB per file (recordings can be long)
         max_total_size = 500 * 1024 * 1024  # 500 MB total
@@ -1505,9 +1464,7 @@ def register_api_routes(
                 )
             if len(uploaded.data) > max_file_size:
                 return JSONResponse(
-                    {
-                        "error": f"File '{uploaded.filename}' exceeds 100 MB limit"
-                    },
+                    {"error": f"File '{uploaded.filename}' exceeds 100 MB limit"},
                     status_code=400,
                 )
             total_size += len(uploaded.data)
@@ -1524,7 +1481,10 @@ def register_api_routes(
         job_runner: JobRunner = services["job_runner"]
         try:
             job = job_runner.submit_audio_ingestion(
-                recordings, entry_date, source_type=source_type, user_id=user_id,
+                recordings,
+                entry_date,
+                source_type=source_type,
+                user_id=user_id,
             )
         except ValueError as e:
             log.warning("POST /api/entries/ingest/audio — %s", e)
@@ -1532,7 +1492,8 @@ def register_api_routes(
 
         log.info(
             "POST /api/entries/ingest/audio — queued job %s (%d recordings)",
-            job.id, len(recordings),
+            job.id,
+            len(recordings),
         )
         return JSONResponse(
             {"job_id": job.id, "status": job.status},
@@ -1564,9 +1525,7 @@ def register_api_routes(
         """
         services = _require_services()
         if services is None:
-            return JSONResponse(
-                {"error": "Server not initialized"}, status_code=503
-            )
+            return JSONResponse({"error": "Server not initialized"}, status_code=503)
         user = get_authenticated_user(request)
         user_id = user.user_id
         job_runner: JobRunner = services["job_runner"]
@@ -1586,9 +1545,7 @@ def register_api_routes(
             log.warning("POST /api/entities/extract — %s", e)
             return JSONResponse({"error": str(e)}, status_code=400)
 
-        log.info(
-            "POST /api/entities/extract — queued job %s", job.id
-        )
+        log.info("POST /api/entities/extract — queued job %s", job.id)
         return JSONResponse(
             {"job_id": job.id, "status": job.status},
             status_code=202,
@@ -1609,9 +1566,7 @@ def register_api_routes(
         """
         services = _require_services()
         if services is None:
-            return JSONResponse(
-                {"error": "Server not initialized"}, status_code=503
-            )
+            return JSONResponse({"error": "Server not initialized"}, status_code=503)
         user = get_authenticated_user(request)
         user_id = user.user_id
         job_runner: JobRunner = services["job_runner"]
@@ -1646,9 +1601,7 @@ def register_api_routes(
         """List jobs with optional filters, ordered newest first."""
         services = _require_services()
         if services is None:
-            return JSONResponse(
-                {"error": "Server not initialized"}, status_code=503
-            )
+            return JSONResponse({"error": "Server not initialized"}, status_code=503)
         user = get_authenticated_user(request)
         user_id = None if user.is_admin else user.user_id
         job_repository: SQLiteJobRepository = services["job_repository"]
@@ -1665,18 +1618,26 @@ def register_api_routes(
             )
 
         jobs, total = job_repository.list_jobs(
-            status=status, job_type=job_type, limit=limit, offset=offset, user_id=user_id,
+            status=status,
+            job_type=job_type,
+            limit=limit,
+            offset=offset,
+            user_id=user_id,
         )
         log.info(
             "GET /api/jobs — %d jobs (total %d, offset %d)",
-            len(jobs), total, offset,
+            len(jobs),
+            total,
+            offset,
         )
-        return JSONResponse({
-            "items": [_job_to_dict(j) for j in jobs],
-            "total": total,
-            "limit": limit,
-            "offset": offset,
-        })
+        return JSONResponse(
+            {
+                "items": [_job_to_dict(j) for j in jobs],
+                "total": total,
+                "limit": limit,
+                "offset": offset,
+            }
+        )
 
     @mcp.custom_route(
         "/api/jobs/{job_id:str}",
@@ -1691,9 +1652,7 @@ def register_api_routes(
         """
         services = _require_services()
         if services is None:
-            return JSONResponse(
-                {"error": "Server not initialized"}, status_code=503
-            )
+            return JSONResponse({"error": "Server not initialized"}, status_code=503)
         user = get_authenticated_user(request)
         user_id = None if user.is_admin else user.user_id
         job_repository: SQLiteJobRepository = services["job_repository"]
@@ -1701,24 +1660,21 @@ def register_api_routes(
         job = job_repository.get(job_id, user_id=user_id)
         if job is None:
             log.info("GET /api/jobs/%s — not found", job_id)
-            return JSONResponse(
-                {"error": "Job not found"}, status_code=404
-            )
+            return JSONResponse({"error": "Job not found"}, status_code=404)
         log.info(
             "GET /api/jobs/%s — status=%s progress=%d/%d",
-            job_id, job.status, job.progress_current, job.progress_total,
+            job_id,
+            job.status,
+            job.progress_current,
+            job.progress_total,
         )
         return JSONResponse(_job_to_dict(job))
 
-    @mcp.custom_route(
-        "/api/entities", methods=["GET"], name="api_list_entities"
-    )
+    @mcp.custom_route("/api/entities", methods=["GET"], name="api_list_entities")
     async def list_entities_route(request: Request) -> JSONResponse:
         services = _require_services()
         if services is None:
-            return JSONResponse(
-                {"error": "Server not initialized"}, status_code=503
-            )
+            return JSONResponse({"error": "Server not initialized"}, status_code=503)
         entity_store: EntityStore = services["entity_store"]
         user = get_authenticated_user(request)
         user_id = user.user_id
@@ -1735,21 +1691,21 @@ def register_api_routes(
             offset = 0
 
         rows = entity_store.list_entities_with_mention_counts(
-            entity_type=entity_type, limit=limit, offset=offset, user_id=user_id,
+            entity_type=entity_type,
+            limit=limit,
+            offset=offset,
+            user_id=user_id,
         )
         if search:
             needle = search.strip().lower()
             rows = [
                 (e, c, ls)
                 for e, c, ls in rows
-                if needle in e.canonical_name.lower()
-                or any(needle in a.lower() for a in e.aliases)
+                if needle in e.canonical_name.lower() or any(needle in a.lower() for a in e.aliases)
             ]
         total = entity_store.count_entities(entity_type=entity_type, user_id=user_id)
         items = [_entity_summary(e, c, ls) for e, c, ls in rows]
-        log.info(
-            "GET /api/entities — returned %d/%d entities", len(items), total
-        )
+        log.info("GET /api/entities — returned %d/%d entities", len(items), total)
         return JSONResponse(
             {
                 "items": items,
@@ -1767,9 +1723,7 @@ def register_api_routes(
     async def entity_detail(request: Request) -> JSONResponse:
         services = _require_services()
         if services is None:
-            return JSONResponse(
-                {"error": "Server not initialized"}, status_code=503
-            )
+            return JSONResponse({"error": "Server not initialized"}, status_code=503)
         entity_store: EntityStore = services["entity_store"]
         user = get_authenticated_user(request)
         user_id = user.user_id
@@ -1778,9 +1732,7 @@ def register_api_routes(
         entity = entity_store.get_entity(entity_id, user_id=user_id)
         if entity is None:
             log.warning("GET /api/entities/%d — not found", entity_id)
-            return JSONResponse(
-                {"error": f"Entity {entity_id} not found"}, status_code=404
-            )
+            return JSONResponse({"error": f"Entity {entity_id} not found"}, status_code=404)
         log.info("GET /api/entities/%d — %s", entity_id, entity.canonical_name)
         return JSONResponse(_entity_detail(entity))
 
@@ -1792,9 +1744,7 @@ def register_api_routes(
     async def entity_mentions(request: Request) -> JSONResponse:
         services = _require_services()
         if services is None:
-            return JSONResponse(
-                {"error": "Server not initialized"}, status_code=503
-            )
+            return JSONResponse({"error": "Server not initialized"}, status_code=503)
         entity_store: EntityStore = services["entity_store"]
         query_svc: QueryService = services["query"]
         user = get_authenticated_user(request)
@@ -1803,9 +1753,7 @@ def register_api_routes(
 
         entity = entity_store.get_entity(entity_id, user_id=user_id)
         if entity is None:
-            return JSONResponse(
-                {"error": f"Entity {entity_id} not found"}, status_code=404
-            )
+            return JSONResponse({"error": f"Entity {entity_id} not found"}, status_code=404)
 
         try:
             limit = min(int(request.query_params.get("limit", "50")), 200)
@@ -1817,7 +1765,10 @@ def register_api_routes(
             offset = 0
 
         mentions = entity_store.get_mentions_for_entity(
-            entity_id, limit=limit, offset=offset, user_id=user_id,
+            entity_id,
+            limit=limit,
+            offset=offset,
+            user_id=user_id,
         )
         mention_payload: list[dict[str, Any]] = []
         for m in mentions:
@@ -1826,7 +1777,8 @@ def register_api_routes(
             mention_payload.append(_mention_dict(m, entry_date))
         log.info(
             "GET /api/entities/%d/mentions — %d mentions",
-            entity_id, len(mention_payload),
+            entity_id,
+            len(mention_payload),
         )
         return JSONResponse(
             {
@@ -1844,9 +1796,7 @@ def register_api_routes(
     async def entity_relationships(request: Request) -> JSONResponse:
         services = _require_services()
         if services is None:
-            return JSONResponse(
-                {"error": "Server not initialized"}, status_code=503
-            )
+            return JSONResponse({"error": "Server not initialized"}, status_code=503)
         entity_store: EntityStore = services["entity_store"]
         user = get_authenticated_user(request)
         user_id = user.user_id
@@ -1854,16 +1804,17 @@ def register_api_routes(
 
         entity = entity_store.get_entity(entity_id, user_id=user_id)
         if entity is None:
-            return JSONResponse(
-                {"error": f"Entity {entity_id} not found"}, status_code=404
-            )
+            return JSONResponse({"error": f"Entity {entity_id} not found"}, status_code=404)
 
         outgoing, incoming = entity_store.get_relationships_for_entity(
-            entity_id, user_id=user_id,
+            entity_id,
+            user_id=user_id,
         )
         log.info(
             "GET /api/entities/%d/relationships — %d out, %d in",
-            entity_id, len(outgoing), len(incoming),
+            entity_id,
+            len(outgoing),
+            len(incoming),
         )
         return JSONResponse(
             {
@@ -1883,9 +1834,7 @@ def register_api_routes(
     async def update_entity(request: Request) -> JSONResponse:
         services = _require_services()
         if services is None:
-            return JSONResponse(
-                {"error": "Server not initialized"}, status_code=503
-            )
+            return JSONResponse({"error": "Server not initialized"}, status_code=503)
         entity_store: EntityStore = services["entity_store"]
         user = get_authenticated_user(request)
         user_id = user.user_id
@@ -1894,9 +1843,7 @@ def register_api_routes(
         try:
             body = await request.json()
         except Exception:
-            return JSONResponse(
-                {"error": "Invalid JSON body"}, status_code=400
-            )
+            return JSONResponse({"error": "Invalid JSON body"}, status_code=400)
 
         canonical_name = body.get("canonical_name")
         entity_type = body.get("entity_type")
@@ -1909,9 +1856,7 @@ def register_api_routes(
                 {"error": "'canonical_name' must be a non-empty string"},
                 status_code=400,
             )
-        valid_types = {
-            "person", "place", "activity", "organization", "topic", "other"
-        }
+        valid_types = {"person", "place", "activity", "organization", "topic", "other"}
         if entity_type is not None and entity_type not in valid_types:
             return JSONResponse(
                 {"error": f"'entity_type' must be one of {sorted(valid_types)}"},
@@ -1927,9 +1872,7 @@ def register_api_routes(
                 user_id=user_id,
             )
         except ValueError:
-            return JSONResponse(
-                {"error": f"Entity {entity_id} not found"}, status_code=404
-            )
+            return JSONResponse({"error": f"Entity {entity_id} not found"}, status_code=404)
 
         log.info("PATCH /api/entities/%d — updated", entity_id)
         return JSONResponse(_entity_detail(updated))
@@ -1942,9 +1885,7 @@ def register_api_routes(
     async def delete_entity_route(request: Request) -> JSONResponse:
         services = _require_services()
         if services is None:
-            return JSONResponse(
-                {"error": "Server not initialized"}, status_code=503
-            )
+            return JSONResponse({"error": "Server not initialized"}, status_code=503)
         entity_store: EntityStore = services["entity_store"]
         user = get_authenticated_user(request)
         user_id = user.user_id
@@ -1953,9 +1894,7 @@ def register_api_routes(
         try:
             entity_store.delete_entity(entity_id, user_id=user_id)
         except ValueError:
-            return JSONResponse(
-                {"error": f"Entity {entity_id} not found"}, status_code=404
-            )
+            return JSONResponse({"error": f"Entity {entity_id} not found"}, status_code=404)
 
         log.info("DELETE /api/entities/%d — deleted", entity_id)
         return JSONResponse({"deleted": True, "id": entity_id})
@@ -1968,9 +1907,7 @@ def register_api_routes(
     async def merge_entities_route(request: Request) -> JSONResponse:
         services = _require_services()
         if services is None:
-            return JSONResponse(
-                {"error": "Server not initialized"}, status_code=503
-            )
+            return JSONResponse({"error": "Server not initialized"}, status_code=503)
         entity_store: EntityStore = services["entity_store"]
         user = get_authenticated_user(request)
         user_id = user.user_id
@@ -1978,17 +1915,13 @@ def register_api_routes(
         try:
             body = await request.json()
         except Exception:
-            return JSONResponse(
-                {"error": "Invalid JSON body"}, status_code=400
-            )
+            return JSONResponse({"error": "Invalid JSON body"}, status_code=400)
 
         survivor_id = body.get("survivor_id")
         absorbed_ids = body.get("absorbed_ids")
 
         if not isinstance(survivor_id, int):
-            return JSONResponse(
-                {"error": "'survivor_id' must be an integer"}, status_code=400
-            )
+            return JSONResponse({"error": "'survivor_id' must be an integer"}, status_code=400)
         if (
             not isinstance(absorbed_ids, list)
             or not absorbed_ids
@@ -2001,14 +1934,10 @@ def register_api_routes(
 
         # Verify ownership of all entities before merging
         if entity_store.get_entity(survivor_id, user_id=user_id) is None:
-            return JSONResponse(
-                {"error": f"Entity {survivor_id} not found"}, status_code=404
-            )
+            return JSONResponse({"error": f"Entity {survivor_id} not found"}, status_code=404)
         for aid in absorbed_ids:
             if entity_store.get_entity(aid, user_id=user_id) is None:
-                return JSONResponse(
-                    {"error": f"Entity {aid} not found"}, status_code=404
-                )
+                return JSONResponse({"error": f"Entity {aid} not found"}, status_code=404)
 
         try:
             result = entity_store.merge_entities(survivor_id, absorbed_ids)
@@ -2018,15 +1947,18 @@ def register_api_routes(
         survivor = entity_store.get_entity(survivor_id, user_id=user_id)
         log.info(
             "POST /api/entities/merge — merged %s into %d",
-            absorbed_ids, survivor_id,
+            absorbed_ids,
+            survivor_id,
         )
-        return JSONResponse({
-            "survivor": _entity_detail(survivor) if survivor else None,
-            "absorbed_ids": result.absorbed_ids,
-            "mentions_reassigned": result.mentions_reassigned,
-            "relationships_reassigned": result.relationships_reassigned,
-            "aliases_added": result.aliases_added,
-        })
+        return JSONResponse(
+            {
+                "survivor": _entity_detail(survivor) if survivor else None,
+                "absorbed_ids": result.absorbed_ids,
+                "mentions_reassigned": result.mentions_reassigned,
+                "relationships_reassigned": result.relationships_reassigned,
+                "aliases_added": result.aliases_added,
+            }
+        )
 
     # ---- merge candidates -----------------------------------------------
 
@@ -2040,9 +1972,7 @@ def register_api_routes(
     ) -> JSONResponse:
         services = _require_services()
         if services is None:
-            return JSONResponse(
-                {"error": "Server not initialized"}, status_code=503
-            )
+            return JSONResponse({"error": "Server not initialized"}, status_code=503)
         entity_store: EntityStore = services["entity_store"]
         user = get_authenticated_user(request)
         user_id = user.user_id
@@ -2054,7 +1984,9 @@ def register_api_routes(
             limit = 50
 
         candidates = entity_store.list_merge_candidates(
-            status=status, limit=limit, user_id=user_id,
+            status=status,
+            limit=limit,
+            user_id=user_id,
         )
         items = [
             {
@@ -2068,9 +2000,7 @@ def register_api_routes(
             }
             for c in candidates
         ]
-        log.info(
-            "GET /api/entities/merge-candidates — %d candidates", len(items)
-        )
+        log.info("GET /api/entities/merge-candidates — %d candidates", len(items))
         return JSONResponse({"items": items, "total": len(items)})
 
     @mcp.custom_route(
@@ -2083,9 +2013,7 @@ def register_api_routes(
     ) -> JSONResponse:
         services = _require_services()
         if services is None:
-            return JSONResponse(
-                {"error": "Server not initialized"}, status_code=503
-            )
+            return JSONResponse({"error": "Server not initialized"}, status_code=503)
         entity_store: EntityStore = services["entity_store"]
         user = get_authenticated_user(request)
         user_id = user.user_id
@@ -2094,9 +2022,7 @@ def register_api_routes(
         try:
             body = await request.json()
         except Exception:
-            return JSONResponse(
-                {"error": "Invalid JSON body"}, status_code=400
-            )
+            return JSONResponse({"error": "Invalid JSON body"}, status_code=400)
 
         status = body.get("status")
         if status not in ("accepted", "dismissed"):
@@ -2107,12 +2033,12 @@ def register_api_routes(
 
         # Verify the user owns both entities in the candidate
         candidates = entity_store.list_merge_candidates(
-            status="pending", limit=1000, user_id=user_id,
+            status="pending",
+            limit=1000,
+            user_id=user_id,
         )
         if not any(c.id == candidate_id for c in candidates):
-            return JSONResponse(
-                {"error": "Merge candidate not found"}, status_code=404
-            )
+            return JSONResponse({"error": "Merge candidate not found"}, status_code=404)
 
         try:
             entity_store.resolve_merge_candidate(candidate_id, status)
@@ -2121,7 +2047,8 @@ def register_api_routes(
 
         log.info(
             "PATCH /api/entities/merge-candidates/%d — %s",
-            candidate_id, status,
+            candidate_id,
+            status,
         )
         return JSONResponse({"id": candidate_id, "status": status})
 
@@ -2133,9 +2060,7 @@ def register_api_routes(
     async def entity_merge_history(request: Request) -> JSONResponse:
         services = _require_services()
         if services is None:
-            return JSONResponse(
-                {"error": "Server not initialized"}, status_code=503
-            )
+            return JSONResponse({"error": "Server not initialized"}, status_code=503)
         entity_store: EntityStore = services["entity_store"]
         user = get_authenticated_user(request)
         user_id = user.user_id
@@ -2143,18 +2068,15 @@ def register_api_routes(
 
         entity = entity_store.get_entity(entity_id, user_id=user_id)
         if entity is None:
-            return JSONResponse(
-                {"error": f"Entity {entity_id} not found"}, status_code=404
-            )
+            return JSONResponse({"error": f"Entity {entity_id} not found"}, status_code=404)
 
         history = entity_store.get_merge_history(entity_id)
         log.info(
             "GET /api/entities/%d/merge-history — %d entries",
-            entity_id, len(history),
+            entity_id,
+            len(history),
         )
-        return JSONResponse(
-            {"entity_id": entity_id, "history": history}
-        )
+        return JSONResponse({"entity_id": entity_id, "history": history})
 
     # ---- per-entry entity lookups ---------------------------------------
 
@@ -2166,9 +2088,7 @@ def register_api_routes(
     async def entry_entities(request: Request) -> JSONResponse:
         services = _require_services()
         if services is None:
-            return JSONResponse(
-                {"error": "Server not initialized"}, status_code=503
-            )
+            return JSONResponse({"error": "Server not initialized"}, status_code=503)
         entity_store: EntityStore = services["entity_store"]
         query_svc: QueryService = services["query"]
         user = get_authenticated_user(request)
@@ -2177,18 +2097,14 @@ def register_api_routes(
 
         entry = query_svc._repo.get_entry(entry_id, user_id=user_id)
         if entry is None:
-            return JSONResponse(
-                {"error": f"Entry {entry_id} not found"}, status_code=404
-            )
+            return JSONResponse({"error": f"Entry {entry_id} not found"}, status_code=404)
 
         entities = entity_store.get_entities_for_entry(entry_id)
         mentions = entity_store.get_mentions_for_entry(entry_id)
         mentions_by_entity: dict[int, int] = {}
         quotes_by_entity: dict[int, list[str]] = {}
         for m in mentions:
-            mentions_by_entity[m.entity_id] = (
-                mentions_by_entity.get(m.entity_id, 0) + 1
-            )
+            mentions_by_entity[m.entity_id] = mentions_by_entity.get(m.entity_id, 0) + 1
             quotes_by_entity.setdefault(m.entity_id, [])
             if m.quote not in quotes_by_entity[m.entity_id]:
                 quotes_by_entity[m.entity_id].append(m.quote)
@@ -2200,9 +2116,5 @@ def register_api_routes(
             )
             for e in entities
         ]
-        log.info(
-            "GET /api/entries/%d/entities — %d entities", entry_id, len(items)
-        )
-        return JSONResponse(
-            {"entry_id": entry_id, "items": items, "total": len(items)}
-        )
+        log.info("GET /api/entries/%d/entities — %d entities", entry_id, len(items))
+        return JSONResponse({"entry_id": entry_id, "items": items, "total": len(items)})
