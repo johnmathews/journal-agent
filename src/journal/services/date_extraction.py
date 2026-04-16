@@ -1,4 +1,4 @@
-"""Extract dates from OCR text.
+"""Extract dates from OCR text and filenames.
 
 Handwritten journal pages typically begin with a date in formats like:
   - TUES 17 FEB 2026
@@ -8,8 +8,12 @@ Handwritten journal pages typically begin with a date in formats like:
   - 17/02/2026
   - 2026-02-17
 
-This module searches the first few lines of OCR text for such patterns
-and returns an ISO 8601 date string (YYYY-MM-DD) if found.
+Uploaded filenames may also contain dates:
+  - 2026-03-28_at_the_burrow.md
+  - 2026-03-28.txt
+
+This module searches for such patterns and returns an ISO 8601 date
+string (YYYY-MM-DD) if found.
 """
 
 from __future__ import annotations
@@ -116,5 +120,62 @@ def extract_date_from_text(text: str) -> str | None:
         if result:
             log.info("Extracted date %s from OCR text (DMY numeric)", result)
             return result
+
+    return None
+
+
+# Filename patterns — match YYYY-MM-DD or YYYY_MM_DD at the start of the
+# basename (before extension), with any separator (-, _, .).
+_PAT_FILENAME_ISO = re.compile(r"(\d{4})[-_.](\d{2})[-_.](\d{2})")
+
+# Named-month filename patterns like "28-March-2026" or "28_march_2026"
+_PAT_FILENAME_DMY = re.compile(
+    r"(\d{1,2})[-_.\s]([a-z]{3,9})[-_.\s](\d{4})", re.IGNORECASE
+)
+_PAT_FILENAME_MDY = re.compile(
+    r"([a-z]{3,9})[-_.\s](\d{1,2})[-_.\s](\d{4})", re.IGNORECASE
+)
+
+
+def extract_date_from_filename(filename: str) -> str | None:
+    """Try to extract a date from a filename (with or without extension).
+
+    Strips the directory path and extension, then looks for date patterns.
+    Returns an ISO 8601 date string (YYYY-MM-DD) or None.
+    """
+    import os
+
+    stem = os.path.splitext(os.path.basename(filename))[0]
+
+    # Try ISO-style first (most common for programmatic filenames)
+    m = _PAT_FILENAME_ISO.search(stem)
+    if m:
+        year, month, day = int(m.group(1)), int(m.group(2)), int(m.group(3))
+        result = _safe_date(year, month, day)
+        if result:
+            log.info("Extracted date %s from filename '%s' (ISO)", result, filename)
+            return result
+
+    # Try DMY named: "28-March-2026" or "28_mar_2026"
+    m = _PAT_FILENAME_DMY.search(stem)
+    if m:
+        day, month_str, year = int(m.group(1)), m.group(2).lower(), int(m.group(3))
+        month = _MONTHS.get(month_str[:3])
+        if month:
+            result = _safe_date(year, month, day)
+            if result:
+                log.info("Extracted date %s from filename '%s' (DMY named)", result, filename)
+                return result
+
+    # Try MDY named: "March-28-2026" or "mar_28_2026"
+    m = _PAT_FILENAME_MDY.search(stem)
+    if m:
+        month_str, day, year = m.group(1).lower(), int(m.group(2)), int(m.group(3))
+        month = _MONTHS.get(month_str[:3])
+        if month:
+            result = _safe_date(year, month, day)
+            if result:
+                log.info("Extracted date %s from filename '%s' (MDY named)", result, filename)
+                return result
 
     return None

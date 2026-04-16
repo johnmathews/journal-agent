@@ -1292,7 +1292,16 @@ def register_api_routes(
                 status_code=400,
             )
 
-        entry_date = fields.get("entry_date") or datetime.now(UTC).strftime("%Y-%m-%d")
+        # Date inference: content text > filename > user-provided > today
+        from journal.services.date_extraction import (
+            extract_date_from_filename,
+            extract_date_from_text,
+        )
+
+        user_date = fields.get("entry_date")
+        text_date = extract_date_from_text(content)
+        filename_date = extract_date_from_filename(uploaded.filename)
+        entry_date = text_date or filename_date or user_date or datetime.now(UTC).strftime("%Y-%m-%d")
 
         try:
             entry = ingestion_svc.ingest_text(

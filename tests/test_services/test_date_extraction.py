@@ -1,8 +1,8 @@
-"""Tests for date extraction from OCR text."""
+"""Tests for date extraction from OCR text and filenames."""
 
 from __future__ import annotations
 
-from journal.services.date_extraction import extract_date_from_text
+from journal.services.date_extraction import extract_date_from_filename, extract_date_from_text
 
 
 class TestDMYNamedFormat:
@@ -113,3 +113,64 @@ class TestInvalidDates:
 
     def test_month_13_numeric(self) -> None:
         assert extract_date_from_text("15/13/2026") is None
+
+
+class TestFilenameISOFormat:
+    """Extract dates from ISO-style filenames like '2026-03-28_description.md'."""
+
+    def test_iso_with_underscore_description(self) -> None:
+        assert extract_date_from_filename("2026-03-28_at_the_burrow.md") == "2026-03-28"
+
+    def test_iso_bare(self) -> None:
+        assert extract_date_from_filename("2026-03-28.md") == "2026-03-28"
+
+    def test_iso_with_underscores_as_separator(self) -> None:
+        assert extract_date_from_filename("2026_03_28_notes.txt") == "2026-03-28"
+
+    def test_iso_with_dots_as_separator(self) -> None:
+        assert extract_date_from_filename("2026.03.28.md") == "2026-03-28"
+
+    def test_iso_with_path(self) -> None:
+        assert extract_date_from_filename("/uploads/2026-03-28_entry.md") == "2026-03-28"
+
+    def test_iso_no_extension(self) -> None:
+        assert extract_date_from_filename("2026-03-28") == "2026-03-28"
+
+
+class TestFilenameNamedMonthFormat:
+    """Extract dates from filenames with named months."""
+
+    def test_dmy_named(self) -> None:
+        assert extract_date_from_filename("28-March-2026.md") == "2026-03-28"
+
+    def test_dmy_abbreviated(self) -> None:
+        assert extract_date_from_filename("28_mar_2026_notes.txt") == "2026-03-28"
+
+    def test_mdy_named(self) -> None:
+        assert extract_date_from_filename("March-28-2026.md") == "2026-03-28"
+
+    def test_mdy_abbreviated_underscores(self) -> None:
+        assert extract_date_from_filename("mar_28_2026.txt") == "2026-03-28"
+
+
+class TestFilenameNoDate:
+    """Filenames without recognisable dates return None."""
+
+    def test_plain_name(self) -> None:
+        assert extract_date_from_filename("my_journal_entry.md") is None
+
+    def test_short_numbers(self) -> None:
+        assert extract_date_from_filename("entry_12.txt") is None
+
+    def test_empty_string(self) -> None:
+        assert extract_date_from_filename("") is None
+
+
+class TestFilenameInvalidDate:
+    """Calendar-invalid dates in filenames should return None."""
+
+    def test_feb_30(self) -> None:
+        assert extract_date_from_filename("2026-02-30_notes.md") is None
+
+    def test_month_13(self) -> None:
+        assert extract_date_from_filename("2026-13-01.md") is None
