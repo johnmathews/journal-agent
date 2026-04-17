@@ -263,7 +263,7 @@ class TestBatchJobTools:
         assert result["status"] == "succeeded"
         assert result["job_id"]
         assert result["error_message"] is None
-        assert result["result"]["processed"] == 1
+        assert result["result"]["entries_processed"] == 1
         assert result["result"]["entities_created"] == 2
 
         # The runner recorded the batch call with the right params.
@@ -346,7 +346,7 @@ class TestBatchJobTools:
         assert status["type"] == "entity_extraction"
         assert status["status"] == "succeeded"
         assert status["progress_total"] == 1
-        assert status["result"]["processed"] == 1
+        assert status["result"]["entries_processed"] == 1
         assert status["error_message"] is None
 
 

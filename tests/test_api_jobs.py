@@ -278,7 +278,7 @@ class TestEntityExtractionRoute:
         payload = final.json()
         assert payload["status"] == "succeeded"
         assert payload["type"] == "entity_extraction"
-        assert payload["result"]["processed"] == 1
+        assert payload["result"]["entries_processed"] == 1
         assert payload["result"]["entities_created"] == 3
         assert payload["progress_current"] == 1
         assert payload["progress_total"] == 1

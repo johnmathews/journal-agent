@@ -410,7 +410,7 @@ class JobRunner:
                 )
 
             summary: dict[str, Any] = {
-                "processed": len(results),
+                "entries_processed": len(results),
                 "entities_created": sum(
                     r.entities_created for r in results
                 ),

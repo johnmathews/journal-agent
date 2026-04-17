@@ -347,7 +347,7 @@ class TestEntityExtractionHappyPath:
         assert final.progress_current == 2
         assert final.progress_total == 2
         assert final.result == {
-            "processed": 2,
+            "entries_processed": 2,
             "entities_created": 2,
             "entities_matched": 5,
             "mentions_created": 7,
@@ -382,7 +382,7 @@ class TestEntityExtractionHappyPath:
         assert final.progress_current == 1
         assert final.progress_total == 1
         assert final.result is not None
-        assert final.result["processed"] == 1
+        assert final.result["entries_processed"] == 1
         assert final.result["entities_created"] == 1
         assert extraction.single_calls == [42]
         assert extraction.batch_calls == []
