@@ -186,10 +186,17 @@ def register_auth_routes(
                 status_code=400,
             )
 
-        display_name = body.get("display_name", "").strip() if isinstance(body.get("display_name"), str) else ""
+        display_name = (
+            body.get("display_name", "").strip()
+            if isinstance(body.get("display_name"), str)
+            else ""
+        )
         if not display_name:
             return JSONResponse(
-                {"error": "missing_fields", "message": "display_name is required and must be non-empty"},
+                {
+                    "error": "missing_fields",
+                    "message": "display_name is required and must be non-empty",
+                },
                 status_code=400,
             )
 
@@ -237,15 +244,19 @@ def register_auth_routes(
 
         if not email or not password or not display_name:
             return JSONResponse(
-                {"error": "missing_fields",
-                 "message": "Email, password, and display_name are required"},
+                {
+                    "error": "missing_fields",
+                    "message": "Email, password, and display_name are required",
+                },
                 status_code=400,
             )
 
         if len(password) < 8 or len(password) > 1024:
             return JSONResponse(
-                {"error": "weak_password",
-                 "message": "Password must be between 8 and 1024 characters"},
+                {
+                    "error": "weak_password",
+                    "message": "Password must be between 8 and 1024 characters",
+                },
                 status_code=400,
             )
 
@@ -263,7 +274,9 @@ def register_auth_routes(
             try:
                 token = auth_service.generate_verification_token(email)
                 await email_service.send_verification_email(
-                    email, token, config.app_base_url,
+                    email,
+                    token,
+                    config.app_base_url,
                 )
             except Exception:
                 log.warning("Failed to send verification email to %s", email, exc_info=True)
@@ -297,7 +310,9 @@ def register_auth_routes(
     # ── POST /api/auth/forgot-password ─────────────────────────────────
 
     @mcp.custom_route(
-        "/api/auth/forgot-password", methods=["POST"], name="api_auth_forgot_password",
+        "/api/auth/forgot-password",
+        methods=["POST"],
+        name="api_auth_forgot_password",
     )
     async def auth_forgot_password(request: Request) -> JSONResponse:
         """Request a password-reset email. Always returns 200 to prevent email enumeration."""
@@ -329,7 +344,9 @@ def register_auth_routes(
             try:
                 token = auth_service.generate_reset_token(email)
                 await email_service.send_password_reset_email(
-                    email, token, config.app_base_url,
+                    email,
+                    token,
+                    config.app_base_url,
                 )
                 log.info("Password reset email sent to %s", email)
             except Exception:
@@ -343,7 +360,9 @@ def register_auth_routes(
     # ── GET /api/auth/verify-reset-token ───────────────────────────────
 
     @mcp.custom_route(
-        "/api/auth/verify-reset-token", methods=["GET"], name="api_auth_verify_reset_token",
+        "/api/auth/verify-reset-token",
+        methods=["GET"],
+        name="api_auth_verify_reset_token",
     )
     async def auth_verify_reset_token(request: Request) -> JSONResponse:
         """Check whether a password-reset token is still valid."""
@@ -374,7 +393,9 @@ def register_auth_routes(
     # ── POST /api/auth/reset-password ──────────────────────────────────
 
     @mcp.custom_route(
-        "/api/auth/reset-password", methods=["POST"], name="api_auth_reset_password",
+        "/api/auth/reset-password",
+        methods=["POST"],
+        name="api_auth_reset_password",
     )
     async def auth_reset_password(request: Request) -> JSONResponse:
         """Reset password using a valid reset token."""
@@ -404,8 +425,10 @@ def register_auth_routes(
 
         if len(password) < 8 or len(password) > 1024:
             return JSONResponse(
-                {"error": "weak_password",
-                 "message": "Password must be between 8 and 1024 characters"},
+                {
+                    "error": "weak_password",
+                    "message": "Password must be between 8 and 1024 characters",
+                },
                 status_code=400,
             )
 
@@ -423,7 +446,9 @@ def register_auth_routes(
     # ── GET /api/auth/verify-email ─────────────────────────────────────
 
     @mcp.custom_route(
-        "/api/auth/verify-email", methods=["GET"], name="api_auth_verify_email",
+        "/api/auth/verify-email",
+        methods=["GET"],
+        name="api_auth_verify_email",
     )
     async def auth_verify_email(request: Request) -> JSONResponse:
         """Verify a user's email address using a verification token."""
@@ -479,12 +504,16 @@ def register_auth_routes(
             try:
                 token = auth_service.generate_verification_token(user.email)
                 await email_service.send_verification_email(
-                    user.email, token, config.app_base_url,
+                    user.email,
+                    token,
+                    config.app_base_url,
                 )
                 log.info("Resent verification email to %s", user.email)
             except Exception:
                 log.warning(
-                    "Failed to resend verification email to %s", user.email, exc_info=True,
+                    "Failed to resend verification email to %s",
+                    user.email,
+                    exc_info=True,
                 )
                 return JSONResponse(
                     {"error": "email_failed", "message": "Failed to send verification email"},
@@ -505,7 +534,9 @@ def register_auth_routes(
     # ── POST /api/auth/api-keys ────────────────────────────────────────
 
     @mcp.custom_route(
-        "/api/auth/api-keys", methods=["POST", "GET"], name="api_auth_api_keys",
+        "/api/auth/api-keys",
+        methods=["POST", "GET"],
+        name="api_auth_api_keys",
     )
     async def auth_api_keys(request: Request) -> JSONResponse:
         """Create (POST) or list (GET) API keys for the authenticated user."""
@@ -523,7 +554,9 @@ def register_auth_routes(
             return _list_api_keys(auth_service, user.user_id)
 
     async def _create_api_key(
-        request: Request, auth_service: AuthService, user_id: int,
+        request: Request,
+        auth_service: AuthService,
+        user_id: int,
     ) -> JSONResponse:
         """Handle POST /api/auth/api-keys — generate a new API key."""
         try:
@@ -549,8 +582,10 @@ def register_auth_routes(
                     raise ValueError("expires_days must be positive")
             except (TypeError, ValueError):
                 return JSONResponse(
-                    {"error": "invalid_field",
-                     "message": "expires_days must be a positive integer"},
+                    {
+                        "error": "invalid_field",
+                        "message": "expires_days must be a positive integer",
+                    },
                     status_code=400,
                 )
 
@@ -686,8 +721,10 @@ def register_admin_routes(
 
         if not update_kwargs:
             return JSONResponse(
-                {"error": "missing_fields",
-                 "message": "At least one of is_active or is_admin is required"},
+                {
+                    "error": "missing_fields",
+                    "message": "At least one of is_active or is_admin is required",
+                },
                 status_code=400,
             )
 
