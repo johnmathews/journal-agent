@@ -1806,7 +1806,9 @@ class TestDashboardMoodDrilldown:
         self, client: TestClient, repo: SQLiteEntryRepository
     ) -> None:
         e1 = repo.create_entry("2026-03-02", "photo", "happy day", 2)
-        repo.add_mood_score(e1.id, "joy_sadness", 0.8, confidence=0.9, rationale="Very positive tone")
+        repo.add_mood_score(
+            e1.id, "joy_sadness", 0.8, confidence=0.9, rationale="Very positive tone"
+        )
         e2 = repo.create_entry("2026-03-04", "photo", "okay day", 2)
         repo.add_mood_score(e2.id, "joy_sadness", 0.3, confidence=0.7, rationale="Neutral tone")
 

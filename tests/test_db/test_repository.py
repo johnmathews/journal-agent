@@ -910,7 +910,9 @@ class TestMoodDrilldown:
 
     def test_includes_rationale(self, repo):
         e = repo.create_entry("2026-04-01", "photo", "reflective", 1)
-        repo.add_mood_score(e.id, "agency", 0.7, confidence=0.85, rationale="took charge of the day")
+        repo.add_mood_score(
+            e.id, "agency", 0.7, confidence=0.85, rationale="took charge of the day"
+        )
 
         results = repo.get_mood_drilldown("agency", "2026-04-01", "2026-04-30")
         assert len(results) == 1
@@ -947,7 +949,8 @@ class TestEntityDistribution:
     ) -> None:
         """Insert an entity_mentions row."""
         conn.execute(
-            "INSERT INTO entity_mentions (entity_id, entry_id, quote, confidence, extraction_run_id)"
+            "INSERT INTO entity_mentions"
+            " (entity_id, entry_id, quote, confidence, extraction_run_id)"
             " VALUES (?, ?, ?, ?, ?)",
             (entity_id, entry_id, quote, 0.9, "test-run-1"),
         )
