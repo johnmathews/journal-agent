@@ -672,3 +672,68 @@ class TestMultiUserAuthorName:
         calls = extractor.extract_entities.call_args_list
         assert calls[0].kwargs["author_name"] == "John"
         assert calls[1].kwargs["author_name"] == "Demo"
+
+
+class TestDeletedEntryRace:
+    """Defence-in-depth: FK errors are converted to ValueError when
+    an entry is deleted while extraction is in progress."""
+
+    def test_mention_fk_error_raises_value_error(
+        self,
+        repo: SQLiteEntryRepository,
+        entity_store: SQLiteEntityStore,
+    ) -> None:
+        import sqlite3 as _sqlite3
+
+        entry = repo.create_entry("2026-03-22", "photo", "text", 1)
+        extractor = MagicMock()
+        extractor.extract_entities.return_value = _raw(
+            entities=[_entity("Alice", "person", quote="Alice")],
+        )
+
+        # Simulate the FK error that occurs when the entry is deleted
+        # between get_entry() and create_mention().
+        original_create = entity_store.create_mention
+
+        def fk_bomb(**kwargs):
+            raise _sqlite3.IntegrityError("FOREIGN KEY constraint failed")
+
+        entity_store.create_mention = fk_bomb
+        service = _make_service(repo, entity_store, extractor)
+
+        with pytest.raises(ValueError, match="deleted during extraction"):
+            service.extract_from_entry(entry.id)
+
+        entity_store.create_mention = original_create
+
+    def test_relationship_fk_error_raises_value_error(
+        self,
+        repo: SQLiteEntryRepository,
+        entity_store: SQLiteEntityStore,
+    ) -> None:
+        import sqlite3 as _sqlite3
+
+        entry = repo.create_entry("2026-03-22", "photo", "text", 1)
+        extractor = MagicMock()
+        extractor.extract_entities.return_value = _raw(
+            entities=[
+                _entity("Alice", "person", quote="Alice"),
+                _entity("Bob", "person", quote="Bob"),
+            ],
+            relationships=[
+                _rel("Alice", "knows", "Bob", quote="met"),
+            ],
+        )
+
+        original_create_rel = entity_store.create_relationship
+
+        def fk_bomb(**kwargs):
+            raise _sqlite3.IntegrityError("FOREIGN KEY constraint failed")
+
+        entity_store.create_relationship = fk_bomb
+        service = _make_service(repo, entity_store, extractor)
+
+        with pytest.raises(ValueError, match="deleted during extraction"):
+            service.extract_from_entry(entry.id)
+
+        entity_store.create_relationship = original_create_rel

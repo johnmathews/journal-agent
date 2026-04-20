@@ -11,6 +11,7 @@ from starlette.testclient import TestClient
 from journal.auth import AuthenticatedUser, _current_user_id
 from journal.db.connection import get_connection
 from journal.db.migrations import run_migrations
+from journal.db.jobs_repository import SQLiteJobRepository
 from journal.db.repository import SQLiteEntryRepository
 from journal.entitystore.store import SQLiteEntityStore
 from journal.services.ingestion import IngestionService
@@ -104,6 +105,7 @@ def services(
         embeddings_provider=mock_embeddings,
     )
     entity_store = SQLiteEntityStore(repo._conn)
+    job_repository = SQLiteJobRepository(repo._conn)
 
     from journal.config import Config
     config = Config()
@@ -112,6 +114,7 @@ def services(
         "ingestion": ingestion,
         "query": query,
         "entity_store": entity_store,
+        "job_repository": job_repository,
         "config": config,
     }
 
@@ -595,6 +598,41 @@ class TestDeleteEntry:
         data = list_response.json()
         assert data["total"] == 2
         assert ids[0] not in [item["id"] for item in data["items"]]
+
+    def test_delete_blocked_by_active_job(
+        self,
+        client: TestClient,
+        repo: SQLiteEntryRepository,
+        services: dict,
+    ) -> None:
+        entry = repo.create_entry("2026-03-22", "photo", "Hello", 1)
+        job_repo: SQLiteJobRepository = services["job_repository"]
+        job = job_repo.create("entity_extraction", {"entry_id": entry.id})
+        job_repo.mark_running(job.id)
+
+        response = client.delete(f"/api/entries/{entry.id}")
+        assert response.status_code == 409
+        data = response.json()
+        assert "active jobs" in data["error"].lower()
+        assert job.id in data["job_ids"]
+        # Entry must still exist
+        assert repo.get_entry(entry.id) is not None
+
+    def test_delete_allowed_after_job_finishes(
+        self,
+        client: TestClient,
+        repo: SQLiteEntryRepository,
+        services: dict,
+    ) -> None:
+        entry = repo.create_entry("2026-03-22", "photo", "Hello", 1)
+        job_repo: SQLiteJobRepository = services["job_repository"]
+        job = job_repo.create("entity_extraction", {"entry_id": entry.id})
+        job_repo.mark_running(job.id)
+        job_repo.mark_succeeded(job.id, {"ok": True})
+
+        response = client.delete(f"/api/entries/{entry.id}")
+        assert response.status_code == 200
+        assert repo.get_entry(entry.id) is None
 
 
 class TestGetEntryChunks:

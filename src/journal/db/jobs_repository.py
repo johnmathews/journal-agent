@@ -192,6 +192,21 @@ class SQLiteJobRepository:
 
         return [_row_to_job(r) for r in rows], total
 
+    def has_active_jobs_for_entry(self, entry_id: int) -> list[Job]:
+        """Return queued/running jobs whose params reference *entry_id*.
+
+        Used by the delete-entry endpoint to prevent deletion while
+        background jobs are still operating on the entry.
+        """
+        with self._lock:
+            rows = self._conn.execute(
+                "SELECT * FROM jobs"
+                " WHERE status IN ('queued', 'running')"
+                " AND json_extract(params_json, '$.entry_id') = ?",
+                (entry_id,),
+            ).fetchall()
+        return [_row_to_job(r) for r in rows]
+
     def reconcile_stuck_jobs(self) -> int:
         """Fail any jobs left queued/running from a previous process.
 

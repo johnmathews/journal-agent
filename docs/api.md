@@ -148,6 +148,9 @@ uncertain span rows are preserved in the database for future analysis. After ver
 Delete an entry. Removes the SQLite row (cascading to pages, tags, people, places, mood scores, and source files) and
 purges the entry's chunks from the vector store.
 
+If the entry has queued or running background jobs (entity extraction, mood scoring, etc.), deletion is blocked with a
+**409 Conflict** to prevent race conditions where a job tries to write to a deleted entry.
+
 **Response (200):**
 
 ```json
@@ -158,6 +161,16 @@ purges the entry's chunks from the vector store.
 
 ```json
 { "error": "Entry 999 not found" }
+```
+
+**Response (409):**
+
+```json
+{
+  "error": "Entry has active jobs",
+  "message": "Entry 1 has 2 running/queued job(s). Wait for them to finish before deleting.",
+  "job_ids": ["uuid-1", "uuid-2"]
+}
 ```
 
 ### GET /api/entries/{id}/chunks

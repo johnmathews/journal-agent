@@ -157,3 +157,37 @@ class TestJsonRoundTrip:
         fetched = jobs_repo.get(job.id)
         assert fetched is not None
         assert fetched.result == result
+
+
+class TestHasActiveJobsForEntry:
+    def test_returns_running_job_for_entry(self, jobs_repo):
+        job = jobs_repo.create("entity_extraction", {"entry_id": 42})
+        jobs_repo.mark_running(job.id)
+        active = jobs_repo.has_active_jobs_for_entry(42)
+        assert len(active) == 1
+        assert active[0].id == job.id
+
+    def test_returns_queued_job_for_entry(self, jobs_repo):
+        job = jobs_repo.create("entity_extraction", {"entry_id": 42})
+        active = jobs_repo.has_active_jobs_for_entry(42)
+        assert len(active) == 1
+        assert active[0].id == job.id
+
+    def test_ignores_succeeded_jobs(self, jobs_repo):
+        job = jobs_repo.create("entity_extraction", {"entry_id": 42})
+        jobs_repo.mark_running(job.id)
+        jobs_repo.mark_succeeded(job.id, {"ok": True})
+        assert jobs_repo.has_active_jobs_for_entry(42) == []
+
+    def test_ignores_failed_jobs(self, jobs_repo):
+        job = jobs_repo.create("entity_extraction", {"entry_id": 42})
+        jobs_repo.mark_running(job.id)
+        jobs_repo.mark_failed(job.id, "boom")
+        assert jobs_repo.has_active_jobs_for_entry(42) == []
+
+    def test_ignores_jobs_for_other_entries(self, jobs_repo):
+        jobs_repo.create("entity_extraction", {"entry_id": 99})
+        assert jobs_repo.has_active_jobs_for_entry(42) == []
+
+    def test_returns_empty_when_no_jobs(self, jobs_repo):
+        assert jobs_repo.has_active_jobs_for_entry(42) == []

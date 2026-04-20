@@ -16,6 +16,7 @@ from __future__ import annotations
 import contextlib
 import logging
 import math
+import sqlite3
 import uuid
 from typing import TYPE_CHECKING, Any
 
@@ -199,13 +200,18 @@ class EntityExtractionService:
                 self._store.add_alias(entity_id, alias)
 
             # Create the mention tying this entity to the current entry.
-            self._store.create_mention(
-                entity_id=entity_id,
-                entry_id=entry_id,
-                quote=quote,
-                confidence=confidence,
-                extraction_run_id=run_id,
-            )
+            try:
+                self._store.create_mention(
+                    entity_id=entity_id,
+                    entry_id=entry_id,
+                    quote=quote,
+                    confidence=confidence,
+                    extraction_run_id=run_id,
+                )
+            except sqlite3.IntegrityError as exc:
+                raise ValueError(
+                    f"Entry {entry_id} was deleted during extraction"
+                ) from exc
 
         mentions_created = entities_created + entities_matched
 
@@ -260,15 +266,20 @@ class EntityExtractionService:
             if subject_id is None or object_id is None:
                 continue
 
-            self._store.create_relationship(
-                subject_id=subject_id,
-                predicate=predicate,
-                object_id=object_id,
-                quote=quote,
-                entry_id=entry_id,
-                confidence=confidence,
-                extraction_run_id=run_id,
-            )
+            try:
+                self._store.create_relationship(
+                    subject_id=subject_id,
+                    predicate=predicate,
+                    object_id=object_id,
+                    quote=quote,
+                    entry_id=entry_id,
+                    confidence=confidence,
+                    extraction_run_id=run_id,
+                )
+            except sqlite3.IntegrityError as exc:
+                raise ValueError(
+                    f"Entry {entry_id} was deleted during extraction"
+                ) from exc
             relationships_created += 1
 
         # Prune entities that lost all their mentions after re-extraction.

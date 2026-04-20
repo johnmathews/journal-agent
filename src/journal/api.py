@@ -432,6 +432,28 @@ def register_api_routes(
         return JSONResponse(resp)
 
     async def _delete_entry(services: dict, entry_id: int, user_id: int) -> JSONResponse:
+        from journal.db.jobs_repository import SQLiteJobRepository
+
+        job_repo: SQLiteJobRepository = services["job_repository"]
+        active_jobs = job_repo.has_active_jobs_for_entry(entry_id)
+        if active_jobs:
+            job_ids = [j.id for j in active_jobs]
+            log.warning(
+                "DELETE /api/entries/%d — blocked by %d active job(s): %s",
+                entry_id, len(active_jobs), job_ids,
+            )
+            return JSONResponse(
+                {
+                    "error": "Entry has active jobs",
+                    "message": (
+                        f"Entry {entry_id} has {len(active_jobs)} running/queued "
+                        "job(s). Wait for them to finish before deleting."
+                    ),
+                    "job_ids": job_ids,
+                },
+                status_code=409,
+            )
+
         ingestion_svc: IngestionService = services["ingestion"]
         deleted = ingestion_svc.delete_entry(entry_id, user_id=user_id)
         if not deleted:
