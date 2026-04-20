@@ -362,14 +362,25 @@ class TestPatchMoodScoring:
         config = Config(enable_mood_scoring=True)
         services["config"] = config
 
-        entry = repo.create_entry("2026-04-01", "photo", "raw text", 2)
-        response = client.patch(
-            f"/api/entries/{entry.id}",
-            json={"final_text": "corrected text"},
+        # Prevent entity extraction from running in a background thread —
+        # its SQLite writes on the shared connection race with the mood job
+        # creation that this test is actually checking.
+        job_runner = services["job_runner"]
+        original = job_runner.submit_entity_extraction
+        job_runner.submit_entity_extraction = MagicMock(
+            return_value=MagicMock(id="fake-entity-job"),
         )
-        assert response.status_code == 200
-        data = response.json()
-        assert data.get("mood_job_id") is not None
+        try:
+            entry = repo.create_entry("2026-04-01", "photo", "raw text", 2)
+            response = client.patch(
+                f"/api/entries/{entry.id}",
+                json={"final_text": "corrected text"},
+            )
+            assert response.status_code == 200
+            data = response.json()
+            assert data.get("mood_job_id") is not None
+        finally:
+            job_runner.submit_entity_extraction = original
 
     def test_patch_text_no_mood_without_config(
         self, client: TestClient, repo: SQLiteEntryRepository,
