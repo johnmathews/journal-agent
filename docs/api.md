@@ -701,7 +701,7 @@ handwritten dates are automatically dated correctly.
 
 | Field        | Type    | Required | Default | Description                                     |
 | ------------ | ------- | -------- | ------- | ----------------------------------------------- |
-| `images`     | file(s) | yes      |         | One or more image files (JPEG, PNG, GIF, WebP)  |
+| `images`     | file(s) | yes      |         | One or more image files (JPEG, PNG, GIF, WebP, HEIC) |
 | `entry_date` | string  | no       | today   | ISO 8601 date (overridden by OCR date if found) |
 
 **Limits:** 10 MB per file, 50 MB total.
@@ -716,6 +716,8 @@ handwritten dates are automatically dated correctly.
 ```
 
 Poll `GET /api/jobs/{job_id}` for progress. On success, `result.entry_id` contains the new entry's ID.
+
+HEIC/HEIF images (common on macOS and iOS) are automatically converted to JPEG on upload before OCR processing.
 
 **Errors:** 400 (no images, unsupported type), 413 (total size exceeded).
 

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import hashlib
+import io
 import json
 import logging
 import sqlite3
@@ -11,6 +12,7 @@ from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any
 
 import tiktoken
+from PIL import Image
 from starlette.responses import JSONResponse
 
 from journal.auth import get_authenticated_user
@@ -43,6 +45,17 @@ if TYPE_CHECKING:
     from journal.services.query import QueryService
 
 log = logging.getLogger(__name__)
+
+
+def _convert_heic_to_jpeg(data: bytes, quality: int = 92) -> tuple[bytes, str]:
+    """Convert HEIC/HEIF image bytes to JPEG. Returns (jpeg_bytes, 'image/jpeg')."""
+    import pillow_heif  # noqa: F811 — register HEIF opener with Pillow
+
+    pillow_heif.register_heif_opener()
+    img = Image.open(io.BytesIO(data))
+    buf = io.BytesIO()
+    img.convert("RGB").save(buf, format="JPEG", quality=quality)
+    return buf.getvalue(), "image/jpeg"
 
 
 def _entry_to_dict(
@@ -1498,7 +1511,15 @@ def register_api_routes(
                 status_code=400,
             )
 
-        allowed_types = {"image/jpeg", "image/png", "image/gif", "image/webp"}
+        allowed_types = {
+            "image/jpeg",
+            "image/png",
+            "image/gif",
+            "image/webp",
+            "image/heic",
+            "image/heif",
+        }
+        heic_types = {"image/heic", "image/heif"}
         max_file_size = 10 * 1024 * 1024  # 10 MB per file
         max_total_size = 50 * 1024 * 1024  # 50 MB total
 
@@ -1509,7 +1530,8 @@ def register_api_routes(
                 return JSONResponse(
                     {
                         "error": f"File '{uploaded.filename}' has unsupported type "
-                        f"'{uploaded.content_type}'. Allowed: JPEG, PNG, GIF, WebP."
+                        f"'{uploaded.content_type}'. "
+                        f"Allowed: JPEG, PNG, GIF, WebP, HEIC."
                     },
                     status_code=400,
                 )
@@ -1524,7 +1546,13 @@ def register_api_routes(
                     {"error": "Total upload size exceeds 50 MB limit"},
                     status_code=413,
                 )
-            images.append((uploaded.data, uploaded.content_type, uploaded.filename))
+
+            data = uploaded.data
+            content_type = uploaded.content_type
+            if content_type in heic_types:
+                data, content_type = _convert_heic_to_jpeg(data)
+
+            images.append((data, content_type, uploaded.filename))
 
         entry_date = fields.get("entry_date") or datetime.now(UTC).strftime("%Y-%m-%d")
 

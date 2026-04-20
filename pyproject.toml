@@ -14,6 +14,8 @@ dependencies = [
     "python-multipart>=0.0.24",
     "argon2-cffi>=25.1,<26",
     "itsdangerous>=2.2,<3",
+    "Pillow>=11,<12",
+    "pillow-heif>=0.21,<1",
 ]
 
 [project.scripts]

@@ -95,7 +95,7 @@ def cmd_ingest(args, config):
 
     # Detect source type from file extension
     ext = file_path.suffix.lower()
-    image_exts = {".jpg", ".jpeg", ".png", ".gif", ".webp"}
+    image_exts = {".jpg", ".jpeg", ".png", ".gif", ".webp", ".heic", ".heif"}
     audio_exts = {".mp3", ".m4a", ".wav", ".mp4", ".webm"}
 
     media_types = {
@@ -104,6 +104,8 @@ def cmd_ingest(args, config):
         ".png": "image/png",
         ".gif": "image/gif",
         ".webp": "image/webp",
+        ".heic": "image/heic",
+        ".heif": "image/heif",
         ".mp3": "audio/mpeg",
         ".m4a": "audio/mp4",
         ".wav": "audio/wav",
@@ -111,6 +113,11 @@ def cmd_ingest(args, config):
         ".webm": "audio/webm",
     }
     media_type = media_types.get(ext, "application/octet-stream")
+
+    if ext in {".heic", ".heif"}:
+        from journal.api import _convert_heic_to_jpeg
+
+        data, media_type = _convert_heic_to_jpeg(data)
 
     if ext in image_exts:
         entry = ingestion.ingest_image(data, media_type, entry_date)
@@ -159,13 +166,15 @@ def cmd_ingest_multi(args, config):
     ingestion, _, _ = _build_services(config)
 
     images: list[tuple[bytes, str]] = []
-    image_exts = {".jpg", ".jpeg", ".png", ".gif", ".webp"}
+    image_exts = {".jpg", ".jpeg", ".png", ".gif", ".webp", ".heic", ".heif"}
     media_types_map = {
         ".jpg": "image/jpeg",
         ".jpeg": "image/jpeg",
         ".png": "image/png",
         ".gif": "image/gif",
         ".webp": "image/webp",
+        ".heic": "image/heic",
+        ".heif": "image/heif",
     }
 
     for file_str in args.files:
@@ -178,7 +187,12 @@ def cmd_ingest_multi(args, config):
             print(f"Error: Unsupported image type: {ext}", file=sys.stderr)
             sys.exit(1)
         media_type = media_types_map.get(ext, "application/octet-stream")
-        images.append((file_path.read_bytes(), media_type))
+        img_data = file_path.read_bytes()
+        if ext in {".heic", ".heif"}:
+            from journal.api import _convert_heic_to_jpeg
+
+            img_data, media_type = _convert_heic_to_jpeg(img_data)
+        images.append((img_data, media_type))
 
     entry_date = args.date or date.today().isoformat()
     entry = ingestion.ingest_multi_page_entry(images, entry_date)
