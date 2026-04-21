@@ -316,6 +316,46 @@ class TestBackfillMoodScores:
         # e1 still has its original scores.
         assert len(repo.get_mood_scores(e1.id)) == 2
 
+    def test_stale_only_rescores_edited_entries(self, repo, dims):
+        """Regression: editing entry text must cause stale-only backfill
+        to re-score the entry, even when all dimensions already exist.
+
+        Before the fix, ``get_entries_missing_mood_scores`` only checked
+        whether every dimension row existed. An entry with all
+        dimensions present was skipped regardless of whether its text
+        had changed — making the backfill return 0 scored / 0 skipped
+        in under 5 ms after an OCR correction.
+        """
+        import time
+
+        from journal.services.backfill import backfill_mood_scores
+
+        e = repo.create_entry("2026-04-01", "photo", "original text", 2)
+        repo.replace_mood_scores(
+            e.id, [("joy_sadness", 0.5, None, None), ("agency", 0.6, None, None)]
+        )
+
+        # Confirm that without edits the entry is NOT stale.
+        svc, scorer = self._make_service(repo, dims)
+        result = backfill_mood_scores(
+            repository=repo, mood_scoring=svc, mode="stale-only"
+        )
+        assert result.scored == 0
+        scorer.score.assert_not_called()
+
+        # Now edit the entry's text — simulates OCR correction.
+        # SQLite's strftime resolution is 1 s; sleep ensures updated_at
+        # is strictly after mood_scores.created_at.
+        time.sleep(1.1)
+        repo.update_final_text(e.id, "corrected text after OCR edit", 5, 1)
+
+        svc2, scorer2 = self._make_service(repo, dims)
+        result2 = backfill_mood_scores(
+            repository=repo, mood_scoring=svc2, mode="stale-only"
+        )
+        assert result2.scored == 1
+        assert scorer2.score.call_count == 1
+
     def test_force_rescores_every_entry_even_if_complete(
         self, repo, dims
     ):

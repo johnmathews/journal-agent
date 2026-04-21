@@ -818,10 +818,19 @@ class SQLiteEntryRepository:
     def get_entries_missing_mood_scores(
         self, dimension_names: list[str], user_id: int | None = None,
     ) -> list[int]:
-        """Return entry ids that are missing at least one of the
-        listed dimensions in `mood_scores`. Drives the backfill
-        CLI's `--stale-only` mode: we re-score every entry that
-        doesn't already have a value for every current facet.
+        """Return entry ids that need mood (re-)scoring.
+
+        An entry is considered stale when **either** condition holds:
+
+        1. It is missing at least one of the listed dimensions in
+           ``mood_scores`` (the original check).
+        2. Its ``updated_at`` timestamp is newer than the most recent
+           ``mood_scores.created_at`` for that entry — meaning the
+           text was edited after the last scoring run.
+
+        This drives the backfill CLI's ``--stale-only`` mode: we
+        (re-)score every entry that doesn't already have up-to-date
+        values for every current facet.
 
         Empty `dimension_names` returns an empty list — there's
         nothing to check against. An empty corpus also returns
@@ -840,11 +849,17 @@ class SQLiteEntryRepository:
             SELECT e.id AS id
             FROM entries e
             WHERE (
-                SELECT COUNT(DISTINCT m.dimension)
-                FROM mood_scores m
-                WHERE m.entry_id = e.id
-                  AND m.dimension IN ({placeholders})
-            ) < ?{user_filter}
+                (SELECT COUNT(DISTINCT m.dimension)
+                 FROM mood_scores m
+                 WHERE m.entry_id = e.id
+                   AND m.dimension IN ({placeholders})
+                ) < ?
+                OR e.updated_at > (
+                    SELECT MAX(m2.created_at)
+                    FROM mood_scores m2
+                    WHERE m2.entry_id = e.id
+                )
+            ){user_filter}
             ORDER BY e.entry_date ASC, e.id ASC
             """,
             (*dimension_names, len(dimension_names), *user_params),

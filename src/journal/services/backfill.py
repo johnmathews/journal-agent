@@ -192,9 +192,10 @@ def backfill_mood_scores(
     Modes:
 
     - **`stale-only`** (default): score entries that are missing at
-      least one of the current dimensions. Idempotent and cheap —
-      repeatedly running this walks toward completeness without
-      re-scoring already-complete entries.
+      least one current dimension **or** whose text was edited after
+      the most recent mood score. Idempotent and cheap — repeatedly
+      running this walks toward completeness and picks up OCR
+      corrections without re-scoring truly-unchanged entries.
     - **`force`**: rescore every entry in the selected date range,
       regardless of what's already stored. Used when you edit a
       dimension's `notes`/labels and want deterministic

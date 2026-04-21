@@ -536,6 +536,29 @@ class TestMoodScoresCRUD:
         missing = repo.get_entries_missing_mood_scores(["joy_sadness"])
         assert missing == [e.id]
 
+    def test_get_entries_missing_mood_scores_detects_edited_text(
+        self, repo
+    ):
+        """An entry fully scored but subsequently edited (updated_at >
+        mood_scores.created_at) must be treated as stale."""
+        import time
+
+        e = repo.create_entry("2026-04-01", "photo", "original", 1)
+        dims = ["joy_sadness", "agency"]
+        repo.replace_mood_scores(
+            e.id,
+            [("joy_sadness", 0.5, None, None), ("agency", 0.3, None, None)],
+        )
+        # Fully scored — not stale yet.
+        assert repo.get_entries_missing_mood_scores(dims) == []
+
+        # Edit the entry text (bumps updated_at).
+        time.sleep(1.1)
+        repo.update_final_text(e.id, "corrected text", 2, 1)
+
+        # Now stale because updated_at > max(mood_scores.created_at).
+        assert repo.get_entries_missing_mood_scores(dims) == [e.id]
+
     def test_prune_retired_mood_scores(self, repo):
         e = repo.create_entry("2026-04-01", "photo", "x", 1)
         repo.replace_mood_scores(

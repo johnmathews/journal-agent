@@ -105,7 +105,8 @@ All four typical edits are cheap:
 2. Restart the server (the dimension set is loaded once at startup).
 3. New entries are scored against the new facet automatically.
 4. Optionally run `journal backfill-mood --stale-only` to score historical entries against the new facet. `--stale-only`
-   is idempotent: it only scores entries that are missing one or more currently-configured dimensions.
+   is idempotent: it scores entries that are missing one or more currently-configured dimensions **or** whose text was
+   edited after the most recent mood score (i.e. OCR corrections trigger re-scoring automatically).
 
 ### Removing a facet
 
