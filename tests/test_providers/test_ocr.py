@@ -740,6 +740,18 @@ class TestBuildOcrProvider:
         mock_anth.assert_called_once()
         mock_gem.assert_called_once()
 
+    @patch("journal.providers.ocr.genai.Client")
+    @patch("journal.providers.ocr.anthropic.Anthropic")
+    def test_dual_pass_ignores_ocr_model_override(
+        self, _anth: MagicMock, _gem: MagicMock,
+    ) -> None:
+        """OCR_MODEL set to a Gemini model must not leak into the Anthropic primary."""
+        config = self._make_config(ocr_dual_pass=True, ocr_model="gemini-2.5-pro")
+        provider = build_ocr_provider(config)
+        assert isinstance(provider, DualPassOCRProvider)
+        assert provider._primary._model == _DEFAULT_MODELS["anthropic"]
+        assert provider._secondary._model == _DEFAULT_MODELS["gemini"]
+
 
 # ---------------------------------------------------------------------------
 # Reconciliation

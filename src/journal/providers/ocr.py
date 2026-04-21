@@ -609,10 +609,14 @@ def _build_single_provider(config: Config) -> OCRProvider:
 
 
 def _build_dual_pass_provider(config: Config) -> DualPassOCRProvider:
-    """Build a dual-pass provider: Anthropic primary, Gemini secondary."""
+    """Build a dual-pass provider: Anthropic primary, Gemini secondary.
+
+    ``config.ocr_model`` is ignored — each provider always uses its own
+    default because a single model override cannot apply to both APIs.
+    """
     primary = AnthropicOCRProvider(
         api_key=config.anthropic_api_key,
-        model=config.ocr_model or _DEFAULT_MODELS["anthropic"],
+        model=_DEFAULT_MODELS["anthropic"],
         max_tokens=config.ocr_max_tokens,
         context_dir=config.ocr_context_dir,
         cache_ttl=config.ocr_context_cache_ttl,
