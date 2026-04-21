@@ -48,7 +48,7 @@ See `docs/architecture.md` → "Chunking Strategies" for the algorithm and trade
 | Variable       | Default      | Description                                                                                                   |
 | -------------- | ------------ | ------------------------------------------------------------------------------------------------------------- |
 | `OCR_PROVIDER` | `anthropic`  | Which vision API to use for handwriting OCR. `"anthropic"` (Claude) or `"gemini"` (Google Gemini).            |
-| `OCR_MODEL`    | per-provider | Model name sent to the selected provider. Defaults: `claude-opus-4-6` (anthropic), `gemini-2.5-pro` (gemini). |
+| `OCR_MODEL`    | per-provider | Model name sent to the selected provider. Defaults: `claude-opus-4-6` (anthropic), `gemini-2.5-pro` (gemini). Ignored in dual-pass mode — each provider always uses its own default. |
 
 When using `gemini`, the context-priming glossary (`OCR_CONTEXT_DIR`) is not applied — Gemini uses only the base system
 prompt.
