@@ -477,11 +477,30 @@ def register_api_routes(
             )
 
         ingestion_svc: IngestionService = services["ingestion"]
+        entity_store: EntityStore = services["entity_store"]
+
+        # Snapshot entity IDs linked to this entry before deletion.
+        # The CASCADE on entity_mentions will remove the mention rows,
+        # but the entity records themselves need explicit cleanup.
+        prior_entity_ids = [
+            m.entity_id for m in entity_store.get_mentions_for_entry(entry_id)
+        ]
+
         deleted = ingestion_svc.delete_entry(entry_id, user_id=user_id)
         if not deleted:
             log.warning("DELETE /api/entries/%d — not found", entry_id)
             return JSONResponse({"error": f"Entry {entry_id} not found"}, status_code=404)
-        log.info("DELETE /api/entries/%d — deleted", entry_id)
+
+        # Prune entities that lost all mentions due to this deletion.
+        orphans_deleted = 0
+        if prior_entity_ids:
+            orphans_deleted = entity_store.delete_orphaned_entities(
+                list(set(prior_entity_ids))
+            )
+        log.info(
+            "DELETE /api/entries/%d — deleted (%d orphaned entities pruned)",
+            entry_id, orphans_deleted,
+        )
         return JSONResponse({"deleted": True, "id": entry_id})
 
     @mcp.custom_route(
