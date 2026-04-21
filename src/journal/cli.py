@@ -684,6 +684,297 @@ def cmd_seed(args, config):
                 "weeks. Sam is beside him, refusing to leave. Good Sam."
             ),
         },
+        # ── The Council of Elrond and the Fellowship ──
+        {
+            "date": "2025-10-20",
+            "source_type": "photo",
+            "text": (
+                "Frodo is recovering well. The colour is back in his cheeks and "
+                "he ate two breakfasts this morning, which is the surest sign of "
+                "hobbit health I know. We sat together in the garden and I gave "
+                "him the mithril coat and Sting. He tried them on and looked so "
+                "small and brave that I had to turn away for a moment. He told me "
+                "everything — the Black Riders, the flight to Bucklebury Ferry, "
+                "old Tom Bombadil in the forest, the barrow-wight. My dear boy "
+                "has been through more in a few weeks than most hobbits see in "
+                "a lifetime. And it is only the beginning."
+            ),
+        },
+        {
+            "date": "2025-10-25",
+            "source_type": "voice",
+            "text": (
+                "The Council was today. Elrond summoned everyone — Gandalf, "
+                "Aragorn, Legolas from the Woodland Realm, Gimli and Gloin from "
+                "Erebor, Boromir from Gondor. I was there too, though I felt "
+                "very small among such tall folk and great matters. They debated "
+                "for hours about what to do with the Ring. Boromir wanted to use "
+                "it as a weapon against Sauron. Gandalf said that was madness. "
+                "Elrond said the Ring must be destroyed in Mount Doom where it "
+                "was made. And then Frodo stood up and said he would take it. "
+                "My heart stopped. I wanted to shout no, let someone else do it, "
+                "someone stronger, someone who does not remind me of myself at "
+                "thirty-three. But I said nothing. It was his choice to make."
+            ),
+        },
+        {
+            "date": "2025-11-02",
+            "source_type": "photo",
+            "text": (
+                "The Fellowship is being assembled. Nine walkers to match the "
+                "nine Riders, Elrond says. Frodo and Sam, of course. Gandalf. "
+                "Aragorn, who turns out to be the heir of Isildur — I confess I "
+                "did not see that coming. Legolas the Elf and Gimli the Dwarf, "
+                "which should make for interesting company. Boromir of Gondor. "
+                "And Merry and Pippin, bless them, who refused to be left behind. "
+                "Elrond tried to dissuade them but Pippin said where Frodo goes "
+                "we go, and that was that. I spent the evening with Frodo going "
+                "over maps and telling him everything I remember about the Misty "
+                "Mountains from my own crossing sixty years ago."
+            ),
+        },
+        {
+            "date": "2025-11-10",
+            "source_type": "photo",
+            "text": (
+                "I have been writing furiously — trying to get as much of my book "
+                "done as I can before the Fellowship departs. There is a feeling "
+                "in Rivendell now, a sense of ending, as though we are all holding "
+                "our breath before a great storm. The Elves sing differently — "
+                "softer, sadder. Even the waterfall seems muted. I wrote about "
+                "Mirkwood today. The spiders, the Elf-king's halls, the escape "
+                "in the barrels. It reads like a children's adventure and I "
+                "suppose in some ways it was. The world was simpler then, or "
+                "perhaps I was simply too ignorant to see its complications."
+            ),
+        },
+        {
+            "date": "2025-11-18",
+            "source_type": "voice",
+            "text": (
+                "Had a long talk with Gandalf tonight by the fire. He is worried, "
+                "though he hides it well behind his pipe smoke and his riddles. "
+                "He told me something about the Ring that chilled me. He said it "
+                "wants to be found. That it has a will of its own and it betrayed "
+                "Gollum just as it betrayed Isildur before him. That it came to "
+                "me not by chance but by design — though whose design he cannot "
+                "say. I asked him if it would betray Frodo too. He was quiet for "
+                "a long time and then he said that depends entirely on Frodo."
+            ),
+        },
+        # ── The Fellowship departs ──
+        {
+            "date": "2025-12-18",
+            "source_type": "photo",
+            "text": (
+                "They are gone. The Fellowship left Rivendell this morning at "
+                "dusk, heading south along the western bank of the Bruinen. I "
+                "watched them go from the terrace — nine small figures against "
+                "the twilight, with Gandalf's staff glowing faintly at the head "
+                "of the line. Frodo turned and waved. I waved back and then I "
+                "went inside and sat in my room and stared at the wall for a "
+                "very long time. The house feels empty now. Even the Elves are "
+                "quiet. I picked up my pen to work on the book but I could not "
+                "write a single word. Tomorrow will be better."
+            ),
+        },
+        {
+            "date": "2025-12-25",
+            "source_type": "photo",
+            "text": (
+                "Midwinter. Snow on the ground and ice on the falls. I have been "
+                "trying to keep busy — writing, reading in the library, taking "
+                "short walks when the weather permits. But my thoughts keep "
+                "drifting south, following the Fellowship along paths I cannot "
+                "see. Where are they now? Have they crossed the mountains? Are "
+                "they safe? Elrond says worrying achieves nothing but I notice "
+                "he spends a great deal of time staring south from the high "
+                "balcony himself. Even Elves worry, it seems, when the stakes "
+                "are high enough."
+            ),
+        },
+        {
+            "date": "2026-01-08",
+            "source_type": "voice",
+            "text": (
+                "A brief message from Gandalf, sent by means he did not explain. "
+                "The Fellowship reached Hollin safely but the pass over "
+                "Caradhras was blocked by snow — or by darker forces, he "
+                "suspects. They are considering the Mines of Moria instead. "
+                "Moria. I remember Balin talking about his plan to recolonise "
+                "Moria, years ago at the Unexpected Party. He was so full of "
+                "hope. No one has heard from his colony in a long time. I "
+                "have a bad feeling about this but I trust Gandalf's judgment. "
+                "He has never led me wrong. Not permanently, anyway."
+            ),
+        },
+        {
+            "date": "2026-01-20",
+            "source_type": "photo",
+            "text": (
+                "No word from the Fellowship for twelve days now. I tell myself "
+                "this means nothing — they are underground in Moria where no "
+                "messages can travel. But the silence gnaws at me. I have been "
+                "rereading my account of the goblin tunnels under the Misty "
+                "Mountains, where I found the Ring. Dark places underground. "
+                "The riddle game with Gollum. What is in my pocket? The answer "
+                "that saved my life and doomed — no, I must not think like that. "
+                "I finished the chapter about the Battle of Five Armies today. "
+                "Thorin's death. Even after sixty years it is hard to write "
+                "about. He was a proud, stubborn, magnificent fool and I miss him."
+            ),
+        },
+        {
+            "date": "2026-02-01",
+            "source_type": "photo",
+            "text": (
+                "Terrible news. Gandalf has fallen. The message came from "
+                "Galadriel in Lothlorien — the Fellowship passed through Moria "
+                "and there was a creature of fire and shadow, a Balrog, on the "
+                "bridge of Khazad-dum. Gandalf stood against it and broke the "
+                "bridge but the creature dragged him down into the abyss. He "
+                "fell. Gandalf fell. I cannot believe it. I will not believe it. "
+                "He has been a part of my life since I was fifty years old, "
+                "since he came to my door with a mark scratched on it and "
+                "thirteen Dwarves behind him. The world without Gandalf is a "
+                "darker place and I am a smaller hobbit for his absence."
+            ),
+        },
+        {
+            "date": "2026-02-05",
+            "source_type": "voice",
+            "text": (
+                "I have not written in my book for days. I sit at the desk and "
+                "stare at the pages and all I can think about is Gandalf. The "
+                "Elves have been very kind — they bring me food and tea and do "
+                "not press me to talk. Arwen came and sat with me for an evening "
+                "and told me stories about Gandalf that I had never heard, from "
+                "ages before hobbits existed. He was old beyond imagining, she "
+                "said, and his work in Middle-earth is not yet done. I am not "
+                "sure what she meant by that but it gave me a strange comfort."
+            ),
+        },
+        {
+            "date": "2026-02-15",
+            "source_type": "photo",
+            "text": (
+                "I have started writing again. Not the book — I cannot face that "
+                "yet — but poetry. Elvish metres and Dwarvish rhythms and odd "
+                "hobbit verses that do not quite fit either tradition. Elrond says "
+                "grief makes poets of us all, which is a very Elvish thing to say. "
+                "I wrote a song for Gandalf today. It is not very good but it "
+                "made me feel better. I sang it to myself in the garden and a "
+                "thrush on the wall tilted its head as though listening. Even "
+                "the birds mourn him, I think."
+            ),
+        },
+        {
+            "date": "2026-02-28",
+            "source_type": "photo",
+            "text": (
+                "Word from Lothlorien. The Fellowship rested there under "
+                "Galadriel's protection for many days and has now set out again "
+                "by boat down the Great River Anduin. Frodo is well, they say. "
+                "He is grieving Gandalf but he has not turned back. Of course he "
+                "has not. He is a Baggins and a Took and we do not turn back once "
+                "we have set our feet on a path, however dark it grows. The "
+                "company is making for Mordor by way of — well, I do not know "
+                "by what way. There are many paths and none of them are safe."
+            ),
+        },
+        # ── Spring and the breaking of the Fellowship ──
+        {
+            "date": "2026-03-05",
+            "source_type": "voice",
+            "text": (
+                "Spring is coming to the valley. The snowmelt has swelled the "
+                "Bruinen and the waterfalls are thundering day and night. Crocuses "
+                "and snowdrops in the garden. Life goes on, as it always does, "
+                "even when the world is breaking. I have gone back to the book. "
+                "I am writing about Laketown and the coming of Smaug. The dragon "
+                "descending on the wooden city, flames reflected in the water, "
+                "people screaming, boats capsizing. And Bard with his black "
+                "arrow. One arrow. One chance. He did not miss."
+            ),
+        },
+        {
+            "date": "2026-03-15",
+            "source_type": "photo",
+            "text": (
+                "More news, and it is grim. The Fellowship has broken. At Amon "
+                "Hen, above the falls of Rauros, Boromir tried to take the Ring "
+                "from Frodo. Frodo fled and crossed the River alone — well, not "
+                "alone. Sam went with him, as Sam always will. The others were "
+                "scattered. Boromir died defending Merry and Pippin from orcs. "
+                "Aragorn, Legolas, and Gimli have gone after the orcs who captured "
+                "the young hobbits. Everything has gone wrong and yet — Frodo is "
+                "free of the others, free of the temptation the Ring puts on "
+                "mortal hearts. Perhaps this is how it was always meant to be. "
+                "Two hobbits walking into Mordor. It sounds absurd. It sounds "
+                "exactly right."
+            ),
+        },
+        {
+            "date": "2026-03-28",
+            "source_type": "photo",
+            "text": (
+                "No news. The silence stretches on like the road between here and "
+                "everywhere that matters. I have been spending my days in the "
+                "library, studying old maps of Mordor and the land of Gorgoroth. "
+                "Ash plains and poisoned rivers and a great dark mountain belching "
+                "fire. My dear Frodo is walking into that. With Sam, yes, loyal "
+                "wonderful Sam, but still — two hobbits against all the malice "
+                "and darkness of Sauron. I am writing more poetry. A long "
+                "narrative piece about the fall of Gondolin that Elrond helped me "
+                "with. He was there, in a manner of speaking — he was born in the "
+                "aftermath. History is very close in Rivendell."
+            ),
+        },
+        {
+            "date": "2026-04-10",
+            "source_type": "voice",
+            "text": (
+                "Something has changed. I cannot explain it but the air feels "
+                "different today. Lighter. Elrond felt it too — I saw him on the "
+                "balcony at dawn, looking east, and there was something in his "
+                "expression I have not seen before. Hope, perhaps. Or relief. "
+                "The shadows in the east seemed thinner this morning, and by "
+                "afternoon a warm wind came from the south carrying the smell "
+                "of growing things. The Elves are singing again, really singing, "
+                "not the mournful dirges of the winter months. I dare not hope "
+                "too much but my old hobbit heart is beating faster."
+            ),
+        },
+        {
+            "date": "2026-04-15",
+            "source_type": "photo",
+            "text": (
+                "The Ring is destroyed. Frodo did it. The news came by eagle — "
+                "great eagles out of the north, circling Rivendell and crying "
+                "the tidings in voices that shook the valley. The Dark Tower has "
+                "fallen. Sauron is no more. Frodo and Sam are alive, found on "
+                "the slopes of Mount Doom by Gandalf — Gandalf! He is alive! "
+                "Returned, they say, changed, more powerful than before. I wept. "
+                "I am not ashamed to say it. I sat in the garden and wept like a "
+                "child and every Elf in Rivendell pretended not to notice, which "
+                "is the most gracious thing anyone has ever done for me."
+            ),
+        },
+        {
+            "date": "2026-04-20",
+            "source_type": "photo",
+            "text": (
+                "I have finished the book. The last chapter — the return home, "
+                "the Shire as it was before everything changed. I tied it off "
+                "with the words I spoke to Gandalf the night I left: the road "
+                "goes ever on and on. It does. It has. And now Frodo's road has "
+                "brought him to the end of all things and back again. There and "
+                "back again. I shall leave the rest of the pages for him to fill. "
+                "His story now, not mine. I am one hundred and twelve years old "
+                "and I am tired. But it is a good tired — the kind you feel after "
+                "a very long walk when home is finally in sight."
+            ),
+        },
     ]
 
     # Seeding does not have access to an embeddings provider (no API keys
