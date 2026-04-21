@@ -639,6 +639,49 @@ class TestDeleteEntry:
         assert response.status_code == 200
         assert repo.get_entry(entry.id) is None
 
+    def test_delete_prunes_orphaned_entities(
+        self,
+        client: TestClient,
+        repo: SQLiteEntryRepository,
+        services: dict,
+    ) -> None:
+        """Deleting an entry removes entities that have no other mentions."""
+        entity_store: SQLiteEntityStore = services["entity_store"]
+
+        entry = repo.create_entry("2026-03-22", "photo", "Met Alice at park", 1)
+        alice = entity_store.create_entity("person", "Alice", "", "2026-03-22")
+        entity_store.create_mention(alice.id, entry.id, "Alice", 0.9, "run-1")
+
+        # Alice exists and has a mention
+        assert entity_store.get_entity(alice.id) is not None
+
+        response = client.delete(f"/api/entries/{entry.id}")
+        assert response.status_code == 200
+
+        # Alice should be pruned — she only had mentions in the deleted entry
+        assert entity_store.get_entity(alice.id) is None
+
+    def test_delete_preserves_entities_mentioned_elsewhere(
+        self,
+        client: TestClient,
+        repo: SQLiteEntryRepository,
+        services: dict,
+    ) -> None:
+        """Entities mentioned in other entries survive the deletion."""
+        entity_store: SQLiteEntityStore = services["entity_store"]
+
+        entry1 = repo.create_entry("2026-03-22", "photo", "Met Alice", 1)
+        entry2 = repo.create_entry("2026-03-23", "photo", "Alice again", 1)
+        alice = entity_store.create_entity("person", "Alice", "", "2026-03-22")
+        entity_store.create_mention(alice.id, entry1.id, "Alice", 0.9, "run-1")
+        entity_store.create_mention(alice.id, entry2.id, "Alice", 0.9, "run-2")
+
+        response = client.delete(f"/api/entries/{entry1.id}")
+        assert response.status_code == 200
+
+        # Alice should survive — she's still mentioned in entry2
+        assert entity_store.get_entity(alice.id) is not None
+
 
 class TestGetEntryChunks:
     def test_returns_chunks_for_entry_with_chunks(

@@ -82,6 +82,21 @@ Storage-agnostic read API, both REST and MCP:
 - `GET /api/entries/{id}/entities` — entities tied to a specific entry
 - MCP: `journal_list_entities`, `journal_get_entity_mentions`, `journal_get_entity_relationships`
 
+## Entity lifecycle and orphan cleanup
+
+Entities are created during extraction and remain in the database as long as they have at least one mention. Two
+operations can orphan an entity (leave it with zero mentions):
+
+- **Entry deletion** — `DELETE /api/entries/{id}` removes the entry row, which cascades to `entity_mentions`. The API
+  handler snapshots the entity IDs linked to the entry before deletion, then calls `delete_orphaned_entities()` to clean
+  up any that lost all mentions.
+- **Re-extraction after edit** — `PATCH /api/entries/{id}` with `final_text` queues an async entity extraction job. The
+  extraction service deletes all existing mentions for the entry, re-extracts, and then prunes entities that lost all
+  mentions as a result (`extract_from_entry()` in `entity_extraction.py`).
+
+Both paths use the same `EntityStore.delete_orphaned_entities()` method, which only deletes entities from the candidate
+set that have zero remaining mentions across all entries — so an entity mentioned in other entries is never pruned.
+
 ## Known risks
 
 - **Predicate drift.** Predicates are free text. Over time an author's "met", "saw", "caught up with" will all refer to
