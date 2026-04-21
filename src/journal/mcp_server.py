@@ -185,6 +185,30 @@ def _init_services() -> dict:
         elif key == "preprocess_images":
             ingestion_service._preprocess_images = value
             log.info("Preprocessing %s via runtime settings", "enabled" if value else "disabled")
+        elif key == "enable_mood_scoring":
+            if value:
+                from journal.providers.mood_scorer import AnthropicMoodScorer
+                from journal.services.mood_dimensions import load_mood_dimensions
+                from journal.services.mood_scoring import MoodScoringService
+
+                dims = load_mood_dimensions(config.mood_dimensions_path)
+                scorer = AnthropicMoodScorer(
+                    api_key=config.anthropic_api_key,
+                    model=config.mood_scorer_model,
+                    max_tokens=config.mood_scorer_max_tokens,
+                )
+                svc = MoodScoringService(
+                    scorer=scorer,
+                    repository=repo,
+                    dimensions=dims,
+                )
+                ingestion_service._mood_scoring = svc
+                job_runner._mood_scoring = svc
+                log.info("Mood scoring enabled via runtime settings")
+            else:
+                ingestion_service._mood_scoring = None
+                job_runner._mood_scoring = None
+                log.info("Mood scoring disabled via runtime settings")
 
     runtime_settings = RuntimeSettings(conn, config, on_change=_on_runtime_setting_change)
     log.info("  Runtime settings loaded")
