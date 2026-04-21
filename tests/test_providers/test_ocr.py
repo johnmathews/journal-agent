@@ -759,7 +759,16 @@ class TestBuildOcrProvider:
 
 
 class TestReconcileOcrResults:
-    def test_identical_texts_no_new_spans(self) -> None:
+    """Tests for the sentinel-based dual-pass reconciliation.
+
+    The reconciler only creates doubt spans when at least one model
+    used sentinels. Confident disagreements (neither model flagged
+    sentinels) are resolved silently in favour of the primary.
+    """
+
+    # --- Agreement cases ---
+
+    def test_identical_texts_no_spans(self) -> None:
         primary = OCRResult(text="Hello world", uncertain_spans=[])
         secondary = OCRResult(text="Hello world", uncertain_spans=[])
         result = reconcile_ocr_results(primary, secondary)
@@ -772,50 +781,17 @@ class TestReconcileOcrResults:
         result = reconcile_ocr_results(primary, secondary)
         assert (0, 5) in result.uncertain_spans
 
-    def test_single_word_disagreement(self) -> None:
-        primary = OCRResult(text="The cat sat", uncertain_spans=[])
-        secondary = OCRResult(text="The car sat", uncertain_spans=[])
-        result = reconcile_ocr_results(primary, secondary)
-        assert result.text == "The cat sat"
-        # "cat" at positions 4-7 should be flagged
-        assert any(s <= 4 and e >= 7 for s, e in result.uncertain_spans)
-
-    def test_multiple_disagreements(self) -> None:
-        primary = OCRResult(text="The cat sat on the mat", uncertain_spans=[])
-        secondary = OCRResult(text="The car sat on the hat", uncertain_spans=[])
-        result = reconcile_ocr_results(primary, secondary)
-        # Both "cat" and "mat" should be flagged
-        assert len(result.uncertain_spans) >= 2
-
-    def test_insertion_in_secondary(self) -> None:
-        """Secondary has extra words — should not crash."""
-        primary = OCRResult(text="Hello world", uncertain_spans=[])
-        secondary = OCRResult(text="Hello beautiful world", uncertain_spans=[])
-        result = reconcile_ocr_results(primary, secondary)
-        assert result.text == "Hello world"
-        # "world" may be flagged as the diff sees it shifted
-        assert isinstance(result.uncertain_spans, list)
-
-    def test_deletion_in_secondary(self) -> None:
-        """Secondary is missing words — should not crash."""
-        primary = OCRResult(text="Hello beautiful world", uncertain_spans=[])
-        secondary = OCRResult(text="Hello world", uncertain_spans=[])
-        result = reconcile_ocr_results(primary, secondary)
-        assert result.text == "Hello beautiful world"
-
-    def test_secondary_spans_mapped_to_primary(self) -> None:
-        """When texts agree, secondary spans should map to primary coords."""
+    def test_secondary_spans_mapped_in_equal_block(self) -> None:
+        """When texts agree, secondary spans should map to output coords."""
         primary = OCRResult(text="The cat sat", uncertain_spans=[])
         secondary = OCRResult(text="The cat sat", uncertain_spans=[(4, 7)])
         result = reconcile_ocr_results(primary, secondary)
-        # "cat" at 4-7 in secondary should map to 4-7 in primary
         assert (4, 7) in result.uncertain_spans
 
     def test_overlapping_spans_merged(self) -> None:
         primary = OCRResult(text="The cat sat", uncertain_spans=[(4, 7)])
         secondary = OCRResult(text="The cat sat", uncertain_spans=[(4, 7)])
         result = reconcile_ocr_results(primary, secondary)
-        # Should merge to a single span, not duplicate
         assert result.uncertain_spans.count((4, 7)) == 1
 
     def test_spans_sorted_by_start(self) -> None:
@@ -832,13 +808,124 @@ class TestReconcileOcrResults:
         assert result.text == ""
         assert result.uncertain_spans == []
 
-    def test_completely_different_texts(self) -> None:
+    # --- Disagreement: neither uncertain → no doubt ---
+
+    def test_confident_disagreement_no_doubt(self) -> None:
+        """Both confident but different words → trust primary, no doubt."""
+        primary = OCRResult(text="The cat sat", uncertain_spans=[])
+        secondary = OCRResult(text="The car sat", uncertain_spans=[])
+        result = reconcile_ocr_results(primary, secondary)
+        assert result.text == "The cat sat"
+        assert result.uncertain_spans == []
+
+    def test_multiple_confident_disagreements_no_doubt(self) -> None:
+        primary = OCRResult(text="The cat sat on the mat", uncertain_spans=[])
+        secondary = OCRResult(text="The car sat on the hat", uncertain_spans=[])
+        result = reconcile_ocr_results(primary, secondary)
+        assert result.text == "The cat sat on the mat"
+        assert result.uncertain_spans == []
+
+    def test_completely_different_confident_texts(self) -> None:
         primary = OCRResult(text="alpha beta gamma", uncertain_spans=[])
         secondary = OCRResult(text="one two three", uncertain_spans=[])
         result = reconcile_ocr_results(primary, secondary)
         assert result.text == "alpha beta gamma"
-        # Entire text should be uncertain
+        assert result.uncertain_spans == []
+
+    # --- Disagreement: primary uncertain, secondary confident → substitute ---
+
+    def test_primary_uncertain_secondary_confident_substitutes(self) -> None:
+        """Primary is uncertain → use secondary's confident reading."""
+        primary = OCRResult(text="The cat sat", uncertain_spans=[(4, 7)])
+        secondary = OCRResult(text="The car sat", uncertain_spans=[])
+        result = reconcile_ocr_results(primary, secondary)
+        assert result.text == "The car sat"
+        assert any(s <= 4 and e >= 7 for s, e in result.uncertain_spans)
+
+    def test_substitution_different_length(self) -> None:
+        """Secondary text can be a different length from primary."""
+        primary = OCRResult(text="The cat sat", uncertain_spans=[(4, 7)])
+        secondary = OCRResult(text="The automobile sat", uncertain_spans=[])
+        result = reconcile_ocr_results(primary, secondary)
+        assert result.text == "The automobile sat"
+        # "automobile" should be a doubt
+        idx = result.text.index("automobile")
+        assert any(s <= idx and e >= idx + 10 for s, e in result.uncertain_spans)
+
+    def test_substitution_preserves_surrounding_text(self) -> None:
+        """Text before and after the substitution is preserved."""
+        primary = OCRResult(
+            text="Hello world foo bar end",
+            uncertain_spans=[(12, 15)],  # "foo"
+        )
+        secondary = OCRResult(
+            text="Hello world baz bar end",
+            uncertain_spans=[],
+        )
+        result = reconcile_ocr_results(primary, secondary)
+        assert result.text == "Hello world baz bar end"
+        assert result.text.startswith("Hello world ")
+        assert result.text.endswith(" bar end")
+
+    # --- Disagreement: secondary uncertain, primary confident → keep primary ---
+
+    def test_secondary_uncertain_primary_confident_keeps_primary(self) -> None:
+        """Secondary is uncertain → keep primary, mark as doubt."""
+        primary = OCRResult(text="The cat sat", uncertain_spans=[])
+        secondary = OCRResult(text="The car sat", uncertain_spans=[(4, 7)])
+        result = reconcile_ocr_results(primary, secondary)
+        assert result.text == "The cat sat"
+        assert any(s <= 4 and e >= 7 for s, e in result.uncertain_spans)
+
+    # --- Disagreement: both uncertain → keep primary ---
+
+    def test_both_uncertain_keeps_primary(self) -> None:
+        """Both uncertain → keep primary text, mark as doubt."""
+        primary = OCRResult(text="The cat sat", uncertain_spans=[(4, 7)])
+        secondary = OCRResult(text="The car sat", uncertain_spans=[(4, 7)])
+        result = reconcile_ocr_results(primary, secondary)
+        assert result.text == "The cat sat"
+        assert any(s <= 4 and e >= 7 for s, e in result.uncertain_spans)
+
+    # --- Structural edge cases ---
+
+    def test_insertion_in_secondary_no_crash(self) -> None:
+        """Secondary has extra words — no crash, primary text preserved."""
+        primary = OCRResult(text="Hello world", uncertain_spans=[])
+        secondary = OCRResult(text="Hello beautiful world", uncertain_spans=[])
+        result = reconcile_ocr_results(primary, secondary)
+        assert "Hello" in result.text
+        assert "world" in result.text
+
+    def test_deletion_in_secondary_no_crash(self) -> None:
+        """Secondary is missing words — primary text preserved."""
+        primary = OCRResult(text="Hello beautiful world", uncertain_spans=[])
+        secondary = OCRResult(text="Hello world", uncertain_spans=[])
+        result = reconcile_ocr_results(primary, secondary)
+        assert "Hello" in result.text
+
+    def test_primary_uncertain_delete_in_secondary(self) -> None:
+        """Primary uncertain, secondary has no corresponding words → keep primary, doubt."""
+        primary = OCRResult(text="Hello beautiful world", uncertain_spans=[(6, 15)])
+        secondary = OCRResult(text="Hello world", uncertain_spans=[])
+        result = reconcile_ocr_results(primary, secondary)
+        # Can't substitute (no secondary text for this block) → keep primary
         assert len(result.uncertain_spans) >= 1
+
+    def test_spans_adjusted_after_substitution(self) -> None:
+        """Spans after a substitution have correct output coordinates."""
+        # "cat" is uncertain → substituted with longer "automobile"
+        # Then "end" is uncertain in secondary (equal block) → coords shift
+        primary = OCRResult(text="The cat sat end", uncertain_spans=[(4, 7)])
+        secondary = OCRResult(
+            text="The automobile sat end",
+            uncertain_spans=[(18, 21)],  # "end" in secondary
+        )
+        result = reconcile_ocr_results(primary, secondary)
+        assert result.text == "The automobile sat end"
+        # "end" should be a doubt at the correct position in the output
+        end_idx = result.text.index("end")
+        assert any(s <= end_idx and e >= end_idx + 3 for s, e in result.uncertain_spans)
 
 
 # ---------------------------------------------------------------------------
@@ -865,7 +952,8 @@ class TestDualPassOCRProvider:
         primary.extract.assert_called_once_with(b"image", "image/jpeg")
         secondary.extract.assert_called_once_with(b"image", "image/jpeg")
 
-    def test_returns_reconciled_result(self) -> None:
+    def test_returns_reconciled_result_confident_disagreement(self) -> None:
+        """Confident disagreement → trust primary, no doubt."""
         primary = MagicMock()
         primary.extract.return_value = OCRResult(text="The cat sat", uncertain_spans=[])
         secondary = MagicMock()
@@ -875,7 +963,23 @@ class TestDualPassOCRProvider:
         result = provider.extract(b"image", "image/jpeg")
 
         assert result.text == "The cat sat"
-        # "cat" vs "car" disagreement should produce an uncertain span
+        assert result.uncertain_spans == []
+
+    def test_returns_reconciled_result_with_substitution(self) -> None:
+        """Primary uncertain → secondary text substituted in."""
+        primary = MagicMock()
+        primary.extract.return_value = OCRResult(
+            text="The cat sat", uncertain_spans=[(4, 7)],
+        )
+        secondary = MagicMock()
+        secondary.extract.return_value = OCRResult(
+            text="The car sat", uncertain_spans=[],
+        )
+
+        provider = DualPassOCRProvider(primary, secondary)
+        result = provider.extract(b"image", "image/jpeg")
+
+        assert result.text == "The car sat"
         assert len(result.uncertain_spans) >= 1
 
     def test_primary_failure_propagates(self) -> None:

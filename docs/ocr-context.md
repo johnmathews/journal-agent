@@ -189,6 +189,28 @@ Entries ingested before migration `0005` simply return an empty array; the webap
 through every edit. This is deliberate — the Review toggle is a history of "here's what the model was unsure about when
 it read the page", not a dynamic signal that drifts as the user corrects things.
 
+### Dual-pass reconciliation
+
+When dual-pass OCR is enabled (`ocr_dual_pass` runtime setting), both providers run independently and each produces its
+own text with sentinel-marked uncertain spans. The `reconcile_ocr_results()` function aligns the two outputs at word
+level and uses each model's confidence signal to decide per-region:
+
+| Primary          | Secondary        | Action                                    | Doubt? |
+| ---------------- | ---------------- | ----------------------------------------- | ------ |
+| Confident        | Confident, agree | Keep text                                 | No     |
+| Confident        | Confident, differ| Keep primary text                         | No     |
+| **Uncertain**    | Confident        | **Substitute secondary text**             | Yes    |
+| Confident        | **Uncertain**    | Keep primary text                         | Yes    |
+| **Both uncertain** | —              | Keep primary text                         | Yes    |
+
+The key insight is that confident disagreements (neither model used sentinels) produce **no doubt**. This eliminates the
+noise from trivial differences (punctuation, spacing, "&" vs "and") that two OCR engines will always have. Only regions
+where at least one model flagged uncertainty become doubts.
+
+When the primary is uncertain but the secondary is confident, the output text is modified — the secondary's reading is
+spliced in. This means the reconciled `OCRResult.text` may differ from the primary's text. Span coordinates are
+adjusted to account for any length changes from substitutions.
+
 ### Relationship to glossary priming
 
 Glossary priming and uncertainty flagging are **independent** for now. The glossary instructs the model to prefer known

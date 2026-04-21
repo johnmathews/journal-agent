@@ -494,64 +494,161 @@ def _merge_spans(spans: list[tuple[int, int]]) -> list[tuple[int, int]]:
     return merged
 
 
+def _any_span_overlap(
+    spans: list[tuple[int, int]], start: int, end: int,
+) -> bool:
+    """Return True if any span in *spans* overlaps the half-open range [start, end)."""
+    return any(s < end and e > start for s, e in spans)
+
+
 def reconcile_ocr_results(
     primary: OCRResult,
     secondary: OCRResult,
 ) -> OCRResult:
-    """Reconcile two OCR results, using the primary's text as the base.
+    """Reconcile two OCR results using sentinel-based confidence signals.
 
-    Returns an ``OCRResult`` whose text is ``primary.text`` and whose
-    ``uncertain_spans`` is the union of:
+    Uses a word-level diff to align the two texts, then decides per-block:
 
-    1. ``primary.uncertain_spans``
-    2. Regions where the two texts disagree (word-level diff)
+    * **Equal blocks** — both models agree on the words.  Uncertain spans
+      from either provider are carried forward as doubts.
+    * **Disagreement blocks** — the two models read different words.
+      The decision depends on which model flagged sentinels:
 
-    Secondary spans that fall inside ``'equal'`` diff blocks are mapped
-    to primary coordinates; those in disagreement regions are subsumed
-    by the disagreement span.
+      - *Primary uncertain, secondary confident* → substitute the
+        secondary text into the output and mark it as a doubt.
+      - *Secondary uncertain, primary confident* → keep primary text,
+        mark as a doubt.
+      - *Both uncertain* → keep primary text, mark as a doubt.
+      - *Neither uncertain* → keep primary text, **no doubt**.  Both
+        models are confident; trust the primary.
+
+    The output text may therefore differ from ``primary.text`` when
+    secondary text is substituted into uncertain primary regions.
     """
     from difflib import SequenceMatcher
-
-    all_spans: list[tuple[int, int]] = list(primary.uncertain_spans)
 
     primary_tokens = _tokenize_with_positions(primary.text)
     secondary_tokens = _tokenize_with_positions(secondary.text)
 
+    if not primary_tokens:
+        return OCRResult(
+            text=primary.text,
+            uncertain_spans=list(primary.uncertain_spans),
+        )
+
     primary_words = [t[0] for t in primary_tokens]
     secondary_words = [t[0] for t in secondary_tokens]
 
-    matcher = SequenceMatcher(None, primary_words, secondary_words, autojunk=False)
+    matcher = SequenceMatcher(
+        None, primary_words, secondary_words, autojunk=False,
+    )
+
+    # Build output text and doubt spans in a single pass.
+    parts: list[str] = []
+    out_pos = 0          # running character position in output
+    pri_cursor = 0       # how far we have consumed primary.text
+    doubt_spans: list[tuple[int, int]] = []
 
     for tag, i1, i2, j1, j2 in matcher.get_opcodes():
         if tag == "equal":
-            # Map secondary uncertain spans that fall within this equal
-            # block back to primary text coordinates.
-            for sec_span_start, sec_span_end in secondary.uncertain_spans:
+            if i1 >= i2:
+                continue
+            block_end = primary_tokens[i2 - 1][2]
+            chunk = primary.text[pri_cursor:block_end]
+            parts.append(chunk)
+
+            # Carry primary uncertain spans that overlap this chunk.
+            for sp_s, sp_e in primary.uncertain_spans:
+                if sp_s < block_end and sp_e > pri_cursor:
+                    adj_s = out_pos + max(0, sp_s - pri_cursor)
+                    adj_e = out_pos + min(len(chunk), sp_e - pri_cursor)
+                    if adj_e > adj_s:
+                        doubt_spans.append((adj_s, adj_e))
+
+            # Map secondary uncertain spans to output coordinates.
+            for sp_s, sp_e in secondary.uncertain_spans:
                 for sec_idx in range(j1, j2):
                     _, s_start, s_end = secondary_tokens[sec_idx]
-                    if s_start >= sec_span_end or s_end <= sec_span_start:
+                    if s_start >= sp_e or s_end <= sp_s:
                         continue
-                    # This secondary word overlaps a secondary span.
-                    # Map it to the corresponding primary word.
                     pri_idx = i1 + (sec_idx - j1)
                     _, p_start, p_end = primary_tokens[pri_idx]
-                    all_spans.append((p_start, p_end))
-        else:
-            # Disagreement: flag the entire primary region as uncertain.
-            if i1 < i2 and primary_tokens:
-                span_start = primary_tokens[i1][1]
-                span_end = primary_tokens[i2 - 1][2]
-                all_spans.append((span_start, span_end))
+                    adj_s = out_pos + (p_start - pri_cursor)
+                    adj_e = out_pos + (p_end - pri_cursor)
+                    doubt_spans.append((adj_s, adj_e))
 
-    return OCRResult(text=primary.text, uncertain_spans=_merge_spans(all_spans))
+            out_pos += len(chunk)
+            pri_cursor = block_end
+
+        else:
+            # Disagreement block.
+            if i1 >= i2:
+                # Secondary-only insertion — nothing to emit.
+                continue
+
+            pri_block_start = primary_tokens[i1][1]
+            pri_block_end = primary_tokens[i2 - 1][2]
+
+            # Emit any whitespace gap between the last consumed
+            # position and the start of this block.
+            if pri_cursor < pri_block_start:
+                ws = primary.text[pri_cursor:pri_block_start]
+                parts.append(ws)
+                out_pos += len(ws)
+
+            # Check sentinel coverage in both providers.
+            pri_uncertain = _any_span_overlap(
+                primary.uncertain_spans, pri_block_start, pri_block_end,
+            )
+
+            sec_uncertain = False
+            sec_text = ""
+            if j1 < j2:
+                sec_start = secondary_tokens[j1][1]
+                sec_end = secondary_tokens[j2 - 1][2]
+                sec_uncertain = _any_span_overlap(
+                    secondary.uncertain_spans, sec_start, sec_end,
+                )
+                sec_text = secondary.text[sec_start:sec_end]
+
+            if pri_uncertain and not sec_uncertain and j1 < j2:
+                # Primary uncertain, secondary confident → substitute.
+                parts.append(sec_text)
+                doubt_spans.append((out_pos, out_pos + len(sec_text)))
+                out_pos += len(sec_text)
+            elif pri_uncertain or sec_uncertain:
+                # At least one model uncertain → keep primary, doubt.
+                pri_text = primary.text[pri_block_start:pri_block_end]
+                parts.append(pri_text)
+                doubt_spans.append((out_pos, out_pos + len(pri_text)))
+                out_pos += len(pri_text)
+            else:
+                # Neither uncertain → keep primary, no doubt.
+                pri_text = primary.text[pri_block_start:pri_block_end]
+                parts.append(pri_text)
+                out_pos += len(pri_text)
+
+            pri_cursor = pri_block_end
+
+    # Trailing text after the last token (e.g. trailing newline).
+    if pri_cursor < len(primary.text):
+        parts.append(primary.text[pri_cursor:])
+
+    return OCRResult(
+        text="".join(parts),
+        uncertain_spans=_merge_spans(doubt_spans),
+    )
 
 
 class DualPassOCRProvider:
     """OCR provider that runs two providers concurrently and reconciles.
 
-    Implements the ``OCRProvider`` Protocol. The primary provider's text
-    is used as the base; disagreements with the secondary become
-    uncertain spans ("doubts") for human review.
+    Implements the ``OCRProvider`` Protocol. Uses each model's own
+    sentinel-based confidence signal: only regions where at least one
+    model is uncertain become doubts.  When the primary is uncertain but
+    the secondary is confident, the secondary's text is substituted in.
+    Confident disagreements (neither model used sentinels) are resolved
+    silently in favour of the primary.
     """
 
     def __init__(self, primary: OCRProvider, secondary: OCRProvider) -> None:
