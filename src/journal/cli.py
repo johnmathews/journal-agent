@@ -309,65 +309,379 @@ def cmd_seed(args, config):
     repo = SQLiteEntryRepository(conn)
 
     samples = [
+        # ── Chapter 1: A Long-expected Party ──
         {
-            "date": "2026-03-15",
+            "date": "2025-06-10",
             "source_type": "photo",
             "text": (
-                "Woke up early today and went for a long walk through the park. "
-                "The cherry blossoms are starting to bloom and the air smelled "
-                "incredible. Met Atlas at the coffee shop afterwards — we talked "
-                "about his new project and the upcoming trip to Vienna. Feeling "
-                "optimistic about the week ahead. Need to remember to call the "
-                "dentist and finish the report for work."
+                "The preparations for my party are well underway. I have decided "
+                "that my one hundred and eleventh birthday shall be a truly "
+                "magnificent affair — one that the Shire will remember for a very "
+                "long time indeed. I have ordered pavilions and tents from Michel "
+                "Delving, arranged for a tremendous quantity of food and drink from "
+                "every corner of the four farthings, and invited what seems like "
+                "half the population of Hobbiton and Bywater. Frodo is turning "
+                "thirty-three on the same day, which makes it all the more special. "
+                "He has been a splendid heir and companion these past years at Bag "
+                "End. I do hope he will forgive me for what I am about to do."
             ),
         },
         {
-            "date": "2026-03-16",
+            "date": "2025-06-15",
             "source_type": "photo",
             "text": (
-                "Rainy day. Spent most of it inside reading and working on the "
-                "journal analysis tool. Made good progress on the chunking "
-                "algorithm — it now handles edge cases with very short paragraphs "
-                "much better. Had a video call with Sarah about the conference "
-                "next month. She suggested we submit a talk proposal together."
+                "Gandalf arrived this morning. I saw his cart coming up the Hill "
+                "with that old grey horse of his, and my heart leapt. It has been "
+                "far too long. We sat in the garden smoking pipe-weed and watching "
+                "the sun set behind the Party Tree. He has brought the most "
+                "extraordinary fireworks — rockets shaped like eagles and dragons, "
+                "fountains of silver rain, and something he calls the special "
+                "surprise that he will not let me see until the night itself. I "
+                "told him about my plan. He listened very carefully, puffing on "
+                "his pipe, and said nothing for a long while. Then he said I "
+                "should think very carefully about the Ring. I told him I have "
+                "thought about nothing else for months."
             ),
         },
         {
-            "date": "2026-03-18",
+            "date": "2025-06-18",
             "source_type": "voice",
             "text": (
-                "Quick voice note before bed. Today was intense at work — three "
-                "back-to-back meetings and a production incident that took most "
-                "of the afternoon to resolve. The root cause was a misconfigured "
-                "timeout on the database connection pool. Lesson learned: always "
-                "check the connection pool settings when deploying to a new "
-                "environment. On the bright side, dinner with Emma was lovely."
+                "I am exhausted. Spent the whole day answering the door to "
+                "well-wishers and delivery carts. The Sackville-Bagginses came "
+                "round again — Lobelia had that look in her eye, the one she gets "
+                "when she is mentally cataloguing my silver spoons. Otho stood "
+                "behind her trying to look pleasant and failing entirely. I was "
+                "perfectly civil but I confess I enjoyed telling them that no, the "
+                "party was by invitation only, and yes, they were invited, but no, "
+                "they could not bring their cousin from Hardbottle."
             ),
         },
         {
-            "date": "2026-03-20",
+            "date": "2025-06-20",
             "source_type": "photo",
             "text": (
-                "Took the train to Amsterdam for the day. Visited the "
-                "Rijksmuseum — the Vermeer room was as stunning as ever. Had "
-                "stroopwafels from that stand near Centraal Station. Walking "
-                "along the canals in the late afternoon light is one of my "
-                "favourite things. Bumped into Marcus at the station on the way "
-                "back — small world. He's doing well, just started a new role "
-                "at a fintech startup."
+                "Went for a long walk today to clear my head. Took the path along "
+                "the Water, past the mill, and up through the woods to the edge of "
+                "the Bindbole Wood. The countryside is impossibly green this time "
+                "of year. I sat on a stump for an hour and ate cheese sandwiches "
+                "and thought about mountains. I miss the Lonely Mountain. I miss "
+                "the sound of Dwarvish songs echoing in great halls. I miss the "
+                "smell of adventure. Bag End is comfortable — perhaps too "
+                "comfortable. I feel thin, like butter scraped over too much "
+                "bread. I need a holiday."
             ),
         },
         {
-            "date": "2026-03-22",
+            "date": "2025-06-22",
             "source_type": "photo",
             "text": (
-                "Saturday morning journaling. This week flew by. Highlights: "
-                "the Amsterdam trip, solving that production bug, and the long "
-                "walk on Monday. I want to be more intentional about exercise "
-                "next week — aim for at least 3 runs. Also need to start "
-                "planning the Vienna trip properly. Atlas sent me a list of "
-                "restaurants to try. Feeling grateful for good friends and "
-                "interesting work."
+                "Party day at last. I can hardly write, my hands are trembling — "
+                "whether from excitement or nerves I cannot tell. The weather is "
+                "perfect: warm sun, blue sky, a gentle breeze from the south. The "
+                "great pavilion is up on the Party Field, the tables are laid for "
+                "one hundred and forty-four guests at the special family dinner, "
+                "and there are provisions for all the uninvited hobbits who will "
+                "come anyway. Gandalf has been setting up his fireworks all "
+                "morning and shooing away inquisitive hobbit-children. Frodo "
+                "looks splendid in his new waistcoat. Everything is ready."
+            ),
+        },
+        {
+            "date": "2025-06-22",
+            "source_type": "voice",
+            "text": (
+                "Recording this in the dark, walking fast along the road to "
+                "Bucklebury. I did it. I actually did it. I stood up before all "
+                "those hobbits, said my farewell speech — I do not think they "
+                "understood a word of it — and then I slipped on the Ring and "
+                "vanished. The look on their faces! Or rather, the look I imagine "
+                "was on their faces, since I could not see them properly once the "
+                "Ring was on. I crept away in the confusion and went straight back "
+                "to Bag End. Gandalf was waiting for me. We had words about the "
+                "Ring. He wanted me to leave it behind for Frodo. I did not want "
+                "to. It is mine, I found it, it came to me. But in the end I "
+                "left it on the mantelpiece in an envelope. I feel lighter already, "
+                "in more ways than one. The road goes ever on and on."
+            ),
+        },
+        {
+            "date": "2025-06-24",
+            "source_type": "photo",
+            "text": (
+                "Two days on the road now and the Shire is falling behind me. I "
+                "slept under the stars last night near the Three-Farthing Stone "
+                "and woke to birdsong and dew on my blanket. I have packed light "
+                "— just my old travelling cloak, my walking stick, a few books, "
+                "and some provisions. I left almost everything at Bag End for "
+                "Frodo. The spoons, the furniture, the mathom collection, all of "
+                "it. I wonder how long it will take the Sackville-Bagginses to "
+                "realise they are not getting any of it. The thought makes me "
+                "smile. I am heading for Rivendell first. Elrond will take me in. "
+                "I have a book to write."
+            ),
+        },
+        # ── Chapter 2: The Shadow of the Past (Gandalf returns) ──
+        {
+            "date": "2025-07-05",
+            "source_type": "photo",
+            "text": (
+                "Arrived in Rivendell after a wonderfully uneventful journey. "
+                "Elrond welcomed me as warmly as ever. I have a lovely room "
+                "overlooking the falls, and a writing desk by the window where "
+                "the light is good all morning. I have started work on my book — "
+                "I am calling it There and Back Again, which Elrond says is a "
+                "very hobbit sort of title. I suppose he means it as a "
+                "compliment. The Elves here are endlessly courteous and slightly "
+                "baffling. They sing at all hours and seem to think sleep is "
+                "optional. I am adapting."
+            ),
+        },
+        {
+            "date": "2025-07-12",
+            "source_type": "photo",
+            "text": (
+                "The writing is going well. I have drafted three chapters about "
+                "the Unexpected Party — when Gandalf and all those Dwarves showed "
+                "up at Bag End and turned my life upside down. Balin, Dwalin, "
+                "Fili, Kili, Oin, Gloin, Dori, Nori, Ori, Bifur, Bofur, Bombur, "
+                "and of course Thorin Oakenshield himself. I can still hear them "
+                "singing about smashing my plates and bending my forks. Those were "
+                "the days. I had no idea what I was getting into. I wonder how "
+                "Frodo is managing at Bag End. I hope Gandalf is keeping an eye "
+                "on him. There is something about that Ring that worries me still."
+            ),
+        },
+        {
+            "date": "2025-07-15",
+            "source_type": "voice",
+            "text": (
+                "Could not sleep tonight. Kept thinking about the Ring. It has "
+                "been weeks since I gave it up but I still reach for my pocket "
+                "sometimes, expecting to feel it there. Gandalf was right to make "
+                "me leave it behind, I know that in my head, but my heart is "
+                "slower to agree. I dreamed of dark tunnels and a pale creature "
+                "with enormous eyes. Gollum. I have never told the true story of "
+                "how I got the Ring — I told the Dwarves and Gandalf a version "
+                "where Gollum gave it to me as a present. That was a lie. I won "
+                "it in a riddle game, fair and square, but I took it when he was "
+                "not looking. Gandalf seemed to know this already."
+            ),
+        },
+        {
+            "date": "2025-07-20",
+            "source_type": "photo",
+            "text": (
+                "A quiet week of writing and walking in the valley. Elrond's "
+                "library is magnificent — scrolls and books in every language of "
+                "Middle-earth, some so old the parchment crumbles if you breathe "
+                "on it too hard. I found an account of the Last Alliance written "
+                "by an Elf who was actually there, three thousand years ago. Three "
+                "thousand years! I am one hundred and eleven and I feel ancient. "
+                "These Elves make me feel like a child. Had a long talk with "
+                "Arwen this evening about mortality and the passage of time. She "
+                "understands more about that than most of her kind, I think."
+            ),
+        },
+        {
+            "date": "2025-07-28",
+            "source_type": "photo",
+            "text": (
+                "News from the Shire via a trader who passed through Bree. "
+                "Apparently my disappearance is still the talk of every pub "
+                "from Hobbiton to Tuckborough. Various theories are circulating: "
+                "I have gone mad, I have been murdered by Gandalf for my money, "
+                "I am living in a cave somewhere counting my treasure. The "
+                "Sackville-Bagginses have been trying to have Frodo declared "
+                "legally incompetent so they can claim Bag End. Typical Lobelia. "
+                "But Frodo is holding his own, the trader says, with help from "
+                "Merry Brandybuck. Good lad, Merry."
+            ),
+        },
+        {
+            "date": "2025-08-03",
+            "source_type": "voice",
+            "text": (
+                "Gandalf passed through Rivendell briefly today. He seemed "
+                "preoccupied — more so than usual. He asked me many questions "
+                "about the Ring, things he had asked before: how I found it, what "
+                "it felt like to wear it, whether I ever saw writing on it. I "
+                "told him about the letters that appear when you heat the Ring "
+                "in a fire — strange angular script that glows red and then "
+                "fades. He went very quiet when I said that. Then he said he had "
+                "to leave immediately and rode off without even staying for "
+                "supper. Very unlike Gandalf to miss a meal."
+            ),
+        },
+        {
+            "date": "2025-08-10",
+            "source_type": "photo",
+            "text": (
+                "Finished the chapter about the trolls today — Tom, Bert, and "
+                "William. I had forgotten how frightening that was at the time "
+                "and how funny it seems now. Gandalf turning them to stone by "
+                "imitating their voices until the sun came up. We found the troll "
+                "hoard afterwards, which is where I got Sting. Dear little Sting, "
+                "I gave it to Frodo along with the mithril coat. I hope he never "
+                "needs either of them, but something tells me hope is not enough."
+            ),
+        },
+        {
+            "date": "2025-08-15",
+            "source_type": "photo",
+            "text": (
+                "Rain all day. Stayed in my room and wrote about Rivendell — the "
+                "first time I came here, sixty years ago, with Thorin and Company. "
+                "How different it felt then, arriving exhausted and half-starved "
+                "after our adventure with the trolls and the goblins and the "
+                "wargs. Elrond read our map and found the moon-letters that "
+                "revealed the secret entrance to the Lonely Mountain. Without "
+                "that moment, the whole quest might have failed. Strange to be "
+                "writing about this place while sitting in it. The falls sound "
+                "the same. The food is just as good. Only I have changed."
+            ),
+        },
+        # ── Chapter 3: Three is Company (Frodo's departure) ──
+        {
+            "date": "2025-09-01",
+            "source_type": "photo",
+            "text": (
+                "Autumn is coming to Rivendell and the leaves in the valley are "
+                "turning gold and copper. I have been working on the songs and "
+                "poems for my book — translating some of the Dwarvish verses into "
+                "Westron is proving tricky. Gloin's son Gimli sent me a letter "
+                "with corrections to my account of the Battle of Five Armies. "
+                "Apparently I got several Dwarvish clan names wrong. I do not mind "
+                "the corrections but I wish he had been less smug about it."
+            ),
+        },
+        {
+            "date": "2025-09-10",
+            "source_type": "voice",
+            "text": (
+                "Disturbing news. Gandalf sent word that he has confirmed his "
+                "worst fears about the Ring. He did not say more in his letter — "
+                "too dangerous, he wrote. But he said he has told Frodo everything "
+                "and that Frodo has agreed to leave the Shire. My heart breaks for "
+                "the lad. I carried that thing for sixty years without knowing "
+                "what it truly was, and now Frodo must bear the consequences of "
+                "my ignorance. Or perhaps not my ignorance — my wilful blindness. "
+                "Part of me always knew there was something deeply wrong with it."
+            ),
+        },
+        {
+            "date": "2025-09-15",
+            "source_type": "photo",
+            "text": (
+                "I cannot concentrate on my writing. I keep thinking about Frodo "
+                "out there on the road with Sam. Gandalf's letter said Sam is "
+                "going with him, which is a great comfort — there is no more "
+                "loyal hobbit in the whole Shire than Samwise Gamgee. His father "
+                "the Gaffer would be proud, in his grumbling way. I remember Sam "
+                "as a little lad, peering over the garden fence with enormous "
+                "eyes whenever I mentioned Elves. And now he is going to meet "
+                "them. I hope the road is kind to them both."
+            ),
+        },
+        {
+            "date": "2025-09-18",
+            "source_type": "photo",
+            "text": (
+                "Elrond found me sitting by the falls today, staring at nothing. "
+                "He sat down beside me without speaking and we watched the water "
+                "for a long time. Then he said that the choices of the Ring-bearer "
+                "are not mine to make, and that guilt is a poor companion for an "
+                "old hobbit. He is right, of course. He usually is. Three thousand "
+                "years of wisdom will do that. I went back to my book and wrote "
+                "a thousand words about the barrel-ride down the Forest River. It "
+                "is easier to write about past adventures than to worry about "
+                "present ones."
+            ),
+        },
+        {
+            "date": "2025-09-22",
+            "source_type": "photo",
+            "text": (
+                "My birthday again — one hundred and twelve today, or is it one "
+                "hundred and thirteen? I am losing count, which Gandalf says is "
+                "a good sign. The Elves baked me a cake, which was very kind if "
+                "somewhat oversized. Arwen sang a song in Quenya that she said "
+                "was about the journeys of small folk who change the fate of the "
+                "world. I pretended I was not crying. There has been no word from "
+                "Frodo for weeks now. Gandalf is also silent. I trust them both "
+                "but the silence is hard. I lit a candle for Frodo tonight and "
+                "sat by the window watching the stars. Earendil was bright."
+            ),
+        },
+        {
+            "date": "2025-09-25",
+            "source_type": "voice",
+            "text": (
+                "Finally, news. A Ranger from the north brought word that three "
+                "hobbits were seen on the East Road near Bree. Three, not two — "
+                "so someone else has joined Frodo and Sam. Merry or Pippin, I "
+                "would wager, or both knowing those two. The Ranger also said "
+                "there were dark riders on the road, tall figures on black horses "
+                "that made his own horse shy and tremble. That worries me greatly. "
+                "Elrond looked grave when I told him. He said he would send scouts."
+            ),
+        },
+        {
+            "date": "2025-09-30",
+            "source_type": "photo",
+            "text": (
+                "The waiting is unbearable. I have written and rewritten the "
+                "chapter about Smaug three times this week, not because it needed "
+                "revision but because I need something to do with my hands and "
+                "my mind. The great dragon, the desolation, the treasure hoard "
+                "piled to the ceiling — and me, a small hobbit in the dark, "
+                "talking to a monster. I was terrified but also, I confess, "
+                "thrilled. That was the bravest thing I ever did, and the "
+                "most foolish, which in my experience are usually the same thing."
+            ),
+        },
+        {
+            "date": "2025-10-05",
+            "source_type": "photo",
+            "text": (
+                "Walked up to the high pass today, as far as the stone seats "
+                "where you can see both east and west. The Misty Mountains are "
+                "already capped with snow. Somewhere beyond them, Frodo is "
+                "walking toward Mordor — or at least toward Rivendell, if Gandalf "
+                "has any sense. The air was cold and thin and smelled of pine "
+                "and stone. I am old. My knees ache on the steep parts and my "
+                "breath comes shorter than it used to. But the view was worth "
+                "every step. I could see the road winding away into the distance "
+                "and I thought of all the roads I have walked and all the ones "
+                "I never will."
+            ),
+        },
+        {
+            "date": "2025-10-10",
+            "source_type": "voice",
+            "text": (
+                "They are coming. Elrond received word that Frodo is on his way "
+                "to Rivendell. He was hurt — stabbed by a Morgul-blade on "
+                "Weathertop. Aragorn is with him, Elrond says, and Glorfindel "
+                "rode out to meet them. I am sick with worry. A Morgul-blade. I "
+                "know enough Elvish lore to know what that means. If they do not "
+                "reach Rivendell in time — but I cannot think about that. I must "
+                "believe they will make it. Frodo is stronger than he looks. All "
+                "hobbits are."
+            ),
+        },
+        {
+            "date": "2025-10-12",
+            "source_type": "photo",
+            "text": (
+                "He is here. Frodo arrived last night, barely conscious, grey as "
+                "ash. Elrond worked through the night to heal him. I sat outside "
+                "the door and listened to the Elves singing healing songs and I "
+                "thought my heart would break. This is my fault. I found the Ring, "
+                "I kept it, I passed it on to him. If he dies it will be because "
+                "of my foolishness. But Elrond says he will live. The splinter is "
+                "removed. He is sleeping now, peacefully, for the first time in "
+                "weeks. Sam is beside him, refusing to leave. Good Sam."
             ),
         },
     ]
