@@ -227,7 +227,8 @@ class IngestionService:
             )
 
         # Transcribe
-        raw_text = self._transcription.transcribe(audio_data, media_type, language)
+        result = self._transcription.transcribe(audio_data, media_type, language)
+        raw_text = result.text if hasattr(result, "text") else result  # type: ignore[assignment]
         if not raw_text.strip():
             raise ValueError("Transcription produced no text from audio")
 
@@ -235,6 +236,11 @@ class IngestionService:
         word_count = len(raw_text.split())
         entry = self._repo.create_entry(date, source_type, raw_text, word_count, user_id=user_id)
         self._store_source_file(entry.id, f"voice_{date}", media_type, file_hash)
+
+        # Record uncertain spans from transcription confidence data.
+        uncertain_spans = getattr(result, "uncertain_spans", [])
+        if uncertain_spans:
+            self._repo.add_uncertain_spans(entry.id, uncertain_spans)
 
         # Chunk, embed, and store in vector DB
         chunk_count = self._process_text(entry.id, entry.final_text, date, user_id=user_id)
@@ -282,6 +288,7 @@ class IngestionService:
 
         # Transcribe each recording and check for duplicates
         transcripts: list[str] = []
+        per_recording_spans: list[list[tuple[int, int]]] = []
         file_hashes: list[str] = []
         file_media_types: list[str] = []
         for i, (audio_data, media_type) in enumerate(recordings):
@@ -291,10 +298,12 @@ class IngestionService:
                     f"Recording {i + 1} has already been uploaded in another entry. "
                     f"Delete the existing entry first if you want to re-upload."
                 )
-            text = self._transcription.transcribe(audio_data, media_type, language)
+            result = self._transcription.transcribe(audio_data, media_type, language)
+            text = result.text if hasattr(result, "text") else result  # type: ignore[assignment]
             if not text.strip():
                 raise ValueError(f"Transcription produced no text from recording {i + 1}")
             transcripts.append(text.strip())
+            per_recording_spans.append(getattr(result, "uncertain_spans", []))
             file_hashes.append(file_hash)
             file_media_types.append(media_type)
             if on_progress is not None:
@@ -315,6 +324,25 @@ class IngestionService:
             self._store_source_file(
                 entry.id, f"voice_{date}_part{i + 1}", media_type, file_hash
             )
+
+        # Shift per-recording uncertain spans into combined-text coordinates
+        # (same approach as _strip_and_shift_page_spans for multi-page OCR).
+        combined_spans: list[tuple[int, int]] = []
+        cumulative_offset = 0
+        for i, transcript in enumerate(transcripts):
+            for start, end in per_recording_spans[i]:
+                # Clip spans to the stripped transcript length
+                clipped_end = min(end, len(transcript))
+                if start < clipped_end:
+                    combined_spans.append(
+                        (cumulative_offset + start, cumulative_offset + clipped_end)
+                    )
+            cumulative_offset += len(transcript)
+            if i < len(transcripts) - 1:
+                cumulative_offset += 1  # the "\n" separator
+
+        if combined_spans:
+            self._repo.add_uncertain_spans(entry.id, combined_spans)
 
         # Chunk, embed, and store in vector DB
         chunk_count = self._process_text(entry.id, entry.final_text, date, user_id=user_id)

@@ -5,6 +5,7 @@ from unittest.mock import MagicMock
 import pytest
 
 from journal.db.repository import SQLiteEntryRepository
+from journal.models import TranscriptionResult
 from journal.providers.ocr import OCRResult
 from journal.services.chunking import FixedTokenChunker
 from journal.services.ingestion import IngestionService
@@ -28,7 +29,9 @@ def mock_ocr():
 @pytest.fixture
 def mock_transcription():
     provider = MagicMock()
-    provider.transcribe.return_value = "Voice journal entry about my day at work."
+    provider.transcribe.return_value = TranscriptionResult(
+        text="Voice journal entry about my day at work.",
+    )
     return provider
 
 
@@ -121,8 +124,8 @@ class TestIngestMultiVoice:
         self, ingestion_service, mock_transcription, mock_embeddings,
     ):
         mock_transcription.transcribe.side_effect = [
-            "First recording text.",
-            "Second recording text.",
+            TranscriptionResult(text="First recording text."),
+            TranscriptionResult(text="Second recording text."),
         ]
         entry = ingestion_service.ingest_multi_voice(
             [(b"audio1", "audio/webm"), (b"audio2", "audio/webm")],
@@ -137,8 +140,8 @@ class TestIngestMultiVoice:
         self, ingestion_service, mock_transcription, mock_embeddings,
     ):
         mock_transcription.transcribe.side_effect = [
-            "  Part one.  ",
-            "  Part two.  ",
+            TranscriptionResult(text="  Part one.  "),
+            TranscriptionResult(text="  Part two.  "),
         ]
         entry = ingestion_service.ingest_multi_voice(
             [(b"a1", "audio/webm"), (b"a2", "audio/mp3")],
@@ -147,7 +150,7 @@ class TestIngestMultiVoice:
         assert entry.raw_text == "Part one.\nPart two."
 
     def test_duplicate_recording_rejected(self, ingestion_service, mock_transcription):
-        mock_transcription.transcribe.return_value = "text"
+        mock_transcription.transcribe.return_value = TranscriptionResult(text="text")
         ingestion_service.ingest_voice(b"same audio", "audio/mp3", "2026-03-20")
         with pytest.raises(ValueError, match="already been uploaded"):
             ingestion_service.ingest_multi_voice(
@@ -157,7 +160,7 @@ class TestIngestMultiVoice:
     def test_empty_transcription_rejected(
         self, ingestion_service, mock_transcription,
     ):
-        mock_transcription.transcribe.return_value = "   "
+        mock_transcription.transcribe.return_value = TranscriptionResult(text="   ")
         with pytest.raises(ValueError, match="no text"):
             ingestion_service.ingest_multi_voice(
                 [(b"silent audio", "audio/webm")], "2026-03-22",
@@ -166,7 +169,10 @@ class TestIngestMultiVoice:
     def test_empty_transcription_multi_rejected(
         self, ingestion_service, mock_transcription,
     ):
-        mock_transcription.transcribe.side_effect = ["Good text.", "   "]
+        mock_transcription.transcribe.side_effect = [
+            TranscriptionResult(text="Good text."),
+            TranscriptionResult(text="   "),
+        ]
         with pytest.raises(ValueError, match="no text from recording 2"):
             ingestion_service.ingest_multi_voice(
                 [(b"audio1", "audio/webm"), (b"audio2", "audio/webm")],
@@ -180,7 +186,10 @@ class TestIngestMultiVoice:
     def test_progress_callback(
         self, ingestion_service, mock_transcription, mock_embeddings,
     ):
-        mock_transcription.transcribe.side_effect = ["Text one.", "Text two."]
+        mock_transcription.transcribe.side_effect = [
+            TranscriptionResult(text="Text one."),
+            TranscriptionResult(text="Text two."),
+        ]
         calls: list[tuple[int, int]] = []
         ingestion_service.ingest_multi_voice(
             [(b"a1", "audio/webm"), (b"a2", "audio/webm")],
@@ -193,8 +202,8 @@ class TestIngestMultiVoice:
         self, ingestion_service, mock_transcription, mock_embeddings,
     ):
         mock_transcription.transcribe.side_effect = [
-            "First recording text about the day.",
-            "Second recording text about the evening.",
+            TranscriptionResult(text="First recording text about the day."),
+            TranscriptionResult(text="Second recording text about the evening."),
         ]
         entry = ingestion_service.ingest_multi_voice(
             [(b"a1", "audio/webm"), (b"a2", "audio/webm")],
@@ -428,6 +437,83 @@ class TestUncertainSpansIngestion:
 
         spans_after = ingestion_service._repo.get_uncertain_spans(entry.id)
         assert spans_after == [(6, 12)]
+
+
+class TestVoiceUncertainSpans:
+    """Uncertain spans from transcription logprobs must be stored in the
+    same entry_uncertain_spans table as OCR doubts, so the webapp's Review
+    toggle highlights low-confidence words for voice entries too."""
+
+    def test_ingest_voice_persists_uncertain_spans(
+        self, ingestion_service, mock_transcription, mock_embeddings,
+    ):
+        mock_transcription.transcribe.return_value = TranscriptionResult(
+            text="Hello wrld today.",
+            uncertain_spans=[(6, 10)],  # "wrld"
+        )
+        entry = ingestion_service.ingest_voice(
+            b"audio data", "audio/mp3", "2026-03-22",
+        )
+        spans = ingestion_service._repo.get_uncertain_spans(entry.id)
+        assert spans == [(6, 10)]
+        assert entry.raw_text[6:10] == "wrld"
+
+    def test_ingest_voice_no_uncertain_spans(
+        self, ingestion_service, mock_transcription, mock_embeddings,
+    ):
+        mock_transcription.transcribe.return_value = TranscriptionResult(
+            text="All confident text.",
+            uncertain_spans=[],
+        )
+        entry = ingestion_service.ingest_voice(
+            b"audio data", "audio/mp3", "2026-03-22",
+        )
+        assert ingestion_service._repo.get_uncertain_spans(entry.id) == []
+
+    def test_multi_voice_shifts_spans_into_combined_coordinates(
+        self, ingestion_service, mock_transcription, mock_embeddings,
+    ):
+        mock_transcription.transcribe.side_effect = [
+            TranscriptionResult(
+                text="First wrld text.",
+                uncertain_spans=[(6, 10)],  # "wrld"
+            ),
+            TranscriptionResult(
+                text="Second badd text.",
+                uncertain_spans=[(7, 11)],  # "badd"
+            ),
+        ]
+        entry = ingestion_service.ingest_multi_voice(
+            [(b"a1", "audio/webm"), (b"a2", "audio/webm")],
+            "2026-03-22",
+        )
+        # Combined: "First wrld text.\nSecond badd text."
+        # Recording 1: "wrld" at (6, 10) → stays (6, 10)
+        # Recording 2: "badd" at (7, 11), offset = len("First wrld text.") + 1 = 17
+        #   → (7+17, 11+17) = (24, 28)
+        spans = ingestion_service._repo.get_uncertain_spans(entry.id)
+        assert spans == [(6, 10), (24, 28)]
+        assert entry.raw_text[6:10] == "wrld"
+        assert entry.raw_text[24:28] == "badd"
+
+    def test_multi_voice_one_recording_uncertain(
+        self, ingestion_service, mock_transcription, mock_embeddings,
+    ):
+        mock_transcription.transcribe.side_effect = [
+            TranscriptionResult(text="Clean text.", uncertain_spans=[]),
+            TranscriptionResult(
+                text="Has doubt here.",
+                uncertain_spans=[(4, 9)],  # "doubt"
+            ),
+        ]
+        entry = ingestion_service.ingest_multi_voice(
+            [(b"a1", "audio/webm"), (b"a2", "audio/webm")],
+            "2026-03-22",
+        )
+        # Recording 2 offset = len("Clean text.") + 1 = 12
+        spans = ingestion_service._repo.get_uncertain_spans(entry.id)
+        assert spans == [(16, 21)]
+        assert entry.raw_text[16:21] == "doubt"
 
 
 class TestMultiPageIngestion:

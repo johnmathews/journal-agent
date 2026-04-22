@@ -5,6 +5,22 @@ from typing import Any, Literal
 
 
 @dataclass
+class TranscriptionResult:
+    """Result from a transcription provider.
+
+    ``text`` is the transcribed text.  ``uncertain_spans`` lists
+    character-offset ranges ``(char_start, char_end)`` where the
+    transcription model had low confidence.  The spans use the same
+    convention as ``entry_uncertain_spans`` — half-open intervals into
+    ``text``.  An empty list means either no low-confidence regions
+    were detected or the model does not support confidence data.
+    """
+
+    text: str
+    uncertain_spans: list[tuple[int, int]] = field(default_factory=list)
+
+
+@dataclass
 class Entry:
     id: int
     entry_date: str

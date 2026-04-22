@@ -14,6 +14,7 @@ from urllib.error import HTTPError, URLError
 import pytest
 
 from journal.db.repository import SQLiteEntryRepository
+from journal.models import TranscriptionResult
 from journal.providers.ocr import OCRResult
 from journal.services.chunking import FixedTokenChunker
 from journal.services.ingestion import IngestionService
@@ -42,7 +43,9 @@ def mock_ocr():
 @pytest.fixture
 def mock_transcription():
     provider = MagicMock()
-    provider.transcribe.return_value = "Voice journal entry about my day at work."
+    provider.transcribe.return_value = TranscriptionResult(
+        text="Voice journal entry about my day at work.",
+    )
     return provider
 
 

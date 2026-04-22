@@ -39,6 +39,7 @@ def _build_services(config):
     transcription = OpenAITranscriptionProvider(
         api_key=config.openai_api_key,
         model=config.transcription_model,
+        confidence_threshold=config.transcription_confidence_threshold,
     )
     embeddings = OpenAIEmbeddingsProvider(
         api_key=config.openai_api_key,

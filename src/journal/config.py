@@ -75,6 +75,16 @@ class Config:
     # OpenAI (Whisper + Embeddings)
     openai_api_key: str = field(default_factory=lambda: os.environ.get("OPENAI_API_KEY", ""))
     transcription_model: str = "gpt-4o-transcribe"
+    # Log-probability threshold for flagging uncertain words during
+    # transcription.  Tokens with logprob below this value are marked
+    # as uncertain spans.  Only effective with models that support
+    # logprobs (gpt-4o-transcribe, gpt-4o-mini-transcribe).
+    # -0.5 ≈ 60% confidence.  More negative = fewer flags.
+    transcription_confidence_threshold: float = field(
+        default_factory=lambda: float(
+            os.environ.get("TRANSCRIPTION_CONFIDENCE_THRESHOLD", "-0.5")
+        )
+    )
     embedding_model: str = "text-embedding-3-large"
     embedding_dimensions: int = 1024
 
