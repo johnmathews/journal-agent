@@ -57,3 +57,10 @@ journal/             — Development journal entries (YYMMDD-name.md)
 - ChromaDB (vector storage, cosine distance)
 - SQLite (structured storage, FTS5)
 - MCP SDK with FastMCP (streamable HTTP transport)
+
+## Commit, Push, and CI
+
+After committing, always push and watch GitHub Actions CI (`gh run watch`). If CI fails, read the
+logs, fix the issue, run the full test suite locally, commit, push, and watch again. Do not
+consider work done until CI is green. When fixing bugs, always write a failing test first that
+reproduces the issue, then fix the code to make it pass.
