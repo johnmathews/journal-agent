@@ -190,6 +190,58 @@ Mood backfill jobs store:
 }
 ```
 
+Image ingestion jobs store:
+
+```json
+{
+ "entry_id": 75,
+ "entry_date": "2026-04-13",
+ "source_type": "photo",
+ "word_count": 250,
+ "chunk_count": 5,
+ "page_count": 3,
+ "follow_up_jobs": {
+   "mood_scoring": "job-uuid-1",
+   "entity_extraction": "job-uuid-2"
+ }
+}
+```
+
+Audio ingestion jobs store:
+
+```json
+{
+ "entry_id": 76,
+ "entry_date": "2026-04-14",
+ "source_type": "voice",
+ "word_count": 120,
+ "chunk_count": 2,
+ "recording_count": 1,
+ "follow_up_jobs": {
+   "mood_scoring": "job-uuid-3",
+   "entity_extraction": "job-uuid-4"
+ }
+}
+```
+
+Mood scoring (single entry) jobs store:
+
+```json
+{
+ "entry_id": 75,
+ "scores_written": 7
+}
+```
+
+Reprocess embeddings jobs store:
+
+```json
+{
+ "entry_id": 75,
+ "chunk_count": 5
+}
+```
+
 Consumers should not assume any field beyond these — if the server adds new counters in a future version, clients must
 tolerate unknown keys.
 

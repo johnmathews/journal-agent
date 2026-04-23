@@ -32,3 +32,8 @@ count, and follow-up job status.
 - `test_single_recording_succeeds` — asserts new fields
 - `FakeIngestionService` — now sets `word_count=2, chunk_count=1` on the
   fake entry so enriched results are realistic
+
+## Docs updated
+
+- `docs/jobs.md` — added result payload examples for `ingest_images`,
+  `ingest_audio`, `mood_score_entry`, and `reprocess_embeddings` job types
