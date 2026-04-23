@@ -18,4 +18,4 @@ ENV CHROMADB_PORT=8000
 
 EXPOSE 8000
 
-CMD ["uv", "run", "python", "-m", "journal.mcp_server"]
+CMD ["/app/.venv/bin/python", "-m", "journal.mcp_server"]
