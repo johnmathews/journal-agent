@@ -34,7 +34,10 @@ List entries with pagination and optional date filtering.
    "chunk_count": 5,
    "uncertain_span_count": 1,
    "doubts_verified": false,
-   "created_at": "2026-04-09T10:30:00"
+   "created_at": "2026-04-09T10:30:00",
+   "language": "en",
+   "updated_at": "2026-04-09T11:00:00",
+   "entity_mention_count": 3
   }
  ],
  "total": 42,
