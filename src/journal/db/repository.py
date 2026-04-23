@@ -238,6 +238,8 @@ class EntryRepository(Protocol):
 
     def get_page_count(self, entry_id: int) -> int: ...
 
+    def get_entity_mention_count(self, entry_id: int) -> int: ...
+
     def get_topic_frequency(
         self, topic: str, start_date: str | None = None, end_date: str | None = None,
         user_id: int | None = None,
@@ -1096,6 +1098,13 @@ class SQLiteEntryRepository:
     def get_page_count(self, entry_id: int) -> int:
         row = self._conn.execute(
             "SELECT COUNT(*) as cnt FROM entry_pages WHERE entry_id = ?",
+            (entry_id,),
+        ).fetchone()
+        return row["cnt"]
+
+    def get_entity_mention_count(self, entry_id: int) -> int:
+        row = self._conn.execute(
+            "SELECT COUNT(*) as cnt FROM entity_mentions WHERE entry_id = ?",
             (entry_id,),
         ).fetchone()
         return row["cnt"]

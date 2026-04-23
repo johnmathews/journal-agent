@@ -227,6 +227,9 @@ class TestListEntries:
         assert "chunk_count" in item
         assert "page_count" in item
         assert "created_at" in item
+        assert "language" in item
+        assert "updated_at" in item
+        assert "entity_mention_count" in item
         assert "raw_text" not in item
         assert "final_text" not in item
 
@@ -240,6 +243,42 @@ class TestListEntries:
         response = client.get("/api/entries")
         item = response.json()["items"][0]
         assert item["page_count"] == 2
+
+    def test_list_entries_includes_language_and_updated_at(
+        self, client: TestClient, repo: SQLiteEntryRepository
+    ) -> None:
+        _seed_entries(repo, 1)
+        response = client.get("/api/entries")
+        item = response.json()["items"][0]
+        assert item["language"] == "en"
+        assert "updated_at" in item
+
+    def test_list_entries_includes_entity_mention_count(
+        self, client: TestClient, repo: SQLiteEntryRepository, api_db_conn: sqlite3.Connection
+    ) -> None:
+        entry = repo.create_entry("2026-03-22", "photo", "Met Alice at the park", 5)
+        # Insert an entity and two mentions for this entry
+        api_db_conn.execute(
+            "INSERT INTO entities (user_id, canonical_name, entity_type, first_seen, created_at, updated_at)"
+            " VALUES (?, ?, ?, ?, datetime('now'), datetime('now'))",
+            (_TEST_USER_ID, "Alice", "person", "2026-03-22"),
+        )
+        entity_id = api_db_conn.execute("SELECT last_insert_rowid()").fetchone()[0]
+        api_db_conn.execute(
+            "INSERT INTO entity_mentions (entity_id, entry_id, quote, confidence, extraction_run_id)"
+            " VALUES (?, ?, ?, ?, ?)",
+            (entity_id, entry.id, "Alice", 0.95, "test-run"),
+        )
+        api_db_conn.execute(
+            "INSERT INTO entity_mentions (entity_id, entry_id, quote, confidence, extraction_run_id)"
+            " VALUES (?, ?, ?, ?, ?)",
+            (entity_id, entry.id, "Alice at the park", 0.9, "test-run"),
+        )
+        api_db_conn.commit()
+
+        response = client.get("/api/entries")
+        item = response.json()["items"][0]
+        assert item["entity_mention_count"] == 2
 
 
 class TestGetEntry:

@@ -196,6 +196,7 @@ def _entry_summary(
     entry: Any,
     page_count: int = 0,
     uncertain_span_count: int = 0,
+    entity_mention_count: int = 0,
 ) -> dict[str, Any]:
     """Convert an Entry to a summary dict (no text fields)."""
     return {
@@ -208,6 +209,9 @@ def _entry_summary(
         "uncertain_span_count": uncertain_span_count,
         "doubts_verified": getattr(entry, "doubts_verified", False),
         "created_at": entry.created_at,
+        "language": getattr(entry, "language", "en"),
+        "updated_at": getattr(entry, "updated_at", ""),
+        "entity_mention_count": entity_mention_count,
     }
 
 
@@ -275,7 +279,8 @@ def register_api_routes(
         for entry in entries:
             page_count = query_svc._repo.get_page_count(entry.id)
             span_count = query_svc._repo.get_uncertain_span_count(entry.id)
-            items.append(_entry_summary(entry, page_count, span_count))
+            entity_count = query_svc._repo.get_entity_mention_count(entry.id)
+            items.append(_entry_summary(entry, page_count, span_count, entity_count))
 
         log.info("GET /api/entries — returned %d/%d entries (offset=%d)", len(items), total, offset)
         return JSONResponse(
