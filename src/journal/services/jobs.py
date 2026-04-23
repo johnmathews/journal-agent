@@ -577,14 +577,23 @@ class JobRunner:
                 raise last_exc
 
             self._jobs.update_progress(job_id, total, total)
-            result = {"entry_id": entry.id}
-            self._jobs.mark_succeeded(job_id, result)
-            self._notify_success(job_user_id, "ingest_images", result)
 
             # Queue follow-up jobs: mood scoring + entity extraction.
-            self._queue_post_ingestion_jobs(
+            follow_up_ids = self._queue_post_ingestion_jobs(
                 job_id, "Image", entry.id, job_user_id,
             )
+
+            result: dict[str, Any] = {
+                "entry_id": entry.id,
+                "entry_date": entry.entry_date,
+                "source_type": entry.source_type,
+                "word_count": entry.word_count,
+                "chunk_count": entry.chunk_count,
+                "page_count": total,
+                "follow_up_jobs": follow_up_ids,
+            }
+            self._jobs.mark_succeeded(job_id, result)
+            self._notify_success(job_user_id, "ingest_images", result)
         except Exception as exc:  # noqa: BLE001 — terminal-state guard
             log.exception("Image ingestion job %s failed", job_id)
             # Clean up any remaining image data
@@ -606,20 +615,25 @@ class JobRunner:
         kind: str,
         entry_id: int,
         user_id: int | None,
-    ) -> None:
-        """Queue mood scoring + entity extraction after ingestion."""
-        follow_ups: list[tuple[str, Job]] = []
-        for label, submit in [
-            ("mood scoring", lambda: self.submit_mood_score_entry(
+    ) -> dict[str, str]:
+        """Queue mood scoring + entity extraction after ingestion.
+
+        Returns a mapping of follow-up label → job ID for each
+        successfully queued job (e.g. ``{"mood_scoring": "abc-123",
+        "entity_extraction": "def-456"}``).
+        """
+        follow_up_ids: dict[str, str] = {}
+        for label, key, submit in [
+            ("mood scoring", "mood_scoring", lambda: self.submit_mood_score_entry(
                 entry_id, user_id=user_id,
             )),
-            ("entity extraction", lambda: self.submit_entity_extraction(
+            ("entity extraction", "entity_extraction", lambda: self.submit_entity_extraction(
                 {"entry_id": entry_id}, user_id=user_id,
             )),
         ]:
             try:
                 fj = submit()
-                follow_ups.append((label, fj))
+                follow_up_ids[key] = fj.id
                 log.info(
                     "%s ingestion job %s — queued %s %s"
                     " for entry %d",
@@ -632,6 +646,7 @@ class JobRunner:
                     kind, parent_job_id, label,
                     exc_info=True,
                 )
+        return follow_up_ids
 
     def _run_mood_score_entry(
         self, job_id: str, params: dict[str, Any]
@@ -826,14 +841,23 @@ class JobRunner:
                 raise last_exc
 
             self._jobs.update_progress(job_id, total, total)
-            result = {"entry_id": entry.id}
-            self._jobs.mark_succeeded(job_id, result)
-            self._notify_success(job_user_id, "ingest_audio", result)
 
             # Queue follow-up jobs: mood scoring + entity extraction.
-            self._queue_post_ingestion_jobs(
+            follow_up_ids = self._queue_post_ingestion_jobs(
                 job_id, "Audio", entry.id, job_user_id,
             )
+
+            result: dict[str, Any] = {
+                "entry_id": entry.id,
+                "entry_date": entry.entry_date,
+                "source_type": entry.source_type,
+                "word_count": entry.word_count,
+                "chunk_count": entry.chunk_count,
+                "recording_count": total,
+                "follow_up_jobs": follow_up_ids,
+            }
+            self._jobs.mark_succeeded(job_id, result)
+            self._notify_success(job_user_id, "ingest_audio", result)
         except Exception as exc:  # noqa: BLE001 — terminal-state guard
             log.exception("Audio ingestion job %s failed", job_id)
             # Clean up any remaining audio data

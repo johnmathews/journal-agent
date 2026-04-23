@@ -630,6 +630,8 @@ class FakeIngestionService:
             source_type="photo",
             raw_text="fake text",
             final_text="fake text",
+            word_count=2,
+            chunk_count=1,
         )
         self.ingest_image_calls: list[tuple[bytes, str, str]] = []
         self.multi_page_calls: list[int] = []
@@ -725,7 +727,13 @@ class TestImageIngestionProgress:
         assert final.status == "succeeded"
         assert final.progress_total == 3  # 3 pages, NOT 4
         assert final.progress_current == 3
-        assert final.result == {"entry_id": 1}
+        assert final.result["entry_id"] == 1
+        assert final.result["page_count"] == 3
+        assert final.result["word_count"] == 2
+        assert final.result["chunk_count"] == 1
+        assert final.result["entry_date"] == "2026-04-13"
+        assert final.result["source_type"] == "photo"
+        assert "follow_up_jobs" in final.result
 
     def test_progress_current_never_exceeds_total(
         self, runner_factory, jobs_repo
@@ -786,7 +794,13 @@ class TestAudioIngestion:
         final = jobs_repo.get(job.id)
         assert final is not None
         assert final.status == "succeeded"
-        assert final.result == {"entry_id": 1}
+        assert final.result["entry_id"] == 1
+        assert final.result["recording_count"] == 1
+        assert final.result["word_count"] == 2
+        assert final.result["chunk_count"] == 1
+        assert final.result["entry_date"] == "2026-04-13"
+        assert final.result["source_type"] == "photo"
+        assert "follow_up_jobs" in final.result
 
     def test_multiple_recordings_succeeds(self, runner_factory, jobs_repo):
         ingestion = FakeIngestionService()
