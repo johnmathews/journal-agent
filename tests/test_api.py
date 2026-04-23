@@ -121,6 +121,7 @@ def services(
         "job_repository": job_repository,
         "config": config,
         "runtime_settings": runtime,
+        "db_conn": repo._conn,
     }
 
 
@@ -2165,3 +2166,113 @@ class TestRuntimeSettings:
         )
         assert resp.status_code == 200
         assert set(resp.json()["updated"]) == {"preprocess_images", "ocr_dual_pass"}
+
+
+class _FakeNonAdminMiddleware:
+    """ASGI middleware that injects a non-admin test user."""
+
+    def __init__(self, app):  # type: ignore[no-untyped-def]
+        self.app = app
+
+    async def __call__(self, scope, receive, send):  # type: ignore[no-untyped-def]
+        if scope["type"] in ("http", "websocket"):
+            scope["user"] = AuthenticatedUser(
+                user_id=_TEST_USER_ID,
+                email="test@example.com",
+                display_name="Test User",
+                is_admin=False,
+                is_active=True,
+                email_verified=True,
+            )
+            token = _current_user_id.set(_TEST_USER_ID)
+            try:
+                await self.app(scope, receive, send)
+            finally:
+                _current_user_id.reset(token)
+        else:
+            await self.app(scope, receive, send)
+
+
+@pytest.fixture
+def non_admin_client(services: dict) -> Generator[TestClient]:
+    """Test client authenticated as a non-admin user."""
+    from mcp.server.fastmcp import FastMCP
+
+    from journal.api import register_api_routes
+
+    test_mcp = FastMCP("test-journal")
+    register_api_routes(test_mcp, lambda: services)
+    app = _FakeNonAdminMiddleware(test_mcp.streamable_http_app())
+    with TestClient(app, raise_server_exceptions=False) as tc:
+        yield tc
+
+
+class TestPricing:
+    """GET/PATCH /api/settings/pricing."""
+
+    def test_get_pricing(self, client: TestClient) -> None:
+        resp = client.get("/api/settings/pricing")
+        assert resp.status_code == 200
+        data = resp.json()
+        assert "pricing" in data
+        assert len(data["pricing"]) >= 12
+        models = {p["model"] for p in data["pricing"]}
+        assert "claude-opus-4-6" in models
+        assert "text-embedding-3-large" in models
+
+    def test_settings_includes_pricing(self, client: TestClient) -> None:
+        resp = client.get("/api/settings")
+        assert resp.status_code == 200
+        data = resp.json()
+        assert "pricing" in data
+        assert len(data["pricing"]) >= 12
+
+    def test_patch_pricing_updates_model(self, client: TestClient) -> None:
+        resp = client.patch(
+            "/api/settings/pricing",
+            json={"claude-opus-4-6": {"input_cost_per_mtok": 6.0}},
+        )
+        assert resp.status_code == 200
+        data = resp.json()
+        assert "claude-opus-4-6" in data["updated"]
+        # Verify the change is reflected in the returned pricing list
+        opus = next(p for p in data["pricing"] if p["model"] == "claude-opus-4-6")
+        assert opus["input_cost_per_mtok"] == 6.0
+
+    def test_patch_pricing_requires_admin(
+        self, non_admin_client: TestClient,
+    ) -> None:
+        resp = non_admin_client.patch(
+            "/api/settings/pricing",
+            json={"claude-opus-4-6": {"input_cost_per_mtok": 6.0}},
+        )
+        assert resp.status_code == 403
+
+    def test_patch_pricing_unknown_model(self, client: TestClient) -> None:
+        resp = client.patch(
+            "/api/settings/pricing",
+            json={"nonexistent": {"input_cost_per_mtok": 1.0}},
+        )
+        assert resp.status_code == 400
+        assert "errors" in resp.json()
+
+    def test_patch_pricing_partial_success(self, client: TestClient) -> None:
+        resp = client.patch(
+            "/api/settings/pricing",
+            json={
+                "claude-opus-4-6": {"input_cost_per_mtok": 5.5},
+                "nonexistent": {"input_cost_per_mtok": 1.0},
+            },
+        )
+        assert resp.status_code == 207
+        data = resp.json()
+        assert "claude-opus-4-6" in data["updated"]
+        assert any("nonexistent" in e for e in data["errors"])
+
+    def test_patch_pricing_invalid_json(self, client: TestClient) -> None:
+        resp = client.patch(
+            "/api/settings/pricing",
+            content=b"not json",
+            headers={"content-type": "application/json"},
+        )
+        assert resp.status_code == 400

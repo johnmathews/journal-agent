@@ -364,6 +364,8 @@ def _init_services() -> dict:
         "user_repo": user_repo,
         # Notifications
         "notification_service": notification_service,
+        # Raw DB connection — used by lightweight config readers (e.g. pricing).
+        "db_conn": conn,
     }
 
     entry_count = repo.count_entries()

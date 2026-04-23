@@ -16,6 +16,7 @@ from PIL import Image
 from starlette.responses import JSONResponse
 
 from journal.auth import get_authenticated_user
+from journal.db.pricing import PricingEntry, get_all_pricing, update_pricing
 from journal.services.liveness import (
     check_api_key,
     check_chromadb,
@@ -68,6 +69,18 @@ def _runtime_get(services: dict, key: str) -> Any:
             pass
     config = services.get("config")
     return getattr(config, key, None) if config else None
+
+
+def _pricing_to_dict(entry: PricingEntry) -> dict[str, object]:
+    """Convert a PricingEntry to a JSON-serializable dict."""
+    return {
+        "model": entry.model,
+        "category": entry.category,
+        "input_cost_per_mtok": entry.input_cost_per_mtok,
+        "output_cost_per_mtok": entry.output_cost_per_mtok,
+        "cost_per_minute": entry.cost_per_minute,
+        "last_verified": entry.last_verified,
+    }
 
 
 def _entry_to_dict(
@@ -690,6 +703,8 @@ def register_api_routes(
         from journal.providers.ocr import _DEFAULT_MODELS
 
         ocr_model = config.ocr_model or _DEFAULT_MODELS.get(config.ocr_provider, "")
+        conn = services.get("db_conn")
+        pricing_entries = get_all_pricing(conn) if conn else []
         return JSONResponse(
             {
                 "ocr": {
@@ -729,6 +744,7 @@ def register_api_routes(
                     if (runtime := services.get("runtime_settings"))
                     else []
                 ),
+                "pricing": [_pricing_to_dict(e) for e in pricing_entries],
             }
         )
 
@@ -785,6 +801,70 @@ def register_api_routes(
         if errors:
             result["warnings"] = errors
         return JSONResponse(result)
+
+    # ── Pricing configuration ────────────────────────────────────────
+
+    @mcp.custom_route(
+        "/api/settings/pricing", methods=["GET"], name="api_pricing_get",
+    )
+    async def get_pricing(request: Request) -> JSONResponse:
+        """Return all API model pricing entries."""
+        services = services_getter()
+        if services is None:
+            return JSONResponse({"error": "Server not initialized"}, status_code=503)
+        conn = services.get("db_conn")
+        if conn is None:
+            return JSONResponse({"error": "Database not available"}, status_code=503)
+        entries = get_all_pricing(conn)
+        return JSONResponse({"pricing": [_pricing_to_dict(e) for e in entries]})
+
+    @mcp.custom_route(
+        "/api/settings/pricing", methods=["PATCH"], name="api_pricing_patch",
+    )
+    async def patch_pricing(request: Request) -> JSONResponse:
+        """Update pricing for one or more models. Admin-only."""
+        user = get_authenticated_user(request)
+        if not user or not user.is_admin:
+            return JSONResponse({"error": "Admin access required"}, status_code=403)
+        services = services_getter()
+        if services is None:
+            return JSONResponse({"error": "Server not initialized"}, status_code=503)
+        conn = services.get("db_conn")
+        if conn is None:
+            return JSONResponse({"error": "Database not available"}, status_code=503)
+
+        try:
+            body = await request.json()
+        except Exception:
+            return JSONResponse({"error": "Invalid JSON"}, status_code=400)
+
+        if not isinstance(body, dict):
+            return JSONResponse(
+                {"error": "Request body must be a JSON object"}, status_code=400,
+            )
+
+        updated: list[str] = []
+        errors: list[str] = []
+        for model_name, model_updates in body.items():
+            if not isinstance(model_updates, dict):
+                errors.append(f"{model_name}: value must be an object")
+                continue
+            result = update_pricing(conn, model_name, model_updates)
+            if result is None:
+                errors.append(f"{model_name}: unknown model or no valid fields")
+            else:
+                updated.append(model_name)
+
+        status = 200 if not errors else (207 if updated else 400)
+        entries = get_all_pricing(conn)
+        result_dict: dict[str, object] = {
+            "updated": updated,
+            "pricing": [_pricing_to_dict(e) for e in entries],
+        }
+        if errors:
+            result_dict["errors"] = errors
+        log.info("PATCH /api/settings/pricing — updated %s", updated)
+        return JSONResponse(result_dict, status_code=status)
 
     # ── User preferences ─────────────────────────────────────────────
 
