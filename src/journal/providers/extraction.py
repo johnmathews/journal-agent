@@ -240,6 +240,26 @@ class AnthropicExtractionProvider:
 
 _PUNCT_TO_STRIP = ",.;:!?\"'()[]{}"
 
+# Suffixes that turn a noun into a possessive or plural. If the only
+# difference between the LLM's canonical_name and a longer token in the
+# quote is one of these, the LLM had it right — the longer form is the
+# inflected form, not a clipped canonical. Without this guard the
+# repair logic happily promoted "Hermione" -> "Hermione's", "Daniel"
+# -> "Daniels", etc. across most entities in the corpus on the first
+# real-data run.
+_INFLECTION_SUFFIXES = ("'s", "s'", "s")
+
+
+def _is_inflection_of(name_lower: str, token_lower: str) -> bool:
+    """True if ``token_lower`` is just an inflected form of ``name_lower``
+    (possessive or plural). Used both to trust the canonical when the
+    token is its inflected form, and to reject inflected forms as
+    repair candidates."""
+    if not token_lower.startswith(name_lower):
+        return False
+    extra = token_lower[len(name_lower):]
+    return extra in _INFLECTION_SUFFIXES
+
 
 def _repair_canonical_name(
     canonical_name: str, quote: str,
@@ -251,23 +271,32 @@ def _repair_canonical_name(
     The model occasionally returns a ``canonical_name`` that is one or
     two characters shorter than the form actually in the source text
     — e.g. ``"Nautilin"`` for a quote ``"Nautiline, the iOS app..."``.
-    The substring check is *not* sufficient on its own, because the
-    clipped name is itself a substring of the longer token (just
-    missing the last letter). Operate at the token level instead:
+    Operates at the token level (a naive substring check is not enough:
+    the clipped name is itself a substring of the longer token).
 
-    1. If any whitespace-separated token in ``quote`` (after stripping
-       surrounding punctuation) is **equal** to ``canonical_name``
-       (case-insensitive), the LLM picked a real word from the quote
-       — trust it as-is. This protects deliberately-shorter canonicals
-       like ``"Bob"`` for a quote ``"Robert 'Bob' Smith"`` where the
-       short form is genuinely a separate token.
-    2. Otherwise, if ``canonical_name`` is a strict prefix of some
-       longer token in the quote, return that longer token. This
-       catches the clipped-trailing-character failure mode.
+    Trust rules — if any of these match, the LLM had it right:
+
+    1. Some whitespace-separated token in ``quote`` (after stripping
+       surrounding punctuation) **equals** ``canonical_name``
+       case-insensitively. Protects deliberate short canonicals like
+       ``"Bob"`` for a quote ``"Robert 'Bob' Smith"``.
+    2. Some token is an inflection of ``canonical_name`` — the same
+       name with a possessive (``'s``, ``s'``) or plural (``s``)
+       suffix. The LLM picked the bare canonical and was right; the
+       longer form is just an inflected reference. This is the common
+       case for proper nouns and prevents false repairs like
+       ``"Hermione" -> "Hermione's"`` or ``"Daniel" -> "Daniels"``.
+
+    Repair rule:
+
+    3. Otherwise, if ``canonical_name`` is a strict prefix of some
+       longer token in the quote AND the extra characters are not an
+       inflection suffix, return that longer token. Catches clipped-
+       trailing-character LLM bugs (``"Nautilin"`` -> ``"Nautiline"``)
+       without false-positive-ing on inflections.
 
     Anything else is left alone with a warning logged by the caller.
-    We never invent characters out of thin air. The returned token
-    preserves the original casing from the quote.
+    Returned token preserves the original casing from the quote.
     """
     if not canonical_name or not quote:
         return canonical_name, False
@@ -280,8 +309,11 @@ def _repair_canonical_name(
             continue
         token_lower = token.lower()
         if token_lower == name_lower:
-            # The canonical_name is genuinely present as a token —
-            # trust the LLM's choice.
+            # canonical_name is genuinely present as a token.
+            return canonical_name, False
+        if _is_inflection_of(name_lower, token_lower):
+            # Token is "<canonical>'s" / "<canonical>s'" / "<canonical>s".
+            # The LLM correctly picked the bare canonical.
             return canonical_name, False
         if (
             len(token) > len(canonical_name)

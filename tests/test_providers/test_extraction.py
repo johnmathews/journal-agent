@@ -204,11 +204,13 @@ class TestRepairCanonicalName:
 
     def test_strips_trailing_punctuation_when_comparing(self) -> None:
         """Quotes routinely have commas/periods after names. Compare
-        against the bare token after stripping surrounding punctuation."""
+        against the bare token after stripping surrounding punctuation.
+        Uses a non-inflection extension (an 'a' suffix, not the 's'
+        that would be rejected by the inflection guard)."""
         repaired, was_repaired = _repair_canonical_name(
-            "Atla", "I met Atlas, my dog, in the park.",
+            "Vienn", "I went to Vienna, the capital.",
         )
-        assert repaired == "Atlas"
+        assert repaired == "Vienna"
         assert was_repaired is True
 
     def test_case_insensitive_prefix_returns_original_case(self) -> None:
@@ -242,6 +244,61 @@ class TestRepairCanonicalName:
         )
         # Same length, not a strict prefix → no repair
         assert repaired == "Atlas"
+        assert was_repaired is False
+
+    def test_possessive_apostrophe_s_is_not_a_repair_candidate(self) -> None:
+        """Most common false-positive surfaced by the first prod
+        dry-run: 'Hermione' should NOT be promoted to 'Hermione's'
+        just because the quote uses the possessive form. The LLM
+        correctly picked the bare canonical."""
+        repaired, was_repaired = _repair_canonical_name(
+            "Hermione", "I was at Hermione's house yesterday.",
+        )
+        assert repaired == "Hermione"
+        assert was_repaired is False
+
+    def test_plural_s_is_not_a_repair_candidate(self) -> None:
+        """'Daniel' should not be promoted to 'Daniels' — that's a
+        possessive without an apostrophe or a plural form."""
+        repaired, was_repaired = _repair_canonical_name(
+            "Daniel", "Daniels came over for dinner.",
+        )
+        assert repaired == "Daniel"
+        assert was_repaired is False
+
+    def test_plural_possessive_s_apostrophe_is_not_a_repair_candidate(
+        self,
+    ) -> None:
+        """``s'`` (plural possessive) is also rejected as inflection."""
+        repaired, was_repaired = _repair_canonical_name(
+            "Smith", "the Smiths' house was crowded",
+        )
+        assert repaired == "Smith"
+        assert was_repaired is False
+
+    def test_real_repair_still_works_when_quote_only_has_clipped_form(
+        self,
+    ) -> None:
+        """Regression check: the original Nautilin/Nautiline case must
+        still produce a real repair. The inflection guard rejects only
+        possessive/plural extensions, not arbitrary longer tokens."""
+        repaired, was_repaired = _repair_canonical_name(
+            "Nautilin", "Nautiline shipped today",
+        )
+        assert repaired == "Nautiline"
+        assert was_repaired is True
+
+    def test_inflection_present_short_circuits_other_repairs(self) -> None:
+        """If the quote contains an inflection form of the canonical,
+        we trust the LLM and stop looking for repair candidates — even
+        if a non-inflection longer token also appears later. This is
+        the safer choice given how prevalent false-positive repairs
+        on inflections were on the first prod dry-run."""
+        repaired, was_repaired = _repair_canonical_name(
+            "Nautilin",
+            "Nautilin's API talks to Nautiline yesterday",
+        )
+        assert repaired == "Nautilin"
         assert was_repaired is False
 
 
