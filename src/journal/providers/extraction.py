@@ -238,6 +238,63 @@ class AnthropicExtractionProvider:
         return _parse_tool_response(message)
 
 
+_PUNCT_TO_STRIP = ",.;:!?\"'()[]{}"
+
+
+def _repair_canonical_name(
+    canonical_name: str, quote: str,
+) -> tuple[str, bool]:
+    """Defend against LLM-clipped ``canonical_name`` values.
+
+    Returns ``(repaired_name, was_repaired)``.
+
+    The model occasionally returns a ``canonical_name`` that is one or
+    two characters shorter than the form actually in the source text
+    — e.g. ``"Nautilin"`` for a quote ``"Nautiline, the iOS app..."``.
+    The substring check is *not* sufficient on its own, because the
+    clipped name is itself a substring of the longer token (just
+    missing the last letter). Operate at the token level instead:
+
+    1. If any whitespace-separated token in ``quote`` (after stripping
+       surrounding punctuation) is **equal** to ``canonical_name``
+       (case-insensitive), the LLM picked a real word from the quote
+       — trust it as-is. This protects deliberately-shorter canonicals
+       like ``"Bob"`` for a quote ``"Robert 'Bob' Smith"`` where the
+       short form is genuinely a separate token.
+    2. Otherwise, if ``canonical_name`` is a strict prefix of some
+       longer token in the quote, return that longer token. This
+       catches the clipped-trailing-character failure mode.
+
+    Anything else is left alone with a warning logged by the caller.
+    We never invent characters out of thin air. The returned token
+    preserves the original casing from the quote.
+    """
+    if not canonical_name or not quote:
+        return canonical_name, False
+
+    name_lower = canonical_name.lower()
+    repair_candidate: str | None = None
+    for raw_token in quote.split():
+        token = raw_token.strip(_PUNCT_TO_STRIP)
+        if not token:
+            continue
+        token_lower = token.lower()
+        if token_lower == name_lower:
+            # The canonical_name is genuinely present as a token —
+            # trust the LLM's choice.
+            return canonical_name, False
+        if (
+            len(token) > len(canonical_name)
+            and token_lower.startswith(name_lower)
+            and repair_candidate is None
+        ):
+            repair_candidate = token
+
+    if repair_candidate is not None:
+        return repair_candidate, True
+    return canonical_name, False
+
+
 def _parse_tool_response(message: Any) -> RawExtractionResult:
     """Extract entities/relationships from an Anthropic tool-use response.
 
@@ -271,13 +328,34 @@ def _parse_tool_response(message: Any) -> RawExtractionResult:
     for item in entities_raw:
         if not isinstance(item, dict):
             continue
+        canonical_name = item.get("canonical_name", "").strip()
+        quote = item.get("quote", "") or ""
+        repaired_name, was_repaired = _repair_canonical_name(
+            canonical_name, quote,
+        )
+        if was_repaired:
+            logger.warning(
+                "Repaired clipped canonical_name from LLM: %r -> %r "
+                "(quote: %r)",
+                canonical_name, repaired_name, quote,
+            )
+        elif (
+            canonical_name
+            and quote
+            and canonical_name.lower() not in quote.lower()
+        ):
+            logger.warning(
+                "LLM returned canonical_name %r that does not appear "
+                "in its quote %r — keeping as-is, no repair candidate "
+                "found", canonical_name, quote,
+            )
         entities.append(
             {
                 "entity_type": item.get("entity_type", "other"),
-                "canonical_name": item.get("canonical_name", "").strip(),
+                "canonical_name": repaired_name,
                 "description": item.get("description", "") or "",
                 "aliases": list(item.get("aliases") or []),
-                "quote": item.get("quote", "") or "",
+                "quote": quote,
                 "confidence": float(item.get("confidence", 0.0) or 0.0),
             }
         )

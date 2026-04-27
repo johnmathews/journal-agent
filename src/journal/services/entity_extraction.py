@@ -300,6 +300,7 @@ class EntityExtractionService:
             mentions_created=mentions_created,
             relationships_created=relationships_created,
             warnings=warnings,
+            entities_deleted=orphans_deleted,
         )
         log.info(
             "Extraction complete for entry %d: %d new / %d matched,"

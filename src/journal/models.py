@@ -277,6 +277,12 @@ class ExtractionResult:
     mentions_created: int
     relationships_created: int
     warnings: list[str] = field(default_factory=list)
+    # Number of entities that became orphaned (zero mentions across all
+    # entries) as a result of this extraction and were auto-removed by
+    # the orphan-cleanup pass.  Always 0 for batch/multi-entry runs;
+    # only meaningful for single-entry re-extractions triggered by an
+    # edit-save pipeline.
+    entities_deleted: int = 0
 
 
 JobStatus = Literal["queued", "running", "succeeded", "failed"]

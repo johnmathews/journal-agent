@@ -393,7 +393,8 @@ class TestBuildSuccessMessage:
     def test_save_entry_pipeline_success_message(
         self, svc: PushoverNotificationService,
     ) -> None:
-        """Save-entry pipeline (edit flow) success summary covers all 3 stages."""
+        """Save-entry pipeline (edit flow) success summary covers all 3 stages
+        with explicit per-line labels."""
         result = {
             "entry_id": 76,
             "follow_up_jobs": {
@@ -401,22 +402,49 @@ class TestBuildSuccessMessage:
                 "entity_extraction": "e1",
                 "mood_scoring": "m1",
             },
-            "notify_strategy": "compressed_all",
             "reprocess_embeddings_result": {
                 "entry_id": 76, "chunk_count": 4,
             },
             "entity_extraction_result": {
                 "entries_processed": 1,
                 "entities_created": 2,
-                "mentions_created": 5,
+                "entities_matched": 7,
+                "entities_deleted": 1,
+                "mentions_created": 19,
             },
             "mood_scoring_result": {"entry_id": 76, "scores_written": 3},
         }
         msg = svc._build_success_message("save_entry_pipeline", result)
         assert "Entry 76 updated" in msg
-        assert "Reprocessed 4 chunks" in msg
-        assert "2 entities, 5 mentions" in msg
-        assert "3 mood scores" in msg
+        assert "Reprocessed: 4 chunks" in msg
+        # Each entity counter on its own labeled line
+        assert "Entities created: 2" in msg
+        assert "Entities deleted: 1" in msg
+        # Total = created (2) + matched (7) = 9
+        assert "Total entities: 9" in msg
+        assert "Mentions: 19" in msg
+        assert "Mood scores: 3" in msg
+
+    def test_save_entry_pipeline_message_handles_missing_entities_deleted(
+        self, svc: PushoverNotificationService,
+    ) -> None:
+        """Older-format payloads without entities_deleted default the line
+        to 0 rather than crashing."""
+        result = {
+            "entry_id": 76,
+            "reprocess_embeddings_result": {"chunk_count": 4},
+            "entity_extraction_result": {
+                "entries_processed": 1,
+                "entities_created": 2,
+                "entities_matched": 0,
+                # entities_deleted missing
+                "mentions_created": 5,
+            },
+            "mood_scoring_result": {"scores_written": 3},
+        }
+        msg = svc._build_success_message("save_entry_pipeline", result)
+        assert "Entities deleted: 0" in msg
+        assert "Total entities: 2" in msg
 
     def test_save_entry_pipeline_message_omits_missing_stages(
         self, svc: PushoverNotificationService,
@@ -428,6 +456,8 @@ class TestBuildSuccessMessage:
             "entity_extraction_result": {
                 "entries_processed": 1,
                 "entities_created": 2,
+                "entities_matched": 0,
+                "entities_deleted": 0,
                 "mentions_created": 5,
             },
             # No mood_scoring_result
@@ -449,7 +479,9 @@ class TestBuildPipelineFailureBody:
             "entity_extraction_result": {
                 "entries_processed": 1,
                 "entities_created": 2,
-                "mentions_created": 5,
+                "entities_matched": 7,
+                "entities_deleted": 1,
+                "mentions_created": 19,
             },
         }
         failures = {"mood_scoring": "LLM overloaded"}
@@ -459,8 +491,11 @@ class TestBuildPipelineFailureBody:
         )
         assert "Entry 76 update" in body
         assert "partial failure" in body
-        assert "+ Reprocessed 4 chunks" in body
-        assert "+ 2 entities, 5 mentions" in body
+        assert "+ Reprocessed: 4 chunks" in body
+        assert "+ Entities created: 2" in body
+        assert "+ Entities deleted: 1" in body
+        assert "+ Total entities: 9" in body
+        assert "+ Mentions: 19" in body
         assert "- Mood scoring: LLM overloaded" in body
 
     def test_total_failure_uses_failed_header(self) -> None:
@@ -500,7 +535,7 @@ class TestNotifyPipelineFailed:
         svc: PushoverNotificationService,
         mock_user_repo: MagicMock,
     ) -> None:
-        body = "Entry 76 update — partial failure\n+ Reprocessed 4 chunks"
+        body = "Entry 76 update — partial failure\n+ Reprocessed: 4 chunks"
         with patch("urllib.request.urlopen") as mock_urlopen:
             mock_urlopen.return_value = _make_urlopen_response({"status": 1})
             svc.notify_pipeline_failed(
@@ -512,8 +547,11 @@ class TestNotifyPipelineFailed:
             posted_data = req.data.decode()
             # Title uses the parent job's label
             assert "Entry+update+failed" in posted_data
-            # Body is exactly what we passed (no cause-tag prefix)
-            assert "Reprocessed+4+chunks" in posted_data
+            # Body is exactly what we passed (no cause-tag prefix).
+            # URL-encoded: ":" -> %3A, " " -> +, so "Reprocessed: 4 chunks"
+            # serialises to "Reprocessed%3A+4+chunks" in the form-encoded
+            # request body.
+            assert "Reprocessed%3A+4+chunks" in posted_data
             assert "Internal+error" not in posted_data
             # High priority
             assert "priority=1" in posted_data

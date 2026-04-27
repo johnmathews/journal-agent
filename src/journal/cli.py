@@ -1058,6 +1058,113 @@ def cmd_extract_entities(args, config):
                 print(f"  [entry {r.entry_id}] {w}")
 
 
+def cmd_repair_entity_names(args, config):
+    """Find and optionally repair entities whose ``canonical_name``
+    looks like an LLM-clipped form of a longer token in their mention
+    quotes (e.g. ``"Nautilin"`` for a quote ``"Nautiline, ..."``).
+
+    Default is dry-run — pass ``--apply`` to actually update rows.
+    Skips proposed repairs that would collide with an existing entity
+    of the same canonical_name.
+    """
+    from journal.providers.extraction import _repair_canonical_name
+
+    conn = get_connection(config.db_path)
+    run_migrations(conn)
+    entity_store = SQLiteEntityStore(conn)
+
+    # Pull every entity, paginating in case the corpus is large.
+    all_entities: list = []
+    offset = 0
+    page_size = 500
+    while True:
+        page = entity_store.list_entities(limit=page_size, offset=offset)
+        all_entities.extend(page)
+        if len(page) < page_size:
+            break
+        offset += page_size
+
+    # Pre-build a lookup for collision detection. Collisions are checked
+    # by (user_id, canonical_name) since canonical names are scoped per
+    # user.
+    by_name: dict[tuple[int, str], int] = {
+        (e.user_id, e.canonical_name): e.id for e in all_entities
+    }
+
+    repairs: list[tuple[object, str]] = []  # (entity, proposed_name)
+    skipped_collisions: list[tuple[object, str]] = []
+
+    for entity in all_entities:
+        # First quote that produces a repair wins. Iterate mentions in
+        # order so the output is deterministic.
+        mentions = entity_store.get_mentions_for_entity(entity.id)
+        proposed: str | None = None
+        for mention in mentions:
+            repaired, was_repaired = _repair_canonical_name(
+                entity.canonical_name, mention.quote,
+            )
+            if was_repaired:
+                proposed = repaired
+                break
+        if proposed is None:
+            continue
+
+        if (entity.user_id, proposed) in by_name and by_name[
+            (entity.user_id, proposed)
+        ] != entity.id:
+            skipped_collisions.append((entity, proposed))
+            continue
+        repairs.append((entity, proposed))
+
+    if not repairs and not skipped_collisions:
+        print("No entities need repair.")
+        return
+
+    print(f"Proposed repairs ({len(repairs)}):")
+    for entity, proposed in repairs:
+        print(
+            f"  [{entity.id}] {entity.canonical_name!r} -> "
+            f"{proposed!r}  (type={entity.entity_type}, "
+            f"user_id={entity.user_id})"
+        )
+    if skipped_collisions:
+        print()
+        print(
+            f"Skipped due to collision with existing entity "
+            f"({len(skipped_collisions)}):"
+        )
+        for entity, proposed in skipped_collisions:
+            existing_id = by_name[(entity.user_id, proposed)]
+            print(
+                f"  [{entity.id}] {entity.canonical_name!r} -> "
+                f"{proposed!r} would collide with entity #"
+                f"{existing_id}"
+            )
+
+    if not args.apply:
+        print()
+        print("Dry-run only. Pass --apply to make these changes.")
+        return
+
+    print()
+    print(f"Applying {len(repairs)} repair(s)...")
+    applied = 0
+    for entity, proposed in repairs:
+        try:
+            entity_store.update_entity(
+                entity.id,
+                canonical_name=proposed,
+                user_id=entity.user_id,
+            )
+            applied += 1
+        except Exception as exc:  # noqa: BLE001
+            print(
+                f"  Failed to update entity {entity.id}: {exc}",
+                file=sys.stderr,
+            )
+    print(f"Applied {applied}/{len(repairs)} repair(s).")
+
+
 def cmd_migrate_chromadb(args, config):
     """Add user_id to all ChromaDB vectors for multi-tenant migration."""
     from journal.db.chromadb_migration import backfill_user_id
@@ -1386,6 +1493,21 @@ def main():
         help="Only process entries flagged as stale",
     )
 
+    # repair-entity-names
+    p_repair = subparsers.add_parser(
+        "repair-entity-names",
+        help=(
+            "Find entities whose canonical_name was clipped by the LLM "
+            "(e.g. 'Nautilin' instead of 'Nautiline'). Dry-run by default; "
+            "pass --apply to update rows."
+        ),
+    )
+    p_repair.add_argument(
+        "--apply",
+        action="store_true",
+        help="Apply proposed repairs (default is dry-run)",
+    )
+
     args = parser.parse_args()
     setup_logging(args.log_level)
     config = load_config()
@@ -1403,6 +1525,7 @@ def main():
         "eval-chunking": cmd_eval_chunking,
         "seed": cmd_seed,
         "extract-entities": cmd_extract_entities,
+        "repair-entity-names": cmd_repair_entity_names,
         "migrate-chromadb": cmd_migrate_chromadb,
     }
     commands[args.command](args, config)

@@ -97,6 +97,36 @@ operations can orphan an entity (leave it with zero mentions):
 Both paths use the same `EntityStore.delete_orphaned_entities()` method, which only deletes entities from the candidate
 set that have zero remaining mentions across all entries — so an entity mentioned in other entries is never pruned.
 
+## Post-LLM canonical_name validation
+
+The model occasionally returns a `canonical_name` that's one or two characters shorter than the form actually present in the
+source quote — for example `"Nautilin"` for a quote `"Nautiline, the iOS app..."`. The clipped name is itself a substring of the
+longer form, so a naive substring check does not catch this; the validator works at the **token** level.
+
+In `src/journal/providers/extraction.py` (`_repair_canonical_name`), every entity returned by the LLM is checked against its
+own `quote`:
+
+1. If any whitespace-separated token in the quote (after stripping surrounding punctuation) **equals** the canonical_name
+   case-insensitively, the LLM's choice is trusted unchanged. This protects deliberately-shorter canonicals like `"Bob"` for a
+   quote `"Robert 'Bob' Smith"` where the short form is genuinely a separate token.
+2. Otherwise, if the canonical_name is a strict prefix of some longer token in the quote, the longer token is returned (case
+   preserved from the original token). This catches the clipped-trailing-character failure mode.
+3. Anything else is left alone with a `WARNING` log so it can be reviewed manually. We never invent characters out of thin air.
+
+The repair runs inside `_parse_tool_response` so it applies to every extraction call regardless of provider, and a separate
+warning is logged whenever a repair fires (so the rate of LLM mis-extraction is visible in the logs).
+
+### `journal repair-entity-names`
+
+A CLI subcommand for cleaning up existing entities that were created before the validator shipped. It iterates every entity,
+runs the same repair logic against each entity's mention quotes, and proposes updates. Dry-run by default; pass `--apply` to
+update rows. Skips proposed repairs that would collide with the canonical_name of another entity for the same user.
+
+```
+docker exec journal-server uv run journal repair-entity-names               # dry run, prints proposed repairs
+docker exec journal-server uv run journal repair-entity-names --apply       # actually update
+```
+
 ## Known risks
 
 - **Predicate drift.** Predicates are free text. Over time an author's "met", "saw", "caught up with" will all refer to

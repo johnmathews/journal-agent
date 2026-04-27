@@ -86,6 +86,8 @@ def test_cli_all_commands_registered(capsys):
         "backfill-mood",
         "rechunk",
         "eval-chunking",
+        "extract-entities",
+        "repair-entity-names",
     ):
         assert cmd in captured.out, f"Command '{cmd}' not found in help output"
 
@@ -212,6 +214,165 @@ notes = "notes"
     out = capsys.readouterr().out
     assert "dry-run" in out.lower() or "Dry run" in out
     assert "Scored:" in out
+
+
+def test_cmd_repair_entity_names_dry_run_proposes_fix(tmp_path, capsys):
+    """`repair-entity-names` (dry-run) detects an LLM-clipped canonical
+    name and prints a proposed repair without modifying the DB."""
+    from unittest.mock import MagicMock
+
+    from journal.cli import cmd_repair_entity_names
+    from journal.config import Config
+    from journal.db.connection import get_connection
+    from journal.db.migrations import run_migrations
+    from journal.db.repository import SQLiteEntryRepository
+    from journal.entitystore.store import SQLiteEntityStore
+
+    db_path = tmp_path / "repair.db"
+    conn = get_connection(db_path)
+    run_migrations(conn)
+    repo = SQLiteEntryRepository(conn)
+    store = SQLiteEntityStore(conn)
+
+    entry = repo.create_entry("2026-04-25", "photo", "raw", 5, user_id=1)
+    entity = store.create_entity(
+        entity_type="organization",
+        canonical_name="Nautilin",  # the clipped form
+        description="",
+        first_seen="2026-04-25",
+        user_id=1,
+    )
+    store.create_mention(
+        entity_id=entity.id,
+        entry_id=entry.id,
+        quote="Nautiline, the iOS app that connects to the music server",
+        confidence=0.9,
+        extraction_run_id="test-run",
+    )
+    conn.close()
+
+    config = Config(db_path=db_path)
+    cmd_repair_entity_names(MagicMock(apply=False), config)
+
+    out = capsys.readouterr().out
+    assert "'Nautilin' -> 'Nautiline'" in out
+    assert "Dry-run only" in out
+
+    # DB unchanged
+    conn = get_connection(db_path)
+    fresh = SQLiteEntityStore(conn).get_entity(entity.id)
+    assert fresh is not None
+    assert fresh.canonical_name == "Nautilin"
+    conn.close()
+
+
+def test_cmd_repair_entity_names_apply_updates_canonical_name(
+    tmp_path, capsys,
+):
+    """`repair-entity-names --apply` actually updates the entity's
+    canonical_name in the DB."""
+    from unittest.mock import MagicMock
+
+    from journal.cli import cmd_repair_entity_names
+    from journal.config import Config
+    from journal.db.connection import get_connection
+    from journal.db.migrations import run_migrations
+    from journal.db.repository import SQLiteEntryRepository
+    from journal.entitystore.store import SQLiteEntityStore
+
+    db_path = tmp_path / "repair_apply.db"
+    conn = get_connection(db_path)
+    run_migrations(conn)
+    repo = SQLiteEntryRepository(conn)
+    store = SQLiteEntityStore(conn)
+
+    entry = repo.create_entry("2026-04-25", "photo", "raw", 5, user_id=1)
+    entity = store.create_entity(
+        entity_type="organization",
+        canonical_name="Nautilin",
+        description="",
+        first_seen="2026-04-25",
+        user_id=1,
+    )
+    store.create_mention(
+        entity_id=entity.id,
+        entry_id=entry.id,
+        quote="We launched Nautiline last week.",
+        confidence=0.9,
+        extraction_run_id="test-run",
+    )
+    conn.close()
+
+    config = Config(db_path=db_path)
+    cmd_repair_entity_names(MagicMock(apply=True), config)
+
+    out = capsys.readouterr().out
+    assert "Applied 1/1" in out
+
+    conn = get_connection(db_path)
+    fresh = SQLiteEntityStore(conn).get_entity(entity.id)
+    assert fresh is not None
+    assert fresh.canonical_name == "Nautiline"
+    conn.close()
+
+
+def test_cmd_repair_entity_names_skips_collision(tmp_path, capsys):
+    """If the proposed repair would produce the canonical_name of an
+    entity that already exists, skip with a warning rather than
+    creating a duplicate row or violating uniqueness."""
+    from unittest.mock import MagicMock
+
+    from journal.cli import cmd_repair_entity_names
+    from journal.config import Config
+    from journal.db.connection import get_connection
+    from journal.db.migrations import run_migrations
+    from journal.db.repository import SQLiteEntryRepository
+    from journal.entitystore.store import SQLiteEntityStore
+
+    db_path = tmp_path / "repair_collision.db"
+    conn = get_connection(db_path)
+    run_migrations(conn)
+    repo = SQLiteEntryRepository(conn)
+    store = SQLiteEntityStore(conn)
+
+    entry = repo.create_entry("2026-04-25", "photo", "raw", 5, user_id=1)
+
+    # Already-correct entity exists.
+    store.create_entity(
+        entity_type="organization",
+        canonical_name="Nautiline",
+        description="",
+        first_seen="2026-04-20",
+        user_id=1,
+    )
+    # Stale clipped entity from a buggy older extraction.
+    bad = store.create_entity(
+        entity_type="organization",
+        canonical_name="Nautilin",
+        description="",
+        first_seen="2026-04-25",
+        user_id=1,
+    )
+    store.create_mention(
+        entity_id=bad.id,
+        entry_id=entry.id,
+        quote="Nautiline shipped today",
+        confidence=0.9,
+        extraction_run_id="test-run",
+    )
+    conn.close()
+
+    config = Config(db_path=db_path)
+    cmd_repair_entity_names(MagicMock(apply=True), config)
+
+    out = capsys.readouterr().out
+    assert "would collide" in out
+    # Should NOT have applied the colliding repair
+    conn = get_connection(db_path)
+    fresh = SQLiteEntityStore(conn).get_entity(bad.id)
+    assert fresh is not None
+    assert fresh.canonical_name == "Nautilin"  # unchanged
+    conn.close()
 
 
 def test_cmd_health_compact_mode(tmp_path, capsys):

@@ -704,6 +704,9 @@ class JobRunner:
                 "entities_matched": sum(
                     r.entities_matched for r in results
                 ),
+                "entities_deleted": sum(
+                    r.entities_deleted for r in results
+                ),
                 "mentions_created": sum(
                     r.mentions_created for r in results
                 ),

@@ -1,5 +1,6 @@
 """Tests for the Anthropic entity extraction provider."""
 
+import logging
 from unittest.mock import MagicMock, patch
 
 from journal.providers.extraction import (
@@ -8,6 +9,7 @@ from journal.providers.extraction import (
     ExtractionProvider,
     RawExtractionResult,
     _parse_tool_response,
+    _repair_canonical_name,
     build_system_prompt,
 )
 
@@ -160,3 +162,149 @@ class TestParseToolResponse:
         mock.content = [tool_block]
         result = _parse_tool_response(mock)
         assert len(result.entities) == 1
+
+
+# ----------------------------------------------------------------------
+# canonical_name repair
+# ----------------------------------------------------------------------
+
+
+class TestRepairCanonicalName:
+    """The Nautilin/Nautiline class of LLM clipping bug — the model
+    occasionally returns a canonical_name that's one or two characters
+    shorter than the form actually in the source quote. The validator
+    detects this case and repairs to the longer form."""
+
+    def test_canonical_name_in_quote_is_unchanged(self) -> None:
+        """Substring match: trust the LLM's choice as-is. Protects
+        deliberate short forms like 'Bob' for 'Robert "Bob" Smith'."""
+        repaired, was_repaired = _repair_canonical_name(
+            "Bob", "Robert 'Bob' Smith said hi",
+        )
+        assert repaired == "Bob"
+        assert was_repaired is False
+
+    def test_clipped_trailing_character_is_repaired(self) -> None:
+        """The original prod bug: 'Nautilin' clipped from 'Nautiline'."""
+        repaired, was_repaired = _repair_canonical_name(
+            "Nautilin",
+            "Nautiline, the iOS app that connects to our music server",
+        )
+        assert repaired == "Nautiline"
+        assert was_repaired is True
+
+    def test_no_match_keeps_canonical_unchanged(self) -> None:
+        """If canonical_name is neither a substring nor a strict prefix
+        of any token, leave it alone — we never invent characters."""
+        repaired, was_repaired = _repair_canonical_name(
+            "Foo", "Bar baz qux",
+        )
+        assert repaired == "Foo"
+        assert was_repaired is False
+
+    def test_strips_trailing_punctuation_when_comparing(self) -> None:
+        """Quotes routinely have commas/periods after names. Compare
+        against the bare token after stripping surrounding punctuation."""
+        repaired, was_repaired = _repair_canonical_name(
+            "Atla", "I met Atlas, my dog, in the park.",
+        )
+        assert repaired == "Atlas"
+        assert was_repaired is True
+
+    def test_case_insensitive_prefix_returns_original_case(self) -> None:
+        """Match case-insensitively on the prefix test, but preserve
+        the original casing of the matched token in the return value."""
+        repaired, was_repaired = _repair_canonical_name(
+            "nautilin",
+            "We launched Nautiline yesterday.",
+        )
+        assert repaired == "Nautiline"
+        assert was_repaired is True
+
+    def test_picks_first_matching_token_when_multiple(self) -> None:
+        repaired, was_repaired = _repair_canonical_name(
+            "Sam", "Samuel and Samantha disagreed.",
+        )
+        assert repaired == "Samuel"
+        assert was_repaired is True
+
+    def test_empty_inputs_are_safe(self) -> None:
+        assert _repair_canonical_name("", "anything") == ("", False)
+        assert _repair_canonical_name("Atlas", "") == ("Atlas", False)
+
+    def test_token_same_length_or_shorter_is_not_a_repair_candidate(
+        self,
+    ) -> None:
+        """``startswith`` must be a STRICT prefix — equal-length tokens
+        should not trigger a repair (and would be a no-op anyway)."""
+        repaired, was_repaired = _repair_canonical_name(
+            "Atlas", "I saw atlas yesterday",  # same length, just different case
+        )
+        # Same length, not a strict prefix → no repair
+        assert repaired == "Atlas"
+        assert was_repaired is False
+
+
+class TestParseToolResponseRepairsAndLogs:
+    """Integration: when _parse_tool_response sees a clipped
+    canonical_name, it repairs it and logs a WARNING."""
+
+    def test_clipped_name_in_payload_is_repaired(
+        self, caplog: "logging.LogCaptureFixture",
+    ) -> None:
+        tool_block = MagicMock()
+        tool_block.type = "tool_use"
+        tool_block.input = {
+            "entities": [
+                {
+                    "entity_type": "organization",
+                    "canonical_name": "Nautilin",
+                    "quote": "Nautiline, the iOS app",
+                    "confidence": 0.9,
+                },
+            ],
+            "relationships": [],
+        }
+        mock = MagicMock()
+        mock.content = [tool_block]
+        with caplog.at_level(
+            logging.WARNING, logger="journal.providers.extraction",
+        ):
+            result = _parse_tool_response(mock)
+
+        assert len(result.entities) == 1
+        assert result.entities[0]["canonical_name"] == "Nautiline"
+        assert any(
+            "Repaired clipped canonical_name" in rec.message
+            for rec in caplog.records
+        )
+
+    def test_unrepairable_mismatch_logs_warning_but_keeps_name(
+        self, caplog: "logging.LogCaptureFixture",
+    ) -> None:
+        tool_block = MagicMock()
+        tool_block.type = "tool_use"
+        tool_block.input = {
+            "entities": [
+                {
+                    "entity_type": "person",
+                    "canonical_name": "Mxyzptlk",
+                    "quote": "Just a quiet day at home.",
+                    "confidence": 0.3,
+                },
+            ],
+            "relationships": [],
+        }
+        mock = MagicMock()
+        mock.content = [tool_block]
+        with caplog.at_level(
+            logging.WARNING, logger="journal.providers.extraction",
+        ):
+            result = _parse_tool_response(mock)
+
+        # Name kept as-is — we never invent characters
+        assert result.entities[0]["canonical_name"] == "Mxyzptlk"
+        # But a warning is logged so it can be reviewed manually
+        assert any(
+            "does not appear" in rec.message for rec in caplog.records
+        )

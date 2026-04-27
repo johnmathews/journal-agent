@@ -354,6 +354,7 @@ class TestEntityExtractionHappyPath:
             "entries_processed": 2,
             "entities_created": 2,
             "entities_matched": 5,
+            "entities_deleted": 0,
             "mentions_created": 7,
             "relationships_created": 3,
             "warnings": ["w1", "w2", "w3"],
