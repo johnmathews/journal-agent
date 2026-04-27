@@ -104,7 +104,68 @@ _JOB_TYPE_LABELS: dict[str, str] = {
     "mood_backfill": "Mood analysis",
     "mood_score_entry": "Mood scoring",
     "reprocess_embeddings": "Embedding reprocessing",
+    "save_entry_pipeline": "Entry update",
 }
+
+
+def build_pipeline_failure_body(
+    parent_job_type: str,
+    combined: dict[str, Any],
+    failures: dict[str, str],
+) -> str:
+    """Build the body of a consolidated pipeline-failure notification.
+
+    Lists per-stage outcomes — successful stages get a "+" line with
+    their summary, failed stages get a "-" line with the error
+    message. Currently only formatted for ``parent_job_type ==
+    "save_entry_pipeline"``; other parent types fall back to a
+    generic header.
+
+    Module-level (not an instance method) so the JobRunner can call
+    it without holding a notification-service reference, and so tests
+    can pass the result string into a fake notification service.
+    """
+    parts: list[str] = []
+    entry_id = combined.get("entry_id")
+
+    if parent_job_type == "save_entry_pipeline" and entry_id:
+        header_id = f"Entry {entry_id} update"
+        parts.append(
+            f"{header_id} failed"
+            if len(failures) >= 3
+            else f"{header_id} — partial failure"
+        )
+    else:
+        label = _JOB_TYPE_LABELS.get(parent_job_type, parent_job_type)
+        parts.append(f"{label} — partial failure")
+
+    # Reprocess embeddings
+    if "reprocess_embeddings" in failures:
+        parts.append(f"- Reprocess: {failures['reprocess_embeddings']}")
+    elif (combined.get("reprocess_embeddings_result") or {}):
+        n = combined["reprocess_embeddings_result"].get("chunk_count", 0)
+        parts.append(f"+ Reprocessed {n} chunks")
+
+    # Entity extraction
+    if "entity_extraction" in failures:
+        parts.append(
+            f"- Entity extraction: {failures['entity_extraction']}"
+        )
+    elif (combined.get("entity_extraction_result") or {}):
+        r = combined["entity_extraction_result"]
+        parts.append(
+            f"+ {r.get('entities_created', 0)} entities, "
+            f"{r.get('mentions_created', 0)} mentions"
+        )
+
+    # Mood scoring
+    if "mood_scoring" in failures:
+        parts.append(f"- Mood scoring: {failures['mood_scoring']}")
+    elif (combined.get("mood_scoring_result") or {}):
+        n = combined["mood_scoring_result"].get("scores_written", 0)
+        parts.append(f"+ {n} mood scores")
+
+    return "\n".join(parts)
 
 
 @dataclass
@@ -258,6 +319,41 @@ class PushoverNotificationService:
             log.warning(
                 "Failed to send failure notification for user %d, job %s",
                 user_id, job_type, exc_info=True,
+            )
+
+    def notify_pipeline_failed(
+        self,
+        user_id: int,
+        parent_job_type: str,
+        body: str,
+    ) -> None:
+        """Send a consolidated pipeline failure notification.
+
+        The body is built by the caller and contains a per-stage
+        breakdown — unlike notify_job_failed, this does not prepend a
+        "Internal error: " cause tag. Used by the save-entry pipeline
+        when notify_strategy=compressed_all and at least one child
+        job failed.
+        """
+        try:
+            if not self._is_topic_enabled(user_id, "notif_job_failed"):
+                return
+
+            user_key, app_token = self._resolve_credentials(user_id)
+            if not user_key or not app_token:
+                return
+
+            label = _JOB_TYPE_LABELS.get(parent_job_type, parent_job_type)
+            title = f"{label} failed"
+
+            self._post_to_pushover(
+                user_key, app_token, title, body, PRIORITY_HIGH,
+            )
+        except Exception:  # noqa: BLE001
+            log.warning(
+                "Failed to send pipeline failure notification for "
+                "user %d, job %s",
+                user_id, parent_job_type, exc_info=True,
             )
 
     def notify_admin_job_failed(
@@ -514,5 +610,23 @@ class PushoverNotificationService:
         elif job_type == "reprocess_embeddings":
             count = result.get("chunk_count", 0)
             parts.append(f"{count} chunks reprocessed")
+        elif job_type == "save_entry_pipeline":
+            entry_id = result.get("entry_id")
+            if entry_id:
+                parts.append(f"Entry {entry_id} updated")
+            reprocess = result.get("reprocess_embeddings_result") or {}
+            entity = result.get("entity_extraction_result") or {}
+            mood = result.get("mood_scoring_result") or {}
+            if reprocess:
+                parts.append(
+                    f"Reprocessed {reprocess.get('chunk_count', 0)} chunks"
+                )
+            if entity:
+                parts.append(
+                    f"{entity.get('entities_created', 0)} entities, "
+                    f"{entity.get('mentions_created', 0)} mentions"
+                )
+            if mood:
+                parts.append(f"{mood.get('scores_written', 0)} mood scores")
 
         return "\n".join(parts) if parts else "Job completed successfully"

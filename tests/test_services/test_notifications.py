@@ -389,3 +389,159 @@ class TestBuildSuccessMessage:
     def test_fallback_message(self, svc: PushoverNotificationService) -> None:
         msg = svc._build_success_message("unknown_type", {})
         assert "completed successfully" in msg.lower()
+
+    def test_save_entry_pipeline_success_message(
+        self, svc: PushoverNotificationService,
+    ) -> None:
+        """Save-entry pipeline (edit flow) success summary covers all 3 stages."""
+        result = {
+            "entry_id": 76,
+            "follow_up_jobs": {
+                "reprocess_embeddings": "r1",
+                "entity_extraction": "e1",
+                "mood_scoring": "m1",
+            },
+            "notify_strategy": "compressed_all",
+            "reprocess_embeddings_result": {
+                "entry_id": 76, "chunk_count": 4,
+            },
+            "entity_extraction_result": {
+                "entries_processed": 1,
+                "entities_created": 2,
+                "mentions_created": 5,
+            },
+            "mood_scoring_result": {"entry_id": 76, "scores_written": 3},
+        }
+        msg = svc._build_success_message("save_entry_pipeline", result)
+        assert "Entry 76 updated" in msg
+        assert "Reprocessed 4 chunks" in msg
+        assert "2 entities, 5 mentions" in msg
+        assert "3 mood scores" in msg
+
+    def test_save_entry_pipeline_message_omits_missing_stages(
+        self, svc: PushoverNotificationService,
+    ) -> None:
+        """If a stage has no result (e.g. mood disabled), it's omitted."""
+        result = {
+            "entry_id": 76,
+            "reprocess_embeddings_result": {"chunk_count": 4},
+            "entity_extraction_result": {
+                "entries_processed": 1,
+                "entities_created": 2,
+                "mentions_created": 5,
+            },
+            # No mood_scoring_result
+        }
+        msg = svc._build_success_message("save_entry_pipeline", result)
+        assert "Entry 76 updated" in msg
+        assert "mood" not in msg.lower()
+
+
+class TestBuildPipelineFailureBody:
+    """Module-level build_pipeline_failure_body helper used by JobRunner."""
+
+    def test_partial_failure_lists_successes_and_failures(self) -> None:
+        from journal.services.notifications import build_pipeline_failure_body
+
+        combined = {
+            "entry_id": 76,
+            "reprocess_embeddings_result": {"chunk_count": 4},
+            "entity_extraction_result": {
+                "entries_processed": 1,
+                "entities_created": 2,
+                "mentions_created": 5,
+            },
+        }
+        failures = {"mood_scoring": "LLM overloaded"}
+
+        body = build_pipeline_failure_body(
+            "save_entry_pipeline", combined, failures,
+        )
+        assert "Entry 76 update" in body
+        assert "partial failure" in body
+        assert "+ Reprocessed 4 chunks" in body
+        assert "+ 2 entities, 5 mentions" in body
+        assert "- Mood scoring: LLM overloaded" in body
+
+    def test_total_failure_uses_failed_header(self) -> None:
+        from journal.services.notifications import build_pipeline_failure_body
+
+        combined = {"entry_id": 76}
+        failures = {
+            "reprocess_embeddings": "reprocess broke",
+            "entity_extraction": "extraction broke",
+            "mood_scoring": "mood broke",
+        }
+        body = build_pipeline_failure_body(
+            "save_entry_pipeline", combined, failures,
+        )
+        assert "Entry 76 update failed" in body
+        assert "partial failure" not in body
+        assert "- Reprocess: reprocess broke" in body
+        assert "- Entity extraction: extraction broke" in body
+        assert "- Mood scoring: mood broke" in body
+
+    def test_unknown_parent_type_uses_generic_header(self) -> None:
+        from journal.services.notifications import build_pipeline_failure_body
+
+        body = build_pipeline_failure_body(
+            "weird_pipeline", {"entry_id": 1}, {"reprocess_embeddings": "boom"},
+        )
+        assert "weird_pipeline" in body
+        assert "partial failure" in body
+
+
+class TestNotifyPipelineFailed:
+    """notify_pipeline_failed posts a single high-priority Pushover with
+    the caller-built body (no automatic 'Internal error: ' prefix)."""
+
+    def test_posts_high_priority_with_caller_body(
+        self,
+        svc: PushoverNotificationService,
+        mock_user_repo: MagicMock,
+    ) -> None:
+        body = "Entry 76 update — partial failure\n+ Reprocessed 4 chunks"
+        with patch("urllib.request.urlopen") as mock_urlopen:
+            mock_urlopen.return_value = _make_urlopen_response({"status": 1})
+            svc.notify_pipeline_failed(
+                user_id=1, parent_job_type="save_entry_pipeline", body=body,
+            )
+
+            assert mock_urlopen.called
+            req = mock_urlopen.call_args[0][0]
+            posted_data = req.data.decode()
+            # Title uses the parent job's label
+            assert "Entry+update+failed" in posted_data
+            # Body is exactly what we passed (no cause-tag prefix)
+            assert "Reprocessed+4+chunks" in posted_data
+            assert "Internal+error" not in posted_data
+            # High priority
+            assert "priority=1" in posted_data
+
+    def test_skips_when_topic_disabled(
+        self,
+        svc: PushoverNotificationService,
+        mock_user_repo: MagicMock,
+    ) -> None:
+        def pref_side_effect(user_id: int, key: str):
+            if key == "notif_job_failed":
+                return False
+            return None
+
+        mock_user_repo.get_preference.side_effect = pref_side_effect
+        with patch("urllib.request.urlopen") as mock_urlopen:
+            svc.notify_pipeline_failed(1, "save_entry_pipeline", "body")
+            mock_urlopen.assert_not_called()
+
+    def test_skips_when_no_credentials(
+        self,
+        mock_user_repo: MagicMock,
+    ) -> None:
+        svc = PushoverNotificationService(
+            user_repo=mock_user_repo,
+            default_user_key="",
+            default_app_token="",
+        )
+        with patch("urllib.request.urlopen") as mock_urlopen:
+            svc.notify_pipeline_failed(1, "save_entry_pipeline", "body")
+            mock_urlopen.assert_not_called()

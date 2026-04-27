@@ -267,9 +267,10 @@ server-spawned follow-up jobs (like entity extraction after ingestion) appear in
 For text/file ingestion, both mood scoring and entity extraction are submitted as separate background jobs immediately
 after the entry is created. Both are best-effort — failures are logged but don't fail the ingest response.
 
-For PATCH, all three background jobs (reprocess embeddings, entity extraction, mood scoring) are submitted after the text
-save succeeds. `mood_job_id` is included in the PATCH response alongside the existing `entity_extraction_job_id` and
-`reprocess_job_id`.
+For PATCH, all three background jobs (reprocess embeddings, entity extraction, mood scoring) are submitted via
+`JobRunner.submit_save_entry_pipeline()`, which wraps them in a synthetic `save_entry_pipeline` parent job (see
+"Save-entry pipeline" below). The PATCH response includes `pipeline_job_id` (the parent), plus `reprocess_job_id`,
+`entity_extraction_job_id`, and `mood_job_id` for the three children.
 
 ## Pipeline notifications (Pushover)
 
@@ -307,6 +308,67 @@ notify individually as before. The pipeline grouping only applies to follow-up j
 If the executor rejects follow-up submissions (e.g. during server shutdown), `_queue_post_ingestion_jobs` catches the
 error and returns an empty `follow_up_jobs` dict. In this case the parent sends its own notification directly, so the
 user still learns the entry was created.
+
+## Save-entry pipeline (PATCH /entries/:id)
+
+Edits to existing entries fan out into three background jobs (`reprocess_embeddings`, `entity_extraction`, and
+`mood_score_entry`). To match the new-entry flow's "one push per pipeline" UX — and to consolidate failures rather
+than fire one Pushover per stage — these are wrapped in a **synthetic parent job** of type `save_entry_pipeline`.
+
+### Synthetic parent
+
+`JobRunner.submit_save_entry_pipeline()`:
+
+1. Creates a parent job of type `save_entry_pipeline` (status `queued`).
+2. Marks the parent succeeded with the `notify_strategy` already set but an **empty** `follow_up_jobs` map. This
+   makes the strategy visible to fast children before the map is populated; an early `_try_pipeline_notification`
+   call from a child will see the empty map and return without firing.
+3. Submits the three children with `parent_job_id` set in their params.
+4. Marks the parent succeeded a second time with the **populated** `follow_up_jobs` map.
+5. Triggers a defensive `_try_pipeline_notification` call from the API thread to handle the rare case where every
+   child completed before the populated map landed (workers' calls would all have returned early). The atomic
+   `try_acquire_notification_lock` on the repository guards against double-firing if a worker call races with this
+   defensive sweep.
+
+The parent does no actual work — it exists only to hold `follow_up_jobs` and `notify_strategy`, the two fields
+`_try_pipeline_notification` reads to dispatch correctly.
+
+### `notify_strategy`
+
+A field on the parent's `result_json` that controls how children handle their per-job notifications:
+
+| Value                       | Used by             | Per-child success push | Per-child failure push | Pipeline summary                              |
+| --------------------------- | ------------------- | ---------------------- | ---------------------- | --------------------------------------------- |
+| `compressed_success_only`   | `ingest_images` /   | suppressed             | fired immediately      | success summary (lists what worked)           |
+| (default)                   | `ingest_audio`      |                        |                        |                                               |
+| `compressed_all`            | `save_entry_pipeline`| suppressed             | suppressed             | success summary if all OK; otherwise per-stage|
+|                             |                     |                        |                        | failure breakdown (`+`/`-` markers)           |
+
+The default of `compressed_success_only` keeps the existing new-entry behavior unchanged. The edit pipeline opts
+into `compressed_all` so the user gets exactly one Pushover regardless of outcome.
+
+### Notification matrix
+
+| Reprocess | Entity extraction | Mood scoring | Notifications the user receives           |
+| --------- | ----------------- | ------------ | ----------------------------------------- |
+| succeeds  | succeeds          | succeeds     | 1 success summary: entry updated + 3 stage counts |
+| succeeds  | succeeds          | fails        | 1 partial-failure summary listing all 3 stages    |
+| any combination with ≥1 fail | …      | …            | 1 partial-failure summary (or "update failed" if all 3 failed) |
+
+Per-stage in-app toasts still fire (one per terminal job) — the consolidation is only about Pushover.
+
+### Race conditions and dedup
+
+The pipeline orchestration must handle two race windows:
+
+1. **Strategy visible before map populated.** The first `mark_succeeded` (with an empty map) is what makes the
+   strategy visible to children. Without this, a child that fails before the API thread reaches the map-population
+   step would default to `compressed_success_only` and fire its own immediate failure Pushover, undoing the
+   consolidation.
+2. **All children complete before map populated.** The defensive `_try_pipeline_notification` from the API thread
+   covers this. To avoid double-firing if a worker happens to race, `_try_pipeline_notification` calls
+   `try_acquire_notification_lock(parent_job_id)` on the repository, which atomically sets
+   `result_json._notification_sent = 1` and returns False to subsequent callers.
 
 ## What's intentionally out of scope for v1
 

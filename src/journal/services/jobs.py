@@ -129,6 +129,12 @@ _MOOD_SCORE_ENTRY_KEYS: dict[str, type | tuple[type, ...]] = {
 _REPROCESS_EMBEDDINGS_KEYS: dict[str, type | tuple[type, ...]] = {
     "entry_id": int,
     "user_id": int,
+    "parent_job_id": str,
+}
+
+_SAVE_ENTRY_PIPELINE_KEYS: dict[str, type | tuple[type, ...]] = {
+    "entry_id": int,
+    "user_id": int,
 }
 
 _INGEST_AUDIO_KEYS: dict[str, type | tuple[type, ...]] = {
@@ -328,20 +334,130 @@ class JobRunner:
 
     def submit_reprocess_embeddings(
         self, entry_id: int, *, user_id: int | None = None,
+        parent_job_id: str | None = None,
     ) -> Job:
         """Queue a re-embedding job for an entry after text is saved.
 
         Re-chunks the entry's text, calls the embedding provider, and
         updates the vector store. This is the slow part of a text save
         that was previously done synchronously in the PATCH handler.
+
+        When ``parent_job_id`` is set, the job participates in a
+        consolidated pipeline notification (see
+        ``submit_save_entry_pipeline``) and skips its own per-job
+        Pushover.
         """
         params: dict[str, Any] = {"entry_id": entry_id}
         if user_id is not None:
             params["user_id"] = user_id
+        if parent_job_id is not None:
+            params["parent_job_id"] = parent_job_id
         _validate_params(params, _REPROCESS_EMBEDDINGS_KEYS, job_type="reprocess_embeddings")
         job = self._jobs.create("reprocess_embeddings", params, user_id=user_id)
         self._executor.submit(self._run_reprocess_embeddings, job.id, params)
         return job
+
+    def submit_save_entry_pipeline(
+        self,
+        *,
+        entry_id: int,
+        user_id: int | None = None,
+        enable_mood_scoring: bool = True,
+    ) -> tuple[Job, dict[str, str]]:
+        """Queue the three background jobs that run after an entry edit
+        and orchestrate ONE consolidated Pushover for them.
+
+        Creates a synthetic parent job of type ``save_entry_pipeline``
+        with no actual worker — it is marked succeeded immediately
+        with::
+
+            result = {
+                "entry_id": entry_id,
+                "follow_up_jobs": {key -> child_job_id},
+                "notify_strategy": "compressed_all",
+            }
+
+        Each child (``reprocess_embeddings``, ``entity_extraction``,
+        and optionally ``mood_score_entry``) is submitted with
+        ``parent_job_id`` set. Children's workers detect the
+        ``compressed_all`` strategy and skip BOTH per-child success
+        and failure pushovers, deferring to
+        ``_try_pipeline_notification``. The last child to reach a
+        terminal state emits one consolidated Pushover — success
+        summary if all children succeeded, per-stage failure
+        breakdown otherwise.
+
+        Returns ``(parent_job, follow_ups)``.
+        """
+        params: dict[str, Any] = {"entry_id": entry_id}
+        if user_id is not None:
+            params["user_id"] = user_id
+        _validate_params(
+            params, _SAVE_ENTRY_PIPELINE_KEYS, job_type="save_entry_pipeline",
+        )
+
+        parent = self._jobs.create(
+            "save_entry_pipeline", params, user_id=user_id,
+        )
+
+        # Mark parent succeeded with the strategy BUT an empty
+        # follow_up_jobs map BEFORE submitting any child. This makes
+        # the strategy visible to fast children (so their failure
+        # gating sees ``compressed_all``), while the empty map causes
+        # any premature ``_try_pipeline_notification`` call to
+        # return early without firing.
+        self._jobs.mark_succeeded(
+            parent.id,
+            {
+                "entry_id": entry_id,
+                "follow_up_jobs": {},
+                "notify_strategy": "compressed_all",
+            },
+        )
+
+        follow_ups: dict[str, str] = {}
+
+        reprocess_job = self.submit_reprocess_embeddings(
+            entry_id, user_id=user_id, parent_job_id=parent.id,
+        )
+        follow_ups["reprocess_embeddings"] = reprocess_job.id
+
+        extraction_job = self.submit_entity_extraction(
+            {"entry_id": entry_id, "parent_job_id": parent.id},
+            user_id=user_id,
+        )
+        follow_ups["entity_extraction"] = extraction_job.id
+
+        if enable_mood_scoring:
+            mood_job = self.submit_mood_score_entry(
+                entry_id, user_id=user_id, parent_job_id=parent.id,
+            )
+            follow_ups["mood_scoring"] = mood_job.id
+
+        # Now publish the populated follow_up_jobs map so a future
+        # ``_try_pipeline_notification`` call from any child (or the
+        # defensive sweep below) can iterate over the full set.
+        self._jobs.mark_succeeded(
+            parent.id,
+            {
+                "entry_id": entry_id,
+                "follow_up_jobs": follow_ups,
+                "notify_strategy": "compressed_all",
+            },
+        )
+
+        # Defensive sweep: if all children completed in the brief
+        # window before the populated map landed (their pipeline
+        # checks would have returned early on the empty map),
+        # trigger one more check from this thread so the consolidated
+        # push still fires. ``_try_pipeline_notification`` uses
+        # ``try_acquire_notification_lock`` to dedupe against any
+        # concurrent worker call.
+        self._try_pipeline_notification(parent.id, user_id)
+
+        parent_final = self._jobs.get(parent.id)
+        assert parent_final is not None
+        return parent_final, follow_ups
 
     def submit_audio_ingestion(
         self,
@@ -412,47 +528,117 @@ class JobRunner:
             except Exception:  # noqa: BLE001
                 log.warning("Notification send failed (retry)", exc_info=True)
 
+    def _get_notify_strategy(self, parent_job_id: str | None) -> str:
+        """Return the notification strategy for a pipeline parent.
+
+        Values:
+          ``"none"`` — caller has no parent; treat as standalone.
+          ``"compressed_success_only"`` (default for legacy parents
+            that do not set a strategy) — failures fire ``_notify_failed``
+            immediately, success fires once via pipeline summary.
+          ``"compressed_all"`` — failures AND successes are deferred
+            to the pipeline summary; one push covers everything.
+        """
+        if not parent_job_id:
+            return "none"
+        parent = self._jobs.get(parent_job_id)
+        if parent is None or parent.result is None:
+            return "compressed_success_only"
+        return parent.result.get(
+            "notify_strategy", "compressed_success_only",
+        )
+
     def _try_pipeline_notification(
         self, parent_job_id: str, user_id: int | None,
     ) -> None:
         """Send one combined notification when all pipeline jobs finish.
 
-        Called by follow-up job runners (mood scoring, entity extraction)
-        that were auto-triggered by an ingestion pipeline.  Each follow-up
-        calls this on completion; the method checks whether *all* sibling
-        follow-ups have also reached a terminal state.  Only the last one
-        to finish actually sends the notification — earlier callers
-        return early because a sibling is still running.
+        Called by follow-up job runners on completion; the method
+        checks whether all sibling follow-ups have also reached a
+        terminal state. Only the last one to finish actually sends
+        the notification — earlier callers return early because a
+        sibling is still running.
 
-        Failed follow-ups already fire their own ``_notify_failed``
-        immediately.  The combined notification still fires so the user
-        learns the entry was created and which enrichments succeeded.
+        Behavior depends on the parent's ``notify_strategy``:
+
+        - ``compressed_success_only`` (legacy ingestion pipelines):
+          fires ``_notify_success`` summarising what worked. Failed
+          children already fired their own ``_notify_failed``.
+        - ``compressed_all`` (save-entry edit pipeline): if any child
+          failed, fires ``notify_pipeline_failed`` with a per-stage
+          breakdown. Otherwise fires ``_notify_success`` like the
+          legacy path.
+
+        Concurrent callers (worker thread + the API thread's defensive
+        sweep in ``submit_save_entry_pipeline``) are deduped via
+        ``try_acquire_notification_lock`` — only the first caller
+        actually sends the push.
         """
+        from journal.services.notifications import (
+            build_pipeline_failure_body,
+        )
+
         parent = self._jobs.get(parent_job_id)
         if parent is None or parent.status != "succeeded":
             return
 
-        follow_up_ids: dict[str, str] = (parent.result or {}).get(
+        parent_result: dict[str, Any] = parent.result or {}
+        follow_up_ids: dict[str, str] = parent_result.get(
             "follow_up_jobs", {},
         )
         if not follow_up_ids:
             return
 
-        # Gather results from every follow-up that succeeded.
-        # Bail if any follow-up hasn't reached a terminal state yet.
+        # Gather per-child terminal state.  Bail if any follow-up
+        # hasn't reached a terminal state yet.
         follow_up_results: dict[str, dict[str, Any]] = {}
+        follow_up_failures: dict[str, str] = {}
         for key, fj_id in follow_up_ids.items():
             fj = self._jobs.get(fj_id)
             if fj is None or fj.status not in ("succeeded", "failed"):
                 return  # still running — wait for next completion
             if fj.status == "succeeded":
                 follow_up_results[key] = fj.result or {}
+            else:
+                follow_up_failures[key] = (
+                    fj.error_message or "unknown error"
+                )
 
-        # All terminal — build a combined result and send one notification.
-        combined: dict[str, Any] = dict(parent.result or {})
+        combined: dict[str, Any] = dict(parent_result)
         for key, fj_result in follow_up_results.items():
             combined[f"{key}_result"] = fj_result
 
+        # Atomically claim the right to fire the notification — guards
+        # against double-firing when the API thread's defensive sweep
+        # races with the last worker's call.
+        if not self._jobs.try_acquire_notification_lock(parent_job_id):
+            return
+
+        strategy = parent_result.get(
+            "notify_strategy", "compressed_success_only",
+        )
+
+        if strategy == "compressed_all" and follow_up_failures:
+            # Per-stage breakdown: list successes with "+", failures
+            # with "-" and the captured error_message.
+            if self._notifications is not None and user_id is not None:
+                try:
+                    body = build_pipeline_failure_body(
+                        parent.type, combined, follow_up_failures,
+                    )
+                    self._notifications.notify_pipeline_failed(
+                        user_id, parent.type, body,
+                    )
+                except Exception:  # noqa: BLE001
+                    log.warning(
+                        "Pipeline failure notification failed",
+                        exc_info=True,
+                    )
+            return
+
+        # All children succeeded (or strategy is the legacy success-only
+        # mode) — fire the success summary using the parent's job type
+        # so the message-builder dispatches correctly.
         self._notify_success(user_id, parent.type, combined)
 
     def shutdown(self, wait: bool = False) -> None:
@@ -535,10 +721,16 @@ class JobRunner:
             try:
                 friendly = _friendly_error(exc)
                 self._jobs.mark_failed(job_id, friendly)
-                self._notify_failed(
-                    params.get("user_id"), "entity_extraction", friendly, exc,
-                )
                 parent_job_id = params.get("parent_job_id")
+                # Compressed-all pipelines (edit save) defer the
+                # failure push to the pipeline-level summary so the
+                # user gets one consolidated message instead of one
+                # per stage.
+                if self._get_notify_strategy(parent_job_id) != "compressed_all":
+                    self._notify_failed(
+                        params.get("user_id"), "entity_extraction",
+                        friendly, exc,
+                    )
                 if parent_job_id:
                     self._try_pipeline_notification(
                         parent_job_id, params.get("user_id"),
@@ -728,9 +920,11 @@ class JobRunner:
             if entry is None:
                 error_msg = f"Entry {entry_id} not found"
                 self._jobs.mark_failed(job_id, error_msg)
-                self._notify_failed(
-                    params.get("user_id"), "mood_score_entry", error_msg,
-                )
+                if self._get_notify_strategy(parent_job_id) != "compressed_all":
+                    self._notify_failed(
+                        params.get("user_id"), "mood_score_entry",
+                        error_msg,
+                    )
                 if parent_job_id:
                     self._try_pipeline_notification(
                         parent_job_id, params.get("user_id"),
@@ -741,9 +935,11 @@ class JobRunner:
             if not text or not text.strip():
                 error_msg = f"Entry {entry_id} has no text"
                 self._jobs.mark_failed(job_id, error_msg)
-                self._notify_failed(
-                    params.get("user_id"), "mood_score_entry", error_msg,
-                )
+                if self._get_notify_strategy(parent_job_id) != "compressed_all":
+                    self._notify_failed(
+                        params.get("user_id"), "mood_score_entry",
+                        error_msg,
+                    )
                 if parent_job_id:
                     self._try_pipeline_notification(
                         parent_job_id, params.get("user_id"),
@@ -768,10 +964,12 @@ class JobRunner:
             try:
                 friendly = _friendly_error(exc)
                 self._jobs.mark_failed(job_id, friendly)
-                self._notify_failed(
-                    params.get("user_id"), "mood_score_entry", friendly, exc,
-                )
                 parent_job_id = params.get("parent_job_id")
+                if self._get_notify_strategy(parent_job_id) != "compressed_all":
+                    self._notify_failed(
+                        params.get("user_id"), "mood_score_entry",
+                        friendly, exc,
+                    )
                 if parent_job_id:
                     self._try_pipeline_notification(
                         parent_job_id, params.get("user_id"),
@@ -783,31 +981,54 @@ class JobRunner:
         self, job_id: str, params: dict[str, Any]
     ) -> None:
         """Re-chunk and re-embed an entry's text in the background."""
+        parent_job_id = params.get("parent_job_id")
         try:
             self._jobs.mark_running(job_id)
             self._jobs.update_progress(job_id, 0, 1)
 
             entry_id = params["entry_id"]
             if self._ingestion is None:
-                self._jobs.mark_failed(job_id, "Ingestion service not available")
+                error_msg = "Ingestion service not available"
+                self._jobs.mark_failed(job_id, error_msg)
+                if self._get_notify_strategy(parent_job_id) != "compressed_all":
+                    self._notify_failed(
+                        params.get("user_id"), "reprocess_embeddings",
+                        error_msg,
+                    )
+                if parent_job_id:
+                    self._try_pipeline_notification(
+                        parent_job_id, params.get("user_id"),
+                    )
                 return
 
             chunk_count = self._ingestion.reprocess_embeddings(entry_id)
             self._jobs.update_progress(job_id, 1, 1)
             result = {"entry_id": entry_id, "chunk_count": chunk_count}
             self._jobs.mark_succeeded(job_id, result)
-            self._notify_success(
-                params.get("user_id"), "reprocess_embeddings", result,
-            )
+            if parent_job_id:
+                # Part of a save-entry pipeline — defer to the
+                # consolidated pipeline notification.
+                self._try_pipeline_notification(
+                    parent_job_id, params.get("user_id"),
+                )
+            else:
+                self._notify_success(
+                    params.get("user_id"), "reprocess_embeddings", result,
+                )
         except Exception as exc:  # noqa: BLE001 — terminal-state guard
             log.exception("Reprocess embeddings job %s failed", job_id)
             try:
                 friendly = _friendly_error(exc)
                 self._jobs.mark_failed(job_id, friendly)
-                self._notify_failed(
-                    params.get("user_id"), "reprocess_embeddings",
-                    friendly, exc,
-                )
+                if self._get_notify_strategy(parent_job_id) != "compressed_all":
+                    self._notify_failed(
+                        params.get("user_id"), "reprocess_embeddings",
+                        friendly, exc,
+                    )
+                if parent_job_id:
+                    self._try_pipeline_notification(
+                        parent_job_id, params.get("user_id"),
+                    )
             except Exception:  # noqa: BLE001 — last-resort bookkeeping
                 log.exception("Failed to record failure for job %s", job_id)
 

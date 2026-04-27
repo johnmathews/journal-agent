@@ -928,6 +928,7 @@ class FakeNotificationService:
     def __init__(self) -> None:
         self.success_calls: list[tuple[int, str, dict]] = []
         self.failure_calls: list[tuple[int, str, str]] = []
+        self.pipeline_failure_calls: list[tuple[int, str, str]] = []
 
     def notify_job_success(
         self, user_id: int, job_type: str, result: dict[str, Any],
@@ -945,6 +946,11 @@ class FakeNotificationService:
 
     def notify_job_retrying(self, *args: Any, **kwargs: Any) -> None:
         pass
+
+    def notify_pipeline_failed(
+        self, user_id: int, parent_job_type: str, body: str,
+    ) -> None:
+        self.pipeline_failure_calls.append((user_id, parent_job_type, body))
 
 
 class FakeMoodScoringService:
@@ -1260,3 +1266,250 @@ class TestPipelineNotification:
         msg = svc._build_success_message("ingest_audio", combined)
         assert "Entry 42" in msg
         assert "all processing complete" not in msg.lower()
+
+
+# --------------------------------------------------------------------
+# Save-entry pipeline (PATCH /entries/{id}) — consolidated notifications
+# --------------------------------------------------------------------
+
+
+class TestSaveEntryPipeline:
+    """Edits to existing entries fan out into 3 background jobs
+    (reprocess_embeddings, entity_extraction, mood_score_entry).
+
+    The pipeline must emit exactly ONE Pushover notification covering
+    all three — success summary on the happy path, consolidated
+    failure summary if any child fails. Per-child failure pushovers
+    are explicitly suppressed (this is the `compressed_all` strategy).
+    """
+
+    def _make_runner(
+        self,
+        jobs_repo: SQLiteJobRepository,
+        *,
+        extraction_raises: BaseException | None = None,
+        mood_raises: BaseException | None = None,
+        ingestion_raises: BaseException | None = None,
+        ingestion_service: Any = None,
+    ) -> tuple[JobRunner, FakeNotificationService]:
+        notif = FakeNotificationService()
+        if extraction_raises is not None:
+            extraction = FakeEntityExtractionService(
+                raise_in_single=extraction_raises,
+            )
+        else:
+            extraction = FakeEntityExtractionService(
+                single_result=_make_extraction_result(
+                    1, entities_created=2, mentions_created=5,
+                ),
+            )
+        if ingestion_service is None:
+            ingestion_service = FakeIngestionService()
+            if ingestion_raises is not None:
+                # Replace reprocess_embeddings to raise. This monkey-patch
+                # is fine for a fake — we don't want to add a knob to the
+                # real fake just for one test path.
+                def boom(_entry_id: int) -> int:
+                    raise ingestion_raises
+                ingestion_service.reprocess_embeddings = boom  # type: ignore[method-assign]
+        runner = JobRunner(
+            job_repository=jobs_repo,
+            entity_extraction_service=extraction,
+            mood_backfill_callable=FakeMoodBackfill(),
+            mood_scoring_service=FakeMoodScoringService(
+                scores=3, raise_exc=mood_raises,
+            ),
+            entry_repository=FakeEntryRepository(),
+            ingestion_service=ingestion_service,
+            notification_service=notif,  # type: ignore[arg-type]
+        )
+        return runner, notif
+
+    def _wait_pipeline(
+        self,
+        jobs_repo: SQLiteJobRepository,
+        parent_id: str,
+        timeout: float = 10.0,
+    ) -> None:
+        _wait_terminal(jobs_repo, parent_id, timeout)
+        parent = jobs_repo.get(parent_id)
+        assert parent is not None
+        for fj_id in (parent.result or {}).get("follow_up_jobs", {}).values():
+            _wait_terminal(jobs_repo, fj_id, timeout)
+
+    def test_happy_path_sends_one_success_notification(
+        self, jobs_repo: SQLiteJobRepository,
+    ) -> None:
+        runner, notif = self._make_runner(jobs_repo)
+        parent, _children = runner.submit_save_entry_pipeline(
+            entry_id=1, user_id=1,
+        )
+        self._wait_pipeline(jobs_repo, parent.id)
+        runner.shutdown(wait=True)
+
+        # Exactly one push, success-flavored, save_entry_pipeline type
+        assert len(notif.failure_calls) == 0
+        assert len(notif.pipeline_failure_calls) == 0
+        assert len(notif.success_calls) == 1
+        user_id, job_type, result = notif.success_calls[0]
+        assert user_id == 1
+        assert job_type == "save_entry_pipeline"
+        # Combined result includes per-child results
+        assert result["entry_id"] == 1
+        assert result["reprocess_embeddings_result"]["chunk_count"] == 5
+        assert result["entity_extraction_result"]["entities_created"] == 2
+        assert result["entity_extraction_result"]["mentions_created"] == 5
+        assert result["mood_scoring_result"]["scores_written"] == 3
+
+    def test_partial_failure_consolidates_into_one_failure_push(
+        self, jobs_repo: SQLiteJobRepository,
+    ) -> None:
+        runner, notif = self._make_runner(
+            jobs_repo, mood_raises=RuntimeError("LLM overloaded"),
+        )
+        parent, _children = runner.submit_save_entry_pipeline(
+            entry_id=1, user_id=1,
+        )
+        self._wait_pipeline(jobs_repo, parent.id)
+        runner.shutdown(wait=True)
+
+        # No standalone success and no per-child failure pushes
+        assert len(notif.success_calls) == 0
+        assert len(notif.failure_calls) == 0
+        # One consolidated pipeline-failure push
+        assert len(notif.pipeline_failure_calls) == 1
+        user_id, parent_type, body = notif.pipeline_failure_calls[0]
+        assert user_id == 1
+        assert parent_type == "save_entry_pipeline"
+        # Body lists what worked and what didn't
+        assert "Entry 1" in body
+        assert "Reprocessed" in body or "chunks" in body  # reprocess succeeded
+        assert "entities" in body.lower()  # entity succeeded
+        assert "mood" in body.lower()  # mood failed
+        assert "LLM overloaded" in body
+
+    def test_total_failure_consolidates_into_one_failure_push(
+        self, jobs_repo: SQLiteJobRepository,
+    ) -> None:
+        runner, notif = self._make_runner(
+            jobs_repo,
+            extraction_raises=RuntimeError("extraction broke"),
+            mood_raises=RuntimeError("mood broke"),
+            ingestion_raises=RuntimeError("reprocess broke"),
+        )
+        parent, _children = runner.submit_save_entry_pipeline(
+            entry_id=1, user_id=1,
+        )
+        self._wait_pipeline(jobs_repo, parent.id)
+        runner.shutdown(wait=True)
+
+        assert len(notif.success_calls) == 0
+        assert len(notif.failure_calls) == 0
+        assert len(notif.pipeline_failure_calls) == 1
+        _user_id, _job_type, body = notif.pipeline_failure_calls[0]
+        # All three failure messages should appear
+        assert "extraction broke" in body
+        assert "mood broke" in body
+        assert "reprocess broke" in body
+
+    def test_no_mood_when_disabled(
+        self, jobs_repo: SQLiteJobRepository,
+    ) -> None:
+        runner, notif = self._make_runner(jobs_repo)
+        parent, children = runner.submit_save_entry_pipeline(
+            entry_id=1, user_id=1, enable_mood_scoring=False,
+        )
+        self._wait_pipeline(jobs_repo, parent.id)
+        runner.shutdown(wait=True)
+
+        # Only 2 children
+        assert "mood_scoring" not in children
+        assert "reprocess_embeddings" in children
+        assert "entity_extraction" in children
+
+        assert len(notif.success_calls) == 1
+        _, job_type, result = notif.success_calls[0]
+        assert job_type == "save_entry_pipeline"
+        # Mood result not in combined
+        assert "mood_scoring_result" not in result
+
+    def test_children_carry_parent_job_id(
+        self, jobs_repo: SQLiteJobRepository,
+    ) -> None:
+        runner, _notif = self._make_runner(jobs_repo)
+        parent, children = runner.submit_save_entry_pipeline(
+            entry_id=1, user_id=1,
+        )
+        self._wait_pipeline(jobs_repo, parent.id)
+        runner.shutdown(wait=True)
+
+        for _key, child_id in children.items():
+            child = jobs_repo.get(child_id)
+            assert child is not None
+            assert child.params.get("parent_job_id") == parent.id
+
+    def test_parent_marked_succeeded_immediately_with_strategy(
+        self, jobs_repo: SQLiteJobRepository,
+    ) -> None:
+        """The synthetic parent does no work — it is marked succeeded
+        on submission with notify_strategy=compressed_all and the
+        follow_up_jobs map populated."""
+        runner, _notif = self._make_runner(jobs_repo)
+        parent, children = runner.submit_save_entry_pipeline(
+            entry_id=42, user_id=1,
+        )
+        # Parent is succeeded right away (don't have to wait for children)
+        parent_row = jobs_repo.get(parent.id)
+        assert parent_row is not None
+        assert parent_row.status == "succeeded"
+        assert parent_row.type == "save_entry_pipeline"
+        assert parent_row.result is not None
+        assert parent_row.result["notify_strategy"] == "compressed_all"
+        assert parent_row.result["entry_id"] == 42
+        assert set(parent_row.result["follow_up_jobs"]) == set(children)
+
+        self._wait_pipeline(jobs_repo, parent.id)
+        runner.shutdown(wait=True)
+
+    def test_existing_new_entry_pipeline_unaffected(
+        self, jobs_repo: SQLiteJobRepository,
+    ) -> None:
+        """Sanity check: an audio ingestion still uses the unchanged
+        new-entry behavior — partial failure produces 1 immediate
+        per-child failure push + 1 success summary."""
+        notif = FakeNotificationService()
+        extraction = FakeEntityExtractionService(
+            single_result=_make_extraction_result(
+                1, entities_created=8, mentions_created=18,
+            ),
+        )
+        runner = JobRunner(
+            job_repository=jobs_repo,
+            entity_extraction_service=extraction,
+            mood_backfill_callable=FakeMoodBackfill(),
+            mood_scoring_service=FakeMoodScoringService(
+                raise_exc=RuntimeError("LLM down"),
+            ),
+            entry_repository=FakeEntryRepository(),
+            ingestion_service=FakeIngestionService(),
+            notification_service=notif,  # type: ignore[arg-type]
+        )
+        recordings = [(b"audio1", "audio/webm", "rec.webm")]
+        parent = runner.submit_audio_ingestion(
+            recordings, "2026-04-25", user_id=1,
+        )
+        # Wait for parent + follow-ups
+        _wait_terminal(jobs_repo, parent.id)
+        parent_row = jobs_repo.get(parent.id)
+        assert parent_row is not None
+        for fj_id in (parent_row.result or {}).get("follow_up_jobs", {}).values():
+            _wait_terminal(jobs_repo, fj_id)
+        runner.shutdown(wait=True)
+
+        # OLD behavior preserved: per-child failure + success summary
+        assert len(notif.failure_calls) == 1
+        assert notif.failure_calls[0][1] == "mood_score_entry"
+        assert len(notif.success_calls) == 1
+        assert notif.success_calls[0][1] == "ingest_audio"
+        # No pipeline-failure consolidation for new-entry flow
+        assert len(notif.pipeline_failure_calls) == 0

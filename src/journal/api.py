@@ -390,6 +390,7 @@ def register_api_routes(
         entity_extraction_job_id: str | None = None
         reprocess_job_id: str | None = None
         mood_job_id: str | None = None
+        pipeline_job_id: str | None = None
         if final_text is not None:
             if not isinstance(final_text, str):
                 return JSONResponse(
@@ -407,59 +408,37 @@ def register_api_routes(
                 log.warning("PATCH /api/entries/%d — error: %s", entry_id, e)
                 return JSONResponse({"error": str(e)}, status_code=400)
 
-            # Queue background jobs: re-embedding (slow), entity
-            # re-extraction, and mood re-scoring. All are best-effort
-            # — don't fail the save if the job queue is unavailable.
+            # Queue the save-entry pipeline: one synthetic parent job
+            # holds three children (reprocess_embeddings, entity_extraction,
+            # mood_score_entry) and emits a SINGLE consolidated Pushover
+            # covering all three. See submit_save_entry_pipeline for the
+            # design.
             job_runner: JobRunner | None = services.get("job_runner")
             if job_runner is not None:
                 try:
-                    job = job_runner.submit_reprocess_embeddings(entry_id, user_id=user_id)
-                    reprocess_job_id = job.id
-                    log.info(
-                        "PATCH /api/entries/%d — queued reprocess-embeddings job %s",
-                        entry_id,
-                        job.id,
-                    )
-                except Exception:
-                    log.warning(
-                        "PATCH /api/entries/%d — failed to queue reprocess-embeddings",
-                        entry_id,
-                        exc_info=True,
-                    )
-
-                try:
-                    job = job_runner.submit_entity_extraction(
-                        {"entry_id": entry_id},
+                    parent, follow_ups = job_runner.submit_save_entry_pipeline(
+                        entry_id=entry_id,
                         user_id=user_id,
+                        enable_mood_scoring=bool(
+                            _runtime_get(services, "enable_mood_scoring"),
+                        ),
                     )
-                    entity_extraction_job_id = job.id
+                    pipeline_job_id = parent.id
+                    reprocess_job_id = follow_ups.get("reprocess_embeddings")
+                    entity_extraction_job_id = follow_ups.get("entity_extraction")
+                    mood_job_id = follow_ups.get("mood_scoring")
                     log.info(
-                        "PATCH /api/entries/%d — queued entity re-extraction job %s",
-                        entry_id,
-                        job.id,
+                        "PATCH /api/entries/%d — queued save-entry pipeline %s "
+                        "(reprocess=%s, entity=%s, mood=%s)",
+                        entry_id, parent.id,
+                        reprocess_job_id, entity_extraction_job_id, mood_job_id,
                     )
                 except Exception:
                     log.warning(
-                        "PATCH /api/entries/%d — failed to queue entity re-extraction",
+                        "PATCH /api/entries/%d — failed to queue save-entry pipeline",
                         entry_id,
                         exc_info=True,
                     )
-
-                if _runtime_get(services, "enable_mood_scoring"):
-                    try:
-                        mood_job = job_runner.submit_mood_score_entry(entry_id, user_id=user_id)
-                        mood_job_id = mood_job.id
-                        log.info(
-                            "PATCH /api/entries/%d — queued mood re-scoring job %s",
-                            entry_id,
-                            mood_job.id,
-                        )
-                    except Exception:
-                        log.warning(
-                            "PATCH /api/entries/%d — failed to queue mood re-scoring",
-                            entry_id,
-                            exc_info=True,
-                        )
 
         page_count = query_svc._repo.get_page_count(entry_id)
         uncertain_spans = query_svc._repo.get_uncertain_spans(entry_id)
@@ -471,6 +450,8 @@ def register_api_routes(
             resp["reprocess_job_id"] = reprocess_job_id
         if mood_job_id is not None:
             resp["mood_job_id"] = mood_job_id
+        if pipeline_job_id is not None:
+            resp["pipeline_job_id"] = pipeline_job_id
         return JSONResponse(resp)
 
     async def _delete_entry(services: dict, entry_id: int, user_id: int) -> JSONResponse:

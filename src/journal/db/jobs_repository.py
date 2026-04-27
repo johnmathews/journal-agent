@@ -192,6 +192,32 @@ class SQLiteJobRepository:
 
         return [_row_to_job(r) for r in rows], total
 
+    def try_acquire_notification_lock(self, parent_job_id: str) -> bool:
+        """Atomically claim the right to send a pipeline notification.
+
+        Sets ``result_json._notification_sent = 1`` if it isn't
+        already set. Returns True if this caller acquired the lock
+        (and should fire the consolidated Pushover); returns False if
+        another caller already acquired it.
+
+        The UPDATE's WHERE clause performs the atomic check-and-set
+        — concurrent callers race on the SQLite write lock, but only
+        the first one will see the field absent and update it; later
+        callers find it present and the UPDATE matches zero rows.
+        """
+        with self._lock:
+            cursor = self._conn.execute(
+                "UPDATE jobs SET result_json = json_set("
+                "result_json, '$._notification_sent', 1"
+                ") "
+                "WHERE id = ? "
+                "AND result_json IS NOT NULL "
+                "AND json_extract(result_json, '$._notification_sent') IS NULL",
+                (parent_job_id,),
+            )
+            self._conn.commit()
+            return cursor.rowcount == 1
+
     def has_active_jobs_for_entry(self, entry_id: int) -> list[Job]:
         """Return queued/running jobs whose params reference *entry_id*.
 

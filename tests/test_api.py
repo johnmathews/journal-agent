@@ -507,20 +507,28 @@ class TestUpdateEntry:
         # No job_runner → no extraction job id in response
         assert "entity_extraction_job_id" not in data
 
-    def test_patch_text_queues_entity_extraction(
+    def test_patch_text_queues_save_entry_pipeline(
         self,
         client: TestClient,
         repo: SQLiteEntryRepository,
         services: dict,
     ) -> None:
-        """When a job_runner is present, PATCH text should fire an async
-        entity re-extraction job and include the job id in the response."""
-        mock_job = MagicMock()
-        mock_job.id = "test-job-123"
+        """When a job_runner is present, PATCH text should queue the
+        save-entry pipeline and include the parent + child job IDs in
+        the response."""
+        mock_parent = MagicMock()
+        mock_parent.id = "pipeline-parent-id"
         mock_runner = MagicMock()
-        mock_runner.submit_entity_extraction = MagicMock(return_value=mock_job)
-        mock_runner.submit_reprocess_embeddings = MagicMock(return_value=mock_job)
-        mock_runner.submit_mood_score_entry = MagicMock(return_value=mock_job)
+        mock_runner.submit_save_entry_pipeline = MagicMock(
+            return_value=(
+                mock_parent,
+                {
+                    "reprocess_embeddings": "reprocess-job-id",
+                    "entity_extraction": "entity-job-id",
+                    "mood_scoring": "mood-job-id",
+                },
+            ),
+        )
         services["job_runner"] = mock_runner
 
         entry = repo.create_entry("2026-03-22", "photo", "raw text", 2)
@@ -532,18 +540,23 @@ class TestUpdateEntry:
 
         assert response.status_code == 200
         data = response.json()
-        assert data["entity_extraction_job_id"] == "test-job-123"
-        mock_runner.submit_entity_extraction.assert_called_once_with(
-            {"entry_id": entry.id}, user_id=_TEST_USER_ID,
-        )
+        assert data["pipeline_job_id"] == "pipeline-parent-id"
+        assert data["entity_extraction_job_id"] == "entity-job-id"
+        assert data["reprocess_job_id"] == "reprocess-job-id"
+        assert data["mood_job_id"] == "mood-job-id"
+        # Must call submit_save_entry_pipeline (not the old per-job submits)
+        mock_runner.submit_save_entry_pipeline.assert_called_once()
+        kwargs = mock_runner.submit_save_entry_pipeline.call_args.kwargs
+        assert kwargs["entry_id"] == entry.id
+        assert kwargs["user_id"] == _TEST_USER_ID
 
-    def test_patch_date_only_does_not_queue_extraction(
+    def test_patch_date_only_does_not_queue_pipeline(
         self,
         client: TestClient,
         repo: SQLiteEntryRepository,
         services: dict,
     ) -> None:
-        """Changing only entry_date should not trigger entity extraction."""
+        """Changing only entry_date should not trigger the save-entry pipeline."""
         mock_runner = MagicMock()
         services["job_runner"] = mock_runner
 
@@ -555,8 +568,10 @@ class TestUpdateEntry:
         )
 
         assert response.status_code == 200
-        assert "entity_extraction_job_id" not in response.json()
-        mock_runner.submit_entity_extraction.assert_not_called()
+        body = response.json()
+        assert "entity_extraction_job_id" not in body
+        assert "pipeline_job_id" not in body
+        mock_runner.submit_save_entry_pipeline.assert_not_called()
 
 
 class TestVerifyDoubts:
