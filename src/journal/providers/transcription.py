@@ -130,10 +130,15 @@ class OpenAITranscriptionProvider:
         api_key: str,
         model: str,
         confidence_threshold: float = -0.5,
+        context_prompt: str = "",
     ) -> None:
         self._client = openai.OpenAI(api_key=api_key)
         self._model = model
         self._confidence_threshold = confidence_threshold
+        # Optional context prompt (up to ~200 tokens of names/places/jargon)
+        # passed to Whisper to bias toward correct spellings. Empty string
+        # means "no prompt" — preserves prior behaviour.
+        self._context_prompt = context_prompt
 
     def transcribe(
         self,
@@ -165,6 +170,8 @@ class OpenAITranscriptionProvider:
                 if use_logprobs:
                     kwargs["response_format"] = "json"
                     kwargs["include"] = ["logprobs"]
+                if self._context_prompt:
+                    kwargs["prompt"] = self._context_prompt
 
                 transcript = self._client.audio.transcriptions.create(**kwargs)
 

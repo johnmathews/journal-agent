@@ -82,6 +82,29 @@ SETTING_DEFS: list[SettingDef] = [
         description="Use LLM to add paragraph breaks to voice transcriptions.",
         config_attr="transcript_formatting",
     ),
+    SettingDef(
+        key="date_heading_detection",
+        type="bool",
+        label="Date Heading Detection",
+        description=(
+            "Lift a leading date in voice transcripts and OCR text into a "
+            "markdown heading on the displayed entry text. Original raw "
+            "text is preserved."
+        ),
+        config_attr="date_heading_detection",
+    ),
+    SettingDef(
+        key="transcription_context_enabled",
+        type="bool",
+        label="Voice Transcription Context",
+        description=(
+            "Pass the OCR context files (people, places, glossary) to "
+            "Whisper as a prompt to improve spelling of proper nouns in "
+            "voice transcripts. Requires server restart to pick up edits "
+            "to the context files."
+        ),
+        config_attr="transcription_context_enabled",
+    ),
 ]
 
 SETTING_DEFS_BY_KEY: dict[str, SettingDef] = {d.key: d for d in SETTING_DEFS}

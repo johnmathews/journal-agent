@@ -101,6 +101,35 @@ class Config:
         )
     )
 
+    # Date-heading detection — when on, ingestion lifts a leading date
+    # in the OCR or voice text into a markdown heading on `final_text`.
+    # `raw_text` is never modified. Default-on so new ingests get the
+    # benefit without configuration; users can toggle it off via the
+    # runtime settings UI without a server restart.
+    date_heading_detection: bool = field(
+        default_factory=lambda: os.environ.get(
+            "DATE_HEADING_DETECTION", "true"
+        ).lower()
+        in ("1", "true", "yes", "on")
+    )
+    date_heading_model: str = field(
+        default_factory=lambda: os.environ.get(
+            "DATE_HEADING_MODEL", "claude-haiku-4-5"
+        )
+    )
+
+    # Whisper transcription prompt — when on, the OCR context files
+    # (people, places, glossary) are stripped of markdown, truncated to
+    # ~200 tokens, and passed as the `prompt` parameter to Whisper to
+    # bias toward correct spellings of proper nouns. Server restart
+    # required after editing the context files (matches OCR behaviour).
+    transcription_context_enabled: bool = field(
+        default_factory=lambda: os.environ.get(
+            "TRANSCRIPTION_CONTEXT_ENABLED", "true"
+        ).lower()
+        in ("1", "true", "yes", "on")
+    )
+
     # Slack (for downloading files from Slack URLs)
     slack_bot_token: str = field(
         default_factory=lambda: os.environ.get("SLACK_BOT_TOKEN", "")

@@ -60,8 +60,33 @@ See `docs/architecture.md` → "Chunking Strategies" for the algorithm and trade
 | `OCR_PROVIDER` | `anthropic`  | Which vision API to use for handwriting OCR. `"anthropic"` (Claude) or `"gemini"` (Google Gemini).            |
 | `OCR_MODEL`    | per-provider | Model name sent to the selected provider. Defaults: `claude-opus-4-6` (anthropic), `gemini-2.5-pro` (gemini). Ignored in dual-pass mode — each provider always uses its own default. |
 
-When using `gemini`, the context-priming glossary (`OCR_CONTEXT_DIR`) is not applied — Gemini uses only the base system
-prompt.
+When using `gemini`, the context-priming glossary (`OCR_CONTEXT_DIR`) is not applied to OCR — Gemini uses only the base
+system prompt. Voice transcription priming (`TRANSCRIPTION_CONTEXT_ENABLED`) is provider-agnostic and runs against
+Whisper regardless of which OCR backend is active.
+
+## Optional — context files (OCR + voice)
+
+Markdown context files in `OCR_CONTEXT_DIR` prime BOTH the OCR system prompt and the Whisper transcription `prompt`
+parameter so handwritten and spoken proper nouns get correct spellings. See `docs/context-files.md` for the unified
+reference and `docs/ocr-context.md` for the OCR-side mechanism.
+
+| Variable                        | Default          | Description                                                                                                                          |
+| ------------------------------- | ---------------- | ------------------------------------------------------------------------------------------------------------------------------------ |
+| `OCR_CONTEXT_DIR`               |                  | Directory of `*.md` files. Unset = no context priming on either pipeline.                                                            |
+| `OCR_CONTEXT_CACHE_TTL`         | `1h`             | Anthropic cache TTL for the OCR system block (`5m` or `1h`).                                                                         |
+| `TRANSCRIPTION_CONTEXT_ENABLED` | `true`           | Pass the markdown (stripped, ~200-token cap) to Whisper as `prompt`. Set to `false` for OCR priming without Whisper priming.         |
+
+## Optional — voice transcription post-processing
+
+| Variable                       | Default            | Description                                                                                                                                |
+| ------------------------------ | ------------------ | ------------------------------------------------------------------------------------------------------------------------------------------ |
+| `TRANSCRIPT_FORMATTING`        | `false`            | Use Anthropic Haiku to insert paragraph breaks into voice transcripts. Word preservation is enforced; failures fall back to raw text.      |
+| `TRANSCRIPT_FORMATTER_MODEL`   | `claude-haiku-4-5` | Model used for paragraph formatting.                                                                                                       |
+| `DATE_HEADING_DETECTION`       | `true`             | When the transcript or OCR text begins with a date (numeric, written, or relative like "today"), lift it into a markdown `# ` heading.     |
+| `DATE_HEADING_MODEL`           | `claude-haiku-4-5` | Model used for heading detection.                                                                                                          |
+
+`raw_text` is preserved verbatim through both steps — the heading and any LLM-inserted paragraph breaks land only on
+`final_text`. `final_text` is what the chunker, embedder, and search index see.
 
 ## Models (defaults, overridable via env vars or config.py)
 

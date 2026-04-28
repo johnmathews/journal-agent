@@ -22,6 +22,10 @@ if TYPE_CHECKING:
     from collections.abc import Callable
 
     from journal.providers.formatter import FormatterProtocol
+    from journal.services.heading_detector import (
+        HeadingDetectionResult,
+        HeadingDetector,
+    )
     from journal.services.mood_scoring import MoodScoringService
 
 log = logging.getLogger(__name__)
@@ -132,6 +136,7 @@ class IngestionService:
         preprocess_images: bool = True,
         mood_scoring: "MoodScoringService | None" = None,
         formatter: "FormatterProtocol | None" = None,
+        heading_detector: "HeadingDetector | None" = None,
     ) -> None:
         self._repo = repository
         self._vector_store = vector_store
@@ -155,6 +160,33 @@ class IngestionService:
         # paragraph breaks, storing the formatted version as
         # final_text while keeping raw_text unchanged.
         self._formatter = formatter
+        # Optional date-heading detector. When set, both voice and OCR
+        # paths lift a leading date in the input into a markdown
+        # heading on final_text. raw_text is never touched.
+        self._heading_detector = heading_detector
+
+    def _detect_heading(
+        self, text: str, entry_date: str
+    ) -> "HeadingDetectionResult":
+        """Run the heading detector if available; fail safe to no-heading.
+
+        The Anthropic detector already swallows API errors internally, but
+        this wrapper makes the no-detector path explicit and centralises
+        the exception net so any future detector implementation can crash
+        without breaking ingestion.
+        """
+        from journal.services.heading_detector import HeadingDetectionResult
+
+        if self._heading_detector is None:
+            return HeadingDetectionResult(heading_text="", body=text)
+        try:
+            return self._heading_detector.detect(text, entry_date=entry_date)
+        except Exception:
+            log.warning(
+                "Heading detection raised — using text unchanged",
+                exc_info=True,
+            )
+            return HeadingDetectionResult(heading_text="", body=text)
 
     def _maybe_format_transcript(self, raw_text: str) -> str:
         """Run the transcript through the LLM formatter if available.
@@ -215,9 +247,19 @@ class IngestionService:
         if extracted:
             date = extracted
 
-        # Store entry (final_text defaults to raw_text)
+        # Optional date-heading detection — lift a leading date in the OCR
+        # text into a markdown heading on final_text. raw_text is left
+        # verbatim so the OCR overlay/audit trail still points at exactly
+        # what the model returned.
+        det = self._detect_heading(raw_text, date)
+        final_text = det.to_text() if det.has_heading else None
+
+        # Store entry (final_text defaults to raw_text when None)
         word_count = len(raw_text.split())
-        entry = self._repo.create_entry(date, "photo", raw_text, word_count, user_id=user_id)
+        entry = self._repo.create_entry(
+            date, "photo", raw_text, word_count, user_id=user_id,
+            final_text=final_text,
+        )
         source_file_id = self._store_source_file(
             entry.id, f"image_{date}", media_type, file_hash,
         )
@@ -259,9 +301,17 @@ class IngestionService:
         if not raw_text.strip():
             raise ValueError("Transcription produced no text from audio")
 
-        # Optionally format with LLM paragraph breaks (final_text only;
-        # raw_text stays as the original transcription).
-        final_text = self._maybe_format_transcript(raw_text)
+        # Lift a leading date into a markdown heading (no-op when the
+        # detector is disabled or returns no heading). The formatter is
+        # then applied to the BODY only, so its word-preservation
+        # contract is unaffected by heading characters.
+        det = self._detect_heading(raw_text, date)
+        formatted_body = self._maybe_format_transcript(det.body) if det.body else det.body
+        from journal.services.heading_detector import HeadingDetectionResult
+
+        final_text = HeadingDetectionResult(
+            heading_text=det.heading_text, body=formatted_body
+        ).to_text()
 
         word_count = len(raw_text.split())
         entry = self._repo.create_entry(
@@ -362,8 +412,17 @@ class IngestionService:
         # the blank line benefits downstream paragraph-aware chunking.
         raw_text = "\n\n".join(transcripts)
 
-        # Optionally format with LLM paragraph breaks (final_text only).
-        final_text = self._maybe_format_transcript(raw_text)
+        # Heading detection runs against the combined raw text — the
+        # date typically appears at the very start of the first
+        # recording, so this catches it the same way single-voice does.
+        # Formatter then operates on the body only.
+        det = self._detect_heading(raw_text, date)
+        formatted_body = self._maybe_format_transcript(det.body) if det.body else det.body
+        from journal.services.heading_detector import HeadingDetectionResult
+
+        final_text = HeadingDetectionResult(
+            heading_text=det.heading_text, body=formatted_body
+        ).to_text()
 
         word_count = len(raw_text.split())
         entry = self._repo.create_entry(
@@ -712,8 +771,15 @@ class IngestionService:
         if extracted:
             date = extracted
 
+        # Optional date-heading detection — same as single-page OCR.
+        det = self._detect_heading(combined_text, date)
+        final_text = det.to_text() if det.has_heading else None
+
         # Create single entry
-        entry = self._repo.create_entry(date, "photo", combined_text, word_count, user_id=user_id)
+        entry = self._repo.create_entry(
+            date, "photo", combined_text, word_count, user_id=user_id,
+            final_text=final_text,
+        )
 
         # Store source files and pages
         for i, (_image_data, _) in enumerate(images):

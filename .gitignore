@@ -72,3 +72,6 @@ Thumbs.db
 # The README is checked in; everything else is local-only.
 /context/*
 !/context/README.md
+
+# engineering-team skill working notes (intermediate plans, reports).
+.engineering-team/

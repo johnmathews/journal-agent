@@ -82,10 +82,25 @@ def _init_services() -> dict:
 
     # Providers
     ocr = build_ocr_provider(config)
+    transcription_context = ""
+    if config.transcription_context_enabled:
+        from journal.services.transcription_context import build_whisper_prompt
+
+        transcription_context = build_whisper_prompt(config.ocr_context_dir)
+        if transcription_context:
+            log.info(
+                "  Whisper context prompt loaded (%d chars)",
+                len(transcription_context),
+            )
+        elif config.ocr_context_dir is not None:
+            log.info(
+                "  Whisper context prompt empty — context dir has no usable .md files"
+            )
     transcription = OpenAITranscriptionProvider(
         api_key=config.openai_api_key,
         model=config.transcription_model,
         confidence_threshold=config.transcription_confidence_threshold,
+        context_prompt=transcription_context,
     )
     embeddings = OpenAIEmbeddingsProvider(
         api_key=config.openai_api_key,
@@ -179,6 +194,22 @@ def _init_services() -> dict:
             model=cfg.transcript_formatter_model,
         )
 
+    def _build_heading_detector(cfg, rs):  # type: ignore[no-untyped-def]
+        """Build a date-heading detector if the runtime setting is enabled."""
+        if not rs.get("date_heading_detection"):
+            return None
+        if not cfg.anthropic_api_key:
+            log.warning(
+                "date_heading_detection is enabled but ANTHROPIC_API_KEY is not "
+                "set — heading detection will be skipped"
+            )
+            return None
+        from journal.services.heading_detector import AnthropicHeadingDetector
+        return AnthropicHeadingDetector(
+            api_key=cfg.anthropic_api_key,
+            model=cfg.date_heading_model,
+        )
+
     def _on_runtime_setting_change(key: str, value: Any) -> None:
         """Side-effect callback: rebuild OCR provider when relevant settings change."""
         if key in ("ocr_dual_pass", "ocr_provider"):
@@ -232,6 +263,20 @@ def _init_services() -> dict:
             else:
                 ingestion_service._formatter = None
                 log.info("Transcript formatting disabled via runtime settings")
+        elif key == "date_heading_detection":
+            if value and config.anthropic_api_key:
+                from journal.services.heading_detector import (
+                    AnthropicHeadingDetector,
+                )
+
+                ingestion_service._heading_detector = AnthropicHeadingDetector(
+                    api_key=config.anthropic_api_key,
+                    model=config.date_heading_model,
+                )
+                log.info("Date-heading detection enabled via runtime settings")
+            else:
+                ingestion_service._heading_detector = None
+                log.info("Date-heading detection disabled via runtime settings")
 
     runtime_settings = RuntimeSettings(conn, config, on_change=_on_runtime_setting_change)
     log.info("  Runtime settings loaded")
@@ -250,6 +295,7 @@ def _init_services() -> dict:
         preprocess_images=runtime_settings.get("preprocess_images"),
         mood_scoring=mood_scoring_service,
         formatter=_build_formatter(config, runtime_settings),
+        heading_detector=_build_heading_detector(config, runtime_settings),
     )
 
     # Pushover notification service — optional, only when credentials

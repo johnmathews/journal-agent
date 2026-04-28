@@ -1009,3 +1009,209 @@ class TestTranscriptFormatting:
             b"audio", "audio/webm", "2026-04-22",
         )
         assert entry.final_text == entry.raw_text
+
+
+class TestHeadingDetection:
+    """Tests for date-heading detector integration in voice + OCR ingestion."""
+
+    @pytest.fixture
+    def mock_detector(self):
+        from journal.services.heading_detector import HeadingDetectionResult
+
+        detector = MagicMock()
+        detector.detect.return_value = HeadingDetectionResult(
+            heading_text="", body=""
+        )
+        return detector
+
+    @pytest.fixture
+    def detection_service(
+        self, db_conn, mock_ocr, mock_transcription, mock_embeddings, mock_detector,
+    ):
+        repo = SQLiteEntryRepository(db_conn)
+        vector_store = InMemoryVectorStore()
+        return IngestionService(
+            repository=repo,
+            vector_store=vector_store,
+            ocr_provider=mock_ocr,
+            transcription_provider=mock_transcription,
+            embeddings_provider=mock_embeddings,
+            chunker=FixedTokenChunker(max_tokens=150, overlap_tokens=40),
+            preprocess_images=False,
+            heading_detector=mock_detector,
+        )
+
+    def test_voice_with_detected_heading_writes_heading_to_final_text_only(
+        self, detection_service, mock_transcription, mock_detector,
+    ):
+        from journal.services.heading_detector import HeadingDetectionResult
+
+        raw = "April 28th. Today I went for a long run."
+        mock_transcription.transcribe.return_value = TranscriptionResult(text=raw)
+        mock_detector.detect.return_value = HeadingDetectionResult(
+            heading_text="28 April 2026",
+            body="Today I went for a long run.",
+        )
+
+        entry = detection_service.ingest_voice(
+            b"audio", "audio/webm", "2026-04-28",
+        )
+
+        assert entry.raw_text == raw
+        assert entry.final_text == "# 28 April 2026\n\nToday I went for a long run."
+        mock_detector.detect.assert_called_once_with(raw, entry_date="2026-04-28")
+
+    def test_voice_with_no_detected_heading_leaves_final_text_unchanged(
+        self, detection_service, mock_transcription, mock_detector,
+    ):
+        from journal.services.heading_detector import HeadingDetectionResult
+
+        raw = "I went to Berlin on April 28th."
+        mock_transcription.transcribe.return_value = TranscriptionResult(text=raw)
+        mock_detector.detect.return_value = HeadingDetectionResult(
+            heading_text="", body=raw,
+        )
+
+        entry = detection_service.ingest_voice(
+            b"audio", "audio/webm", "2026-04-28",
+        )
+
+        assert entry.raw_text == raw
+        assert entry.final_text == raw
+
+    def test_ocr_with_detected_heading_writes_heading_to_final_text_only(
+        self, detection_service, mock_ocr, mock_detector,
+    ):
+        from journal.services.heading_detector import HeadingDetectionResult
+
+        ocr_text = "April 28th\nWoke up early and watched the sunrise."
+        mock_ocr.extract.return_value = _ocr_result(ocr_text)
+        mock_detector.detect.return_value = HeadingDetectionResult(
+            heading_text="28 April 2026",
+            body="Woke up early and watched the sunrise.",
+        )
+
+        entry = detection_service.ingest_image(
+            b"page bytes", "image/jpeg", "2026-04-28",
+        )
+
+        assert entry.raw_text == ocr_text
+        assert entry.final_text == (
+            "# 28 April 2026\n\nWoke up early and watched the sunrise."
+        )
+
+    def test_multi_page_ocr_with_detected_heading(
+        self, detection_service, mock_ocr, mock_detector,
+    ):
+        from journal.services.heading_detector import HeadingDetectionResult
+
+        mock_ocr.extract.side_effect = [
+            _ocr_result("April 28th\nFirst page text."),
+            _ocr_result("Second page text."),
+        ]
+        mock_detector.detect.return_value = HeadingDetectionResult(
+            heading_text="28 April 2026",
+            body="First page text.\nSecond page text.",
+        )
+
+        entry = detection_service.ingest_multi_page_entry(
+            [(b"p1", "image/jpeg"), (b"p2", "image/jpeg")],
+            "2026-04-28",
+        )
+
+        assert entry.final_text.startswith("# 28 April 2026\n\n")
+        # raw_text combines pages with single \n separator (existing behaviour)
+        assert "April 28th" in entry.raw_text
+        assert "Second page text." in entry.raw_text
+
+    def test_multi_voice_with_detected_heading(
+        self, detection_service, mock_transcription, mock_detector,
+    ):
+        from journal.services.heading_detector import HeadingDetectionResult
+
+        mock_transcription.transcribe.side_effect = [
+            TranscriptionResult(text="April 28th. First clip."),
+            TranscriptionResult(text="Second clip."),
+        ]
+        mock_detector.detect.return_value = HeadingDetectionResult(
+            heading_text="28 April 2026",
+            body="First clip.\n\nSecond clip.",
+        )
+
+        entry = detection_service.ingest_multi_voice(
+            [(b"a1", "audio/webm"), (b"a2", "audio/webm")],
+            "2026-04-28",
+        )
+
+        assert entry.final_text == (
+            "# 28 April 2026\n\nFirst clip.\n\nSecond clip."
+        )
+
+    def test_detector_exception_falls_back_to_no_heading(
+        self, detection_service, mock_transcription, mock_detector,
+    ):
+        mock_detector.detect.side_effect = RuntimeError("LLM down")
+        raw = "April 28th. Today I went out."
+        mock_transcription.transcribe.return_value = TranscriptionResult(text=raw)
+
+        entry = detection_service.ingest_voice(
+            b"audio", "audio/webm", "2026-04-28",
+        )
+
+        # Ingestion does not crash — final_text just falls back to raw_text.
+        assert entry.raw_text == raw
+        assert entry.final_text == raw
+
+    def test_no_detector_does_not_call_detection(
+        self, ingestion_service, mock_transcription,
+    ):
+        """The default service has no detector; voice ingestion must not change behaviour."""
+        raw = "April 28th. Today I went out."
+        mock_transcription.transcribe.return_value = TranscriptionResult(text=raw)
+        entry = ingestion_service.ingest_voice(
+            b"audio", "audio/webm", "2026-04-28",
+        )
+        assert entry.raw_text == raw
+        assert entry.final_text == raw
+
+    def test_detector_combines_with_formatter_on_body_only(
+        self, db_conn, mock_ocr, mock_transcription, mock_embeddings,
+    ):
+        """When BOTH detector and formatter are wired, formatter must only see the body."""
+        from journal.services.heading_detector import HeadingDetectionResult
+
+        detector = MagicMock()
+        detector.detect.return_value = HeadingDetectionResult(
+            heading_text="28 April 2026",
+            body="Hello world. Goodbye world.",
+        )
+        formatter = MagicMock()
+        formatter.format_paragraphs.side_effect = lambda text: text.replace(
+            ". ", ".\n\n"
+        )
+
+        repo = SQLiteEntryRepository(db_conn)
+        service = IngestionService(
+            repository=repo,
+            vector_store=InMemoryVectorStore(),
+            ocr_provider=mock_ocr,
+            transcription_provider=mock_transcription,
+            embeddings_provider=mock_embeddings,
+            chunker=FixedTokenChunker(max_tokens=150, overlap_tokens=40),
+            preprocess_images=False,
+            formatter=formatter,
+            heading_detector=detector,
+        )
+
+        raw = "April 28th. Hello world. Goodbye world."
+        mock_transcription.transcribe.return_value = TranscriptionResult(text=raw)
+
+        entry = service.ingest_voice(b"audio", "audio/webm", "2026-04-28")
+
+        # Formatter must have received only the body, never the heading text.
+        formatter.format_paragraphs.assert_called_once_with(
+            "Hello world. Goodbye world."
+        )
+        assert entry.final_text == (
+            "# 28 April 2026\n\nHello world.\n\nGoodbye world."
+        )
