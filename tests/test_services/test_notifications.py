@@ -349,8 +349,9 @@ class TestHasCredentials:
 class TestBuildSuccessMessage:
     def test_ingestion_message_without_followups(self, svc: PushoverNotificationService) -> None:
         msg = svc._build_success_message("ingest_images", {"entry_id": 42})
-        assert "Entry 42" in msg
-        assert "complete" in msg.lower()
+        assert "- Created Entry 42" in msg
+        # Bullet-formatted: every line starts with "- "
+        assert all(line.startswith("- ") for line in msg.splitlines())
 
     def test_ingestion_message_with_pipeline_results(
         self, svc: PushoverNotificationService,
@@ -365,36 +366,59 @@ class TestBuildSuccessMessage:
             },
         }
         msg = svc._build_success_message("ingest_audio", result)
-        assert "Entry 76" in msg
-        assert "7 mood scores" in msg
-        assert "8 entities" in msg
-        assert "18 mentions" in msg
+        assert "- Created Entry 76" in msg
+        assert "- Created 8 entities" in msg
+        assert "- Recorded 18 mentions" in msg
+        # Mood scores are constant (7 dimensions) — only the verb-led
+        # bullet is shown, no count.
+        assert "- Calculated mood scores" in msg
+        assert "7 mood scores" not in msg
         # Should NOT contain the generic fallback when follow-up results exist
-        assert "all processing complete" not in msg.lower()
+        assert "completed all processing" not in msg.lower()
 
     def test_entity_extraction_message(self, svc: PushoverNotificationService) -> None:
         msg = svc._build_success_message(
             "entity_extraction",
             {"entries_processed": 5, "entities_created": 3, "mentions_created": 10},
         )
-        assert "5 entries" in msg
-        assert "3 entities" in msg
+        assert "- Processed 5 entries" in msg
+        assert "- Created 3 entities" in msg
+        assert "- Recorded 10 mentions" in msg
 
     def test_mood_backfill_message(self, svc: PushoverNotificationService) -> None:
         msg = svc._build_success_message(
             "mood_backfill", {"scored": 10, "skipped": 2},
         )
-        assert "10 entries scored" in msg
+        assert "- Scored 10 entries" in msg
+        assert "- Skipped 2 entries" in msg
+
+    def test_mood_score_entry_message_omits_constant_count(
+        self, svc: PushoverNotificationService,
+    ) -> None:
+        """Per-entry mood scoring always produces the same fixed number
+        of scores (one per mood dimension), so the count is not shown."""
+        msg = svc._build_success_message(
+            "mood_score_entry", {"scores_written": 7},
+        )
+        assert msg == "- Calculated mood scores"
+
+    def test_reprocess_embeddings_message(
+        self, svc: PushoverNotificationService,
+    ) -> None:
+        msg = svc._build_success_message(
+            "reprocess_embeddings", {"chunk_count": 4},
+        )
+        assert msg == "- Reprocessed 4 chunks"
 
     def test_fallback_message(self, svc: PushoverNotificationService) -> None:
         msg = svc._build_success_message("unknown_type", {})
-        assert "completed successfully" in msg.lower()
+        assert msg == "- Completed successfully"
 
     def test_save_entry_pipeline_success_message(
         self, svc: PushoverNotificationService,
     ) -> None:
         """Save-entry pipeline (edit flow) success summary covers all 3 stages
-        with explicit per-line labels."""
+        with explicit per-line bullets."""
         result = {
             "entry_id": 76,
             "follow_up_jobs": {
@@ -415,15 +439,16 @@ class TestBuildSuccessMessage:
             "mood_scoring_result": {"entry_id": 76, "scores_written": 3},
         }
         msg = svc._build_success_message("save_entry_pipeline", result)
-        assert "Entry 76 updated" in msg
-        assert "Reprocessed: 4 chunks" in msg
-        # Each entity counter on its own labeled line
-        assert "Entities created: 2" in msg
-        assert "Entities deleted: 1" in msg
+        assert "- Updated Entry 76" in msg
+        assert "- Reprocessed 4 chunks" in msg
+        assert "- Created 2 entities" in msg
+        assert "- Deleted 1 entities" in msg
         # Total = created (2) + matched (7) = 9
-        assert "Total entities: 9" in msg
-        assert "Mentions: 19" in msg
-        assert "Mood scores: 3" in msg
+        assert "- Total: 9 entities" in msg
+        assert "- Recorded 19 mentions" in msg
+        # Mood-scores count is constant per entry — only the verb is shown
+        assert "- Calculated mood scores" in msg
+        assert "Mood scores: 3" not in msg
 
     def test_save_entry_pipeline_message_handles_missing_entities_deleted(
         self, svc: PushoverNotificationService,
@@ -443,8 +468,8 @@ class TestBuildSuccessMessage:
             "mood_scoring_result": {"scores_written": 3},
         }
         msg = svc._build_success_message("save_entry_pipeline", result)
-        assert "Entities deleted: 0" in msg
-        assert "Total entities: 2" in msg
+        assert "- Deleted 0 entities" in msg
+        assert "- Total: 2 entities" in msg
 
     def test_save_entry_pipeline_message_omits_missing_stages(
         self, svc: PushoverNotificationService,
@@ -463,7 +488,7 @@ class TestBuildSuccessMessage:
             # No mood_scoring_result
         }
         msg = svc._build_success_message("save_entry_pipeline", result)
-        assert "Entry 76 updated" in msg
+        assert "- Updated Entry 76" in msg
         assert "mood" not in msg.lower()
 
 
@@ -491,12 +516,13 @@ class TestBuildPipelineFailureBody:
         )
         assert "Entry 76 update" in body
         assert "partial failure" in body
-        assert "+ Reprocessed: 4 chunks" in body
-        assert "+ Entities created: 2" in body
-        assert "+ Entities deleted: 1" in body
-        assert "+ Total entities: 9" in body
-        assert "+ Mentions: 19" in body
-        assert "- Mood scoring: LLM overloaded" in body
+        # Successes prefixed with ✓, failures with ✗
+        assert "✓ Reprocessed 4 chunks" in body
+        assert "✓ Created 2 entities" in body
+        assert "✓ Deleted 1 entities" in body
+        assert "✓ Total: 9 entities" in body
+        assert "✓ Recorded 19 mentions" in body
+        assert "✗ Mood scoring: LLM overloaded" in body
 
     def test_total_failure_uses_failed_header(self) -> None:
         from journal.services.notifications import build_pipeline_failure_body
@@ -512,9 +538,9 @@ class TestBuildPipelineFailureBody:
         )
         assert "Entry 76 update failed" in body
         assert "partial failure" not in body
-        assert "- Reprocess: reprocess broke" in body
-        assert "- Entity extraction: extraction broke" in body
-        assert "- Mood scoring: mood broke" in body
+        assert "✗ Reprocess: reprocess broke" in body
+        assert "✗ Entity extraction: extraction broke" in body
+        assert "✗ Mood scoring: mood broke" in body
 
     def test_unknown_parent_type_uses_generic_header(self) -> None:
         from journal.services.notifications import build_pipeline_failure_body
@@ -535,7 +561,7 @@ class TestNotifyPipelineFailed:
         svc: PushoverNotificationService,
         mock_user_repo: MagicMock,
     ) -> None:
-        body = "Entry 76 update — partial failure\n+ Reprocessed: 4 chunks"
+        body = "Entry 76 update — partial failure\n✓ Reprocessed 4 chunks"
         with patch("urllib.request.urlopen") as mock_urlopen:
             mock_urlopen.return_value = _make_urlopen_response({"status": 1})
             svc.notify_pipeline_failed(
@@ -548,10 +574,9 @@ class TestNotifyPipelineFailed:
             # Title uses the parent job's label
             assert "Entry+update+failed" in posted_data
             # Body is exactly what we passed (no cause-tag prefix).
-            # URL-encoded: ":" -> %3A, " " -> +, so "Reprocessed: 4 chunks"
-            # serialises to "Reprocessed%3A+4+chunks" in the form-encoded
-            # request body.
-            assert "Reprocessed%3A+4+chunks" in posted_data
+            # "Reprocessed 4 chunks" serialises to "Reprocessed+4+chunks"
+            # in the form-encoded request body.
+            assert "Reprocessed+4+chunks" in posted_data
             assert "Internal+error" not in posted_data
             # High priority
             assert "priority=1" in posted_data

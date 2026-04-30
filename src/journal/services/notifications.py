@@ -115,9 +115,13 @@ def build_pipeline_failure_body(
 ) -> str:
     """Build the body of a consolidated pipeline-failure notification.
 
-    Lists per-stage outcomes — successful stages get a "+" line with
-    their summary, failed stages get a "-" line with the error
-    message. Currently only formatted for ``parent_job_type ==
+    Lists per-stage outcomes — successful stages are prefixed with
+    ``✓`` and failed stages with ``✗`` so the user can see at a
+    glance which stages worked. Stage summaries use the same
+    verb-first wording as the success message so the two formats
+    read consistently.
+
+    Currently only formatted for ``parent_job_type ==
     "save_entry_pipeline"``; other parent types fall back to a
     generic header.
 
@@ -141,16 +145,15 @@ def build_pipeline_failure_body(
 
     # Reprocess embeddings
     if "reprocess_embeddings" in failures:
-        parts.append(f"- Reprocess: {failures['reprocess_embeddings']}")
+        parts.append(f"✗ Reprocess: {failures['reprocess_embeddings']}")
     elif (combined.get("reprocess_embeddings_result") or {}):
         n = combined["reprocess_embeddings_result"].get("chunk_count", 0)
-        parts.append(f"+ Reprocessed: {n} chunks")
+        parts.append(f"✓ Reprocessed {n} chunks")
 
-    # Entity extraction (uses the same explicit labels as the success
-    # summary so users can read both formats consistently).
+    # Entity extraction
     if "entity_extraction" in failures:
         parts.append(
-            f"- Entity extraction: {failures['entity_extraction']}"
+            f"✗ Entity extraction: {failures['entity_extraction']}"
         )
     elif (combined.get("entity_extraction_result") or {}):
         r = combined["entity_extraction_result"]
@@ -158,17 +161,16 @@ def build_pipeline_failure_body(
         matched = r.get("entities_matched", 0)
         deleted = r.get("entities_deleted", 0)
         mentions = r.get("mentions_created", 0)
-        parts.append(f"+ Entities created: {created}")
-        parts.append(f"+ Entities deleted: {deleted}")
-        parts.append(f"+ Total entities: {created + matched}")
-        parts.append(f"+ Mentions: {mentions}")
+        parts.append(f"✓ Created {created} entities")
+        parts.append(f"✓ Deleted {deleted} entities")
+        parts.append(f"✓ Total: {created + matched} entities")
+        parts.append(f"✓ Recorded {mentions} mentions")
 
     # Mood scoring
     if "mood_scoring" in failures:
-        parts.append(f"- Mood scoring: {failures['mood_scoring']}")
+        parts.append(f"✗ Mood scoring: {failures['mood_scoring']}")
     elif (combined.get("mood_scoring_result") or {}):
-        n = combined["mood_scoring_result"].get("scores_written", 0)
-        parts.append(f"+ Mood scores: {n}")
+        parts.append("✓ Calculated mood scores")
 
     return "\n".join(parts)
 
@@ -278,9 +280,9 @@ class PushoverNotificationService:
 
             title = f"{label} retrying"
             message = (
-                f"{error_message}\n"
-                f"Cause: {cause}\n"
-                f"Retry attempt {attempt}, next try in {delay_min} min"
+                f"- Error: {error_message}\n"
+                f"- Cause: {cause}\n"
+                f"- Retrying in {delay_min} min (attempt {attempt})"
             )
 
             self._post_to_pushover(
@@ -314,7 +316,8 @@ class PushoverNotificationService:
 
             title = f"{label} failed"
             message = (
-                f"{cause_tag}: {error_message or 'Unknown error'}"
+                f"- Cause: {cause_tag}\n"
+                f"- Error: {error_message or 'Unknown error'}"
             )
 
             self._post_to_pushover(
@@ -379,7 +382,10 @@ class PushoverNotificationService:
             cause_tag = "External API issue" if is_external else "Internal error"
 
             title = f"[Admin] {label} failed for user {job_owner_user_id}"
-            message = f"{cause_tag}: {error_message or 'Unknown error'}"
+            message = (
+                f"- Cause: {cause_tag}\n"
+                f"- Error: {error_message or 'Unknown error'}"
+            )
 
             for admin_id in self._get_admin_user_ids():
                 if admin_id == job_owner_user_id:
@@ -408,7 +414,7 @@ class PushoverNotificationService:
         """Notify admin users about a health status degradation."""
         try:
             title = f"[Health] {component} degraded"
-            message = detail
+            message = f"- {detail}"
 
             for admin_id in self._get_admin_user_ids():
                 if not self._is_topic_enabled(admin_id, "notif_admin_health_alert"):
@@ -494,7 +500,7 @@ class PushoverNotificationService:
         return self.send_notification(
             user_key, app_token,
             title="Journal Insights",
-            message="Test notification — your Pushover integration is working!",
+            message="- Pushover integration is working",
         )
 
     # ── Private helpers ──────────────────────────────────────────────
@@ -575,75 +581,82 @@ class PushoverNotificationService:
         job_type: str,
         result: dict[str, Any],
     ) -> str:
-        """Build a concise success notification message body."""
+        """Build a concise success notification message body.
+
+        All notifications use the same format: verb-first bullet
+        points (``- ``-prefixed lines) so the user can scan results
+        at a glance. Counts that are constants in every run (e.g.
+        the 7 mood dimensions) are omitted — only variable values
+        carry useful information.
+        """
         parts: list[str] = []
 
         if job_type in ("ingest_images", "ingest_audio"):
             entry_id = result.get("entry_id")
             if entry_id:
-                parts.append(f"Entry {entry_id} created")
+                parts.append(f"- Created Entry {entry_id}")
 
             # Include follow-up results when available (pipeline complete).
             mood = result.get("mood_scoring_result") or {}
             entity = result.get("entity_extraction_result") or {}
-            if mood:
-                count = mood.get("scores_written", 0)
-                parts.append(f"{count} mood scores")
             if entity:
                 ent_count = entity.get("entities_created", 0)
                 mention_count = entity.get("mentions_created", 0)
-                parts.append(f"{ent_count} entities, {mention_count} mentions")
+                parts.append(f"- Created {ent_count} entities")
+                parts.append(f"- Recorded {mention_count} mentions")
+            if mood:
+                parts.append("- Calculated mood scores")
             if not mood and not entity and not result.get("follow_up_jobs"):
-                # Only show "All processing complete" when no follow-ups
+                # Only show "Completed all processing" when no follow-ups
                 # were queued.  If follow-ups were queued but failed, their
                 # failure notifications were already sent separately — don't
                 # claim everything completed successfully.
-                parts.append("All processing complete")
+                parts.append("- Completed all processing")
         elif job_type == "entity_extraction":
             processed = result.get("entries_processed", 0)
             created = result.get("entities_created", 0)
             mentions = result.get("mentions_created", 0)
-            parts.append(f"{processed} entries processed")
-            parts.append(f"{created} entities, {mentions} mentions")
+            parts.append(f"- Processed {processed} entries")
+            parts.append(f"- Created {created} entities")
+            parts.append(f"- Recorded {mentions} mentions")
         elif job_type == "mood_backfill":
             scored = result.get("scored", 0)
             skipped = result.get("skipped", 0)
-            parts.append(f"{scored} entries scored, {skipped} skipped")
+            parts.append(f"- Scored {scored} entries")
+            parts.append(f"- Skipped {skipped} entries")
         elif job_type == "mood_score_entry":
-            count = result.get("scores_written", 0)
-            parts.append(f"{count} mood scores written")
+            # The number of mood scores per entry is constant (one per
+            # mood dimension), so the raw count adds no information.
+            parts.append("- Calculated mood scores")
         elif job_type == "reprocess_embeddings":
             count = result.get("chunk_count", 0)
-            parts.append(f"{count} chunks reprocessed")
+            parts.append(f"- Reprocessed {count} chunks")
         elif job_type == "save_entry_pipeline":
             entry_id = result.get("entry_id")
             if entry_id:
-                parts.append(f"Entry {entry_id} updated")
+                parts.append(f"- Updated Entry {entry_id}")
             reprocess = result.get("reprocess_embeddings_result") or {}
             entity = result.get("entity_extraction_result") or {}
             mood = result.get("mood_scoring_result") or {}
             if reprocess:
                 parts.append(
-                    f"Reprocessed: {reprocess.get('chunk_count', 0)} chunks"
+                    f"- Reprocessed {reprocess.get('chunk_count', 0)} chunks"
                 )
             if entity:
                 created = entity.get("entities_created", 0)
                 matched = entity.get("entities_matched", 0)
                 deleted = entity.get("entities_deleted", 0)
                 mentions = entity.get("mentions_created", 0)
-                parts.append(f"Entities created: {created}")
-                parts.append(f"Entities deleted: {deleted}")
-                # "Total entities" is the count attached to the entry
-                # AFTER this extraction — newly-created plus existing
-                # entities that the LLM matched again. Deleted entities
-                # are orphans that lost all their mentions; they are
-                # not in the post-extraction set, so they are not
-                # subtracted here.
-                parts.append(f"Total entities: {created + matched}")
-                parts.append(f"Mentions: {mentions}")
+                parts.append(f"- Created {created} entities")
+                parts.append(f"- Deleted {deleted} entities")
+                # Post-extraction entity count: newly-created plus
+                # existing entities that the LLM matched again.
+                # Deleted entities are orphans that lost all their
+                # mentions, so they are not in the post-extraction
+                # set and are not subtracted here.
+                parts.append(f"- Total: {created + matched} entities")
+                parts.append(f"- Recorded {mentions} mentions")
             if mood:
-                parts.append(
-                    f"Mood scores: {mood.get('scores_written', 0)}"
-                )
+                parts.append("- Calculated mood scores")
 
-        return "\n".join(parts) if parts else "Job completed successfully"
+        return "\n".join(parts) if parts else "- Completed successfully"
