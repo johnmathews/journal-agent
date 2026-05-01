@@ -8,8 +8,8 @@ All configuration is via environment variables. No config files are needed.
 | ------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | `JOURNAL_API_TOKEN` | Bearer token required on every REST and MCP request. The server refuses to start without it. Generate with `python -c "import secrets; print(secrets.token_urlsafe(32))"`. |
 | `ANTHROPIC_API_KEY` | Anthropic API key — required when `OCR_PROVIDER=anthropic` (the default). Also used for entity extraction and mood scoring.                                                |
-| `OPENAI_API_KEY`    | OpenAI API key for Whisper transcription and embeddings.                                                                                                                   |
-| `GOOGLE_API_KEY`    | Google API key — required only when `OCR_PROVIDER=gemini`.                                                                                                                 |
+| `OPENAI_API_KEY`    | OpenAI API key. Used for embeddings and any OpenAI transcription adapter (primary, shadow, or `whisper-1` fallback).                                                       |
+| `GOOGLE_API_KEY`    | Google API key — required when `OCR_PROVIDER=gemini` or when Gemini is the primary/shadow transcription provider.                                                          |
 
 See `docs/security.md` for the threat model and how auth fits in.
 
@@ -61,20 +61,40 @@ See `docs/architecture.md` → "Chunking Strategies" for the algorithm and trade
 | `OCR_MODEL`    | per-provider | Model name sent to the selected provider. Defaults: `claude-opus-4-6` (anthropic), `gemini-2.5-pro` (gemini). Ignored in dual-pass mode — each provider always uses its own default. |
 
 When using `gemini`, the context-priming glossary (`OCR_CONTEXT_DIR`) is not applied to OCR — Gemini uses only the base
-system prompt. Voice transcription priming (`TRANSCRIPTION_CONTEXT_ENABLED`) is provider-agnostic and runs against
-Whisper regardless of which OCR backend is active.
+system prompt. Voice transcription priming (`TRANSCRIPTION_CONTEXT_ENABLED`) is independent of the OCR backend; the
+glossary is wired into whichever transcription provider is active (Whisper-style `prompt` for OpenAI adapters, full
+system instruction for the Gemini adapter).
+
+## Optional — transcription provider
+
+Voice transcription is provider-pluggable. The default behaviour is unchanged from the single-provider era — the OpenAI
+`gpt-4o-transcribe` adapter runs first, with the only addition being an automatic `whisper-1` fallback after retries
+when the primary keeps raising transient errors. To swap to Gemini, run two providers side-by-side, or tune the retry
+policy, set the variables below. See `docs/transcription-providers.md` for the architecture and operational notes.
+
+| Variable                              | Type    | Default             | Description                                                                                                                                                       |
+| ------------------------------------- | ------- | ------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `TRANSCRIPTION_PROVIDER`              | string  | `openai`            | Primary transcription provider. `"openai"` or `"gemini"`. Validated at startup.                                                                                   |
+| `TRANSCRIPTION_MODEL`                 | string  | per-provider        | Primary model. Defaults: `gpt-4o-transcribe` (openai), `gemini-2.5-pro` (gemini). Cross-provider model names (e.g. `gpt-4o-transcribe` with provider=gemini) are silently overridden to the provider's default with an INFO log. |
+| `TRANSCRIPTION_FALLBACK_ENABLED`      | bool    | `true`              | Wrap the primary in a retry+fallback adapter. When `true`, transient failures trigger up to N retries, then route to an OpenAI fallback adapter.                  |
+| `TRANSCRIPTION_FALLBACK_MODEL`        | string  | `whisper-1`         | OpenAI model used as the fallback adapter. Always uses `OPENAI_API_KEY`.                                                                                          |
+| `TRANSCRIPTION_RETRY_MAX_ATTEMPTS`    | int     | `3`                 | Total attempts at the primary before falling through. Must be >= 1.                                                                                               |
+| `TRANSCRIPTION_RETRY_BASE_DELAY`      | float   | `1.0`               | Seconds for the first backoff sleep. Doubles each retry (1s, 2s, 4s…). Must be >= 0.                                                                              |
+| `TRANSCRIPTION_RETRY_MAX_DELAY`       | float   | `30.0`              | Upper cap on the per-retry sleep, in seconds. Must be >= 0.                                                                                                       |
+| `TRANSCRIPTION_SHADOW_PROVIDER`       | string  |                     | When set (`"openai"` or `"gemini"`), runs the shadow provider in parallel with the primary on every request and logs a word-level diff. **Doubles per-audio cost.** Empty disables shadow mode. |
+| `TRANSCRIPTION_SHADOW_MODEL`          | string  | shadow-default      | Model for the shadow adapter. Empty = the shadow provider's own default.                                                                                          |
 
 ## Optional — context files (OCR + voice)
 
-Markdown context files in `OCR_CONTEXT_DIR` prime BOTH the OCR system prompt and the Whisper transcription `prompt`
-parameter so handwritten and spoken proper nouns get correct spellings. See `docs/context-files.md` for the unified
-reference and `docs/ocr-context.md` for the OCR-side mechanism.
+Markdown context files in `OCR_CONTEXT_DIR` prime BOTH the OCR system prompt and the active transcription provider so
+handwritten and spoken proper nouns get correct spellings. See `docs/context-files.md` for the unified reference,
+`docs/ocr-context.md` for the OCR-side mechanism, and `docs/transcription-providers.md` for the per-provider wiring.
 
 | Variable                        | Default          | Description                                                                                                                          |
 | ------------------------------- | ---------------- | ------------------------------------------------------------------------------------------------------------------------------------ |
 | `OCR_CONTEXT_DIR`               |                  | Directory of `*.md` files. Unset = no context priming on either pipeline.                                                            |
 | `OCR_CONTEXT_CACHE_TTL`         | `1h`             | Anthropic cache TTL for the OCR system block (`5m` or `1h`).                                                                         |
-| `TRANSCRIPTION_CONTEXT_ENABLED` | `true`           | Pass the markdown (stripped, ~200-token cap) to Whisper as `prompt`. Set to `false` for OCR priming without Whisper priming.         |
+| `TRANSCRIPTION_CONTEXT_ENABLED` | `true`           | Wire the glossary into the active transcription provider. OpenAI adapters get the stripped, ~200-token-capped text via the `prompt` parameter; the Gemini adapter gets the full glossary as a system instruction. Set to `false` for OCR priming without transcription priming. |
 
 ## Optional — voice transcription post-processing
 
