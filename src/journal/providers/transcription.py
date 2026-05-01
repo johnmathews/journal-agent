@@ -5,6 +5,8 @@ from __future__ import annotations
 import logging
 import tempfile
 import time
+from concurrent.futures import ThreadPoolExecutor
+from difflib import SequenceMatcher
 from io import BytesIO
 from typing import TYPE_CHECKING, Protocol, runtime_checkable
 
@@ -512,3 +514,86 @@ class RetryingTranscriptionProvider:
             return self._fallback.transcribe(audio_data, media_type, language)
 
         raise PrimaryExhaustedError(attempts=self._max_attempts, last_error=last_error)
+
+
+# ---------------------------------------------------------------------------
+# Shadow wrapper — run primary + shadow in parallel and log a diff
+# ---------------------------------------------------------------------------
+
+
+def _word_diff(primary: str, shadow: str) -> list[dict[str, str]]:
+    """Return only the disagreeing word-level chunks."""
+    p_words = primary.split()
+    s_words = shadow.split()
+    matcher = SequenceMatcher(None, p_words, s_words)
+    diffs: list[dict[str, str]] = []
+    for op, i1, i2, j1, j2 in matcher.get_opcodes():
+        if op == "equal":
+            continue
+        diffs.append({
+            "op": op,
+            "primary": " ".join(p_words[i1:i2]),
+            "shadow": " ".join(s_words[j1:j2]),
+        })
+    return diffs
+
+
+class ShadowTranscriptionProvider:
+    """Run primary + shadow in parallel, return primary, log diff (no full transcripts)."""
+
+    def __init__(
+        self,
+        primary: TranscriptionProvider,
+        shadow: TranscriptionProvider,
+        shadow_label: str = "shadow",
+    ) -> None:
+        self._primary = primary
+        self._shadow = shadow
+        self._shadow_label = shadow_label
+
+    def transcribe(
+        self,
+        audio_data: bytes,
+        media_type: str,
+        language: str = "en",
+    ) -> TranscriptionResult:
+        with ThreadPoolExecutor(max_workers=2) as pool:
+            primary_future = pool.submit(
+                self._primary.transcribe, audio_data, media_type, language,
+            )
+            shadow_future = pool.submit(
+                self._shadow.transcribe, audio_data, media_type, language,
+            )
+            primary_result = primary_future.result()
+            try:
+                shadow_result = shadow_future.result()
+            except Exception as exc:
+                logger.warning(
+                    "Shadow transcription (%s) failed: %s",
+                    self._shadow_label,
+                    exc,
+                )
+                return primary_result
+
+        self._log_diff(primary_result, shadow_result)
+        return primary_result
+
+    def _log_diff(
+        self,
+        primary: TranscriptionResult,
+        shadow: TranscriptionResult,
+    ) -> None:
+        similarity = SequenceMatcher(None, primary.text, shadow.text).ratio()
+        diffs = _word_diff(primary.text, shadow.text)
+        logger.info(
+            "transcription_shadow_diff",
+            extra={
+                "primary_chars": len(primary.text),
+                "shadow_chars": len(shadow.text),
+                "similarity_ratio": round(similarity, 3),
+                "primary_uncertain_count": len(primary.uncertain_spans),
+                "shadow_uncertain_count": len(shadow.uncertain_spans),
+                "diffs": diffs,
+                "shadow_label": self._shadow_label,
+            },
+        )
