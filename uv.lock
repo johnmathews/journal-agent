@@ -655,7 +655,7 @@ requires-dist = [
     { name = "anthropic", specifier = ">=0.87,<1" },
     { name = "argon2-cffi", specifier = ">=25.1,<26" },
     { name = "chromadb-client", specifier = ">=1.5,<2" },
-    { name = "google-genai", specifier = ">=1,<2" },
+    { name = "google-genai", specifier = "==1.73.0" },
     { name = "itsdangerous", specifier = ">=2.2,<3" },
     { name = "mcp", extras = ["cli"], specifier = ">=1.26,<2" },
     { name = "openai", specifier = ">=2.29,<3" },

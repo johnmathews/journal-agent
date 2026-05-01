@@ -60,7 +60,11 @@ Adapters for external APIs, each behind a Protocol interface:
 
 - **OCRProvider** — `AnthropicOCRProvider` (Claude) or `GeminiOCRProvider` (Google Gemini), selected via `OCR_PROVIDER`
   env var
-- **TranscriptionProvider** — `OpenAITranscriptionProvider` (gpt-4o-transcribe)
+- **TranscriptionProvider** — Protocol with two concrete adapters (`OpenAITranscribeProvider`,
+  `GeminiTranscribeProvider`) plus two composable wrappers (`RetryingTranscriptionProvider` for transient-error retries
+  and `whisper-1` fallback, `ShadowTranscriptionProvider` for parallel diffing of two providers). The runtime stack is
+  assembled by `build_transcription_provider()` from env vars: `Shadow(Retrying(Primary, fallback=whisper-1), Shadow)`.
+  See `docs/transcription-providers.md`.
 - **EmbeddingsProvider** — `OpenAIEmbeddingsProvider` (text-embedding-3-large)
 
 ### Storage Layer
@@ -171,7 +175,7 @@ Pick the value with the highest ratio and set it as the default in `config.py`.
 ### Ingestion
 
 ```
-Image/Audio → Provider (OCR/Whisper) → Raw Text
+Image/Audio → Provider (OCR / Transcription) → Raw Text
     → SQLite (entry with raw_text + final_text, entry_pages for images)
     → Chunking (strategy: fixed or semantic) using final_text
     → Embeddings (OpenAI, 1024 dims; optional date-metadata prefix)

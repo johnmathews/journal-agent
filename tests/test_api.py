@@ -1529,6 +1529,45 @@ class TestSettings:
         assert "sk-" not in dumped
         assert "xoxb-" not in dumped
 
+    def test_settings_transcription_block_full_shape(
+        self, client: TestClient,
+    ) -> None:
+        resp = client.get("/api/settings")
+        assert resp.status_code == 200
+        t = resp.json()["transcription"]
+
+        assert t["provider"] in {"openai", "gemini"}
+        assert isinstance(t["model"], str) and t["model"]
+
+        # Fallback sub-block
+        assert isinstance(t["fallback"], dict)
+        assert isinstance(t["fallback"]["enabled"], bool)
+        assert isinstance(t["fallback"]["model"], str)
+
+        # Shadow sub-block — disabled by default
+        assert isinstance(t["shadow"], dict)
+        assert t["shadow"]["enabled"] is False
+        assert t["shadow"]["provider"] is None
+        assert t["shadow"]["model"] is None
+
+        # Retry sub-block
+        assert isinstance(t["retry"], dict)
+        assert isinstance(t["retry"]["max_attempts"], int)
+        assert t["retry"]["max_attempts"] >= 1
+        assert isinstance(t["retry"]["base_delay_seconds"], float)
+        assert isinstance(t["retry"]["max_delay_seconds"], float)
+
+    def test_settings_transcription_default_provider_is_openai(
+        self, client: TestClient,
+    ) -> None:
+        # Backwards-compat: existing flat .model field still present.
+        resp = client.get("/api/settings")
+        t = resp.json()["transcription"]
+        assert t["provider"] == "openai"
+        assert t["model"] == "gpt-4o-transcribe"
+        assert t["fallback"]["enabled"] is True
+        assert t["fallback"]["model"] == "whisper-1"
+
 
 class TestDashboardWritingStats:
     """T1.3a.ii — GET /api/dashboard/writing-stats."""

@@ -23,7 +23,7 @@ from journal.logging import setup_logging
 from journal.providers.embeddings import OpenAIEmbeddingsProvider
 from journal.providers.extraction import AnthropicExtractionProvider
 from journal.providers.ocr import build_ocr_provider
-from journal.providers.transcription import OpenAITranscriptionProvider
+from journal.providers.transcription import build_transcription_provider
 from journal.services.backfill import backfill_mood_scores
 from journal.services.chunking import build_chunker
 from journal.services.entity_extraction import EntityExtractionService
@@ -82,26 +82,7 @@ def _init_services() -> dict:
 
     # Providers
     ocr = build_ocr_provider(config)
-    transcription_context = ""
-    if config.transcription_context_enabled:
-        from journal.services.transcription_context import build_whisper_prompt
-
-        transcription_context = build_whisper_prompt(config.ocr_context_dir)
-        if transcription_context:
-            log.info(
-                "  Whisper context prompt loaded (%d chars)",
-                len(transcription_context),
-            )
-        elif config.ocr_context_dir is not None:
-            log.info(
-                "  Whisper context prompt empty — context dir has no usable .md files"
-            )
-    transcription = OpenAITranscriptionProvider(
-        api_key=config.openai_api_key,
-        model=config.transcription_model,
-        confidence_threshold=config.transcription_confidence_threshold,
-        context_prompt=transcription_context,
-    )
+    transcription = build_transcription_provider(config)
     embeddings = OpenAIEmbeddingsProvider(
         api_key=config.openai_api_key,
         model=config.embedding_model,

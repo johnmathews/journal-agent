@@ -5,21 +5,21 @@ from unittest.mock import MagicMock, patch
 
 from journal.models import TranscriptionResult
 from journal.providers.transcription import (
-    OpenAITranscriptionProvider,
+    OpenAITranscribeProvider,
     TranscriptionProvider,
     _logprobs_to_uncertain_spans,
     _supports_logprobs,
 )
 
 
-class TestOpenAITranscriptionProvider:
-    """Tests for OpenAITranscriptionProvider."""
+class TestOpenAITranscribeProvider:
+    """Tests for OpenAITranscribeProvider."""
 
     def _make_provider(
         self, model: str = "gpt-4o-transcribe", threshold: float = -0.5,
-    ) -> OpenAITranscriptionProvider:
+    ) -> OpenAITranscribeProvider:
         with patch("journal.providers.transcription.openai.OpenAI"):
-            provider = OpenAITranscriptionProvider(
+            provider = OpenAITranscribeProvider(
                 api_key="test-key",
                 model=model,
                 confidence_threshold=threshold,
@@ -28,7 +28,7 @@ class TestOpenAITranscriptionProvider:
 
     def test_implements_protocol(self) -> None:
         with patch("journal.providers.transcription.openai.OpenAI"):
-            provider = OpenAITranscriptionProvider(api_key="test-key", model="gpt-4o-transcribe")
+            provider = OpenAITranscribeProvider(api_key="test-key", model="gpt-4o-transcribe")
         assert isinstance(provider, TranscriptionProvider)
 
     def test_transcribe_returns_transcription_result(self) -> None:

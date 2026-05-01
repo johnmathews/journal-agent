@@ -5,7 +5,8 @@ queries about them.
 
 ## What It Does
 
-- **Ingests** handwritten journal pages (OCR via Claude Opus 4.6) and voice notes (transcription via OpenAI Whisper)
+- **Ingests** handwritten journal pages (OCR via Claude Opus 4.6) and voice notes (transcription via configurable
+  provider — `gpt-4o-transcribe` by default, with Gemini as alternative and `whisper-1` as fallback)
 - **Stores** entries in dual databases: SQLite for structured queries, ChromaDB for semantic search
 - **Answers** natural language questions like "Which friends did I meet in February?" or "What makes me happy?"
 - **Interfaces**: MCP server (for AI assistants), CLI, and API endpoints
@@ -81,6 +82,7 @@ All external APIs are behind provider-agnostic interfaces (Python Protocols), ma
 
 - [Architecture](docs/architecture.md) — System design and data flow
 - [Configuration](docs/configuration.md) — Environment variables reference
+- [Transcription Providers](docs/transcription-providers.md) — Multi-provider stack, retry/fallback, shadow mode
 - [Development](docs/development.md) — Local setup and contributing
 - [API Reference](docs/api.md) — MCP tool documentation
 

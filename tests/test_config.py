@@ -136,3 +136,120 @@ class TestOcrDualPass:
     def test_env_one(self, monkeypatch: pytest.MonkeyPatch) -> None:
         monkeypatch.setenv("OCR_DUAL_PASS", "1")
         assert Config().ocr_dual_pass is True
+
+
+def _clean_transcription_env(monkeypatch: pytest.MonkeyPatch) -> None:
+    for var in (
+        "TRANSCRIPTION_PROVIDER",
+        "TRANSCRIPTION_FALLBACK_ENABLED",
+        "TRANSCRIPTION_FALLBACK_MODEL",
+        "TRANSCRIPTION_RETRY_MAX_ATTEMPTS",
+        "TRANSCRIPTION_RETRY_BASE_DELAY",
+        "TRANSCRIPTION_RETRY_MAX_DELAY",
+        "TRANSCRIPTION_SHADOW_PROVIDER",
+        "TRANSCRIPTION_SHADOW_MODEL",
+    ):
+        monkeypatch.delenv(var, raising=False)
+
+
+class TestTranscriptionProviderConfig:
+    def test_defaults(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        _clean_transcription_env(monkeypatch)
+        config = Config()
+        assert config.transcription_provider == "openai"
+        assert config.transcription_fallback_enabled is True
+        assert config.transcription_fallback_model == "whisper-1"
+        assert config.transcription_retry_max_attempts == 3
+        assert config.transcription_retry_base_delay == 1.0
+        assert config.transcription_retry_max_delay == 30.0
+        assert config.transcription_shadow_provider == ""
+        assert config.transcription_shadow_model == ""
+
+    def test_provider_from_env(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        _clean_transcription_env(monkeypatch)
+        monkeypatch.setenv("TRANSCRIPTION_PROVIDER", "gemini")
+        assert Config().transcription_provider == "gemini"
+
+    def test_fallback_disabled_from_env(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        _clean_transcription_env(monkeypatch)
+        monkeypatch.setenv("TRANSCRIPTION_FALLBACK_ENABLED", "false")
+        assert Config().transcription_fallback_enabled is False
+
+    def test_fallback_model_from_env(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        _clean_transcription_env(monkeypatch)
+        monkeypatch.setenv("TRANSCRIPTION_FALLBACK_MODEL", "gpt-4o-mini-transcribe")
+        assert Config().transcription_fallback_model == "gpt-4o-mini-transcribe"
+
+    def test_retry_settings_from_env(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        _clean_transcription_env(monkeypatch)
+        monkeypatch.setenv("TRANSCRIPTION_RETRY_MAX_ATTEMPTS", "5")
+        monkeypatch.setenv("TRANSCRIPTION_RETRY_BASE_DELAY", "2.5")
+        monkeypatch.setenv("TRANSCRIPTION_RETRY_MAX_DELAY", "60")
+        config = Config()
+        assert config.transcription_retry_max_attempts == 5
+        assert config.transcription_retry_base_delay == 2.5
+        assert config.transcription_retry_max_delay == 60.0
+
+    def test_shadow_provider_from_env(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        _clean_transcription_env(monkeypatch)
+        monkeypatch.setenv("TRANSCRIPTION_SHADOW_PROVIDER", "gemini")
+        monkeypatch.setenv("TRANSCRIPTION_SHADOW_MODEL", "gemini-2.5-flash")
+        config = Config()
+        assert config.transcription_shadow_provider == "gemini"
+        assert config.transcription_shadow_model == "gemini-2.5-flash"
+
+    def test_invalid_provider_raises(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        _clean_transcription_env(monkeypatch)
+        monkeypatch.setenv("TRANSCRIPTION_PROVIDER", "foo")
+        with pytest.raises(ValueError, match="TRANSCRIPTION_PROVIDER"):
+            Config()
+
+    def test_invalid_shadow_provider_raises(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        _clean_transcription_env(monkeypatch)
+        monkeypatch.setenv("TRANSCRIPTION_SHADOW_PROVIDER", "foo")
+        with pytest.raises(ValueError, match="TRANSCRIPTION_SHADOW_PROVIDER"):
+            Config()
+
+    def test_empty_shadow_provider_ok(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        _clean_transcription_env(monkeypatch)
+        monkeypatch.setenv("TRANSCRIPTION_SHADOW_PROVIDER", "")
+        # Empty string disables shadow — must not raise.
+        Config()
+
+    def test_zero_max_attempts_raises(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        _clean_transcription_env(monkeypatch)
+        monkeypatch.setenv("TRANSCRIPTION_RETRY_MAX_ATTEMPTS", "0")
+        with pytest.raises(ValueError, match="TRANSCRIPTION_RETRY_MAX_ATTEMPTS"):
+            Config()
+
+    def test_negative_base_delay_raises(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        _clean_transcription_env(monkeypatch)
+        monkeypatch.setenv("TRANSCRIPTION_RETRY_BASE_DELAY", "-1")
+        with pytest.raises(ValueError, match="TRANSCRIPTION_RETRY_BASE_DELAY"):
+            Config()
+
+    def test_negative_max_delay_raises(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        _clean_transcription_env(monkeypatch)
+        monkeypatch.setenv("TRANSCRIPTION_RETRY_MAX_DELAY", "-5")
+        with pytest.raises(ValueError, match="TRANSCRIPTION_RETRY_MAX_DELAY"):
+            Config()

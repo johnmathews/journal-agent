@@ -111,7 +111,9 @@ Entity extraction and OCR dominate cost at roughly equal shares. Embeddings are 
 | **Anthropic** | `claude-opus-4-6`        | Entity extraction                          | $5.00 / $25.00 per MTok |
 | **Anthropic** | `claude-sonnet-4-5`      | Mood scoring                               | $3.00 / $15.00 per MTok |
 | **OpenAI**    | `text-embedding-3-large` | Chunking, search, entity dedup (1024 dims) | $0.13 per MTok          |
-| **OpenAI**    | `gpt-4o-transcribe`      | Voice transcription                        | $0.006 / min            |
+| **OpenAI**    | `gpt-4o-transcribe`      | Voice transcription (default primary)      | $0.006 / min            |
+| **OpenAI**    | `whisper-1`              | Voice transcription (fallback after retries) | $0.006 / min          |
+| **Google**    | `gemini-2.5-pro`         | Voice transcription (alternative primary)  | ~$0.002 / min (estimate) |
 | **ChromaDB**  | HNSW cosine              | Vector storage                             | Self-hosted             |
 | **SQLite**    | FTS5                     | Structured storage + keyword search        | Local                   |
 
@@ -188,9 +190,24 @@ Revisit when sub-3B vision-language models improve.
 
 ### 1b. Voice Transcription
 
-Voice journal entries (1-15 minutes, English) are transcribed to text via speech-to-text models.
+Voice journal entries (1-15 minutes, English) are transcribed to text via speech-to-text models. The transcription
+stack is now **multi-provider with retry+fallback**: a primary adapter (OpenAI or Gemini) wrapped in a retrying layer
+that falls through to OpenAI `whisper-1` after exhausting retries on transient errors. An optional **shadow** adapter
+runs a second provider in parallel and logs a word-level diff for offline comparison. See
+`docs/transcription-providers.md` for the architecture.
 
-**Current:** OpenAI `gpt-4o-transcribe` at $0.006/min.
+**Current default:** OpenAI `gpt-4o-transcribe` (primary) → `whisper-1` (fallback).
+**Alternative primary:** Google `gemini-2.5-pro` — accepts full instruction-following, so the OCR context glossary can
+actively steer it (rather than only nudging spellings as with the OpenAI `prompt` parameter).
+
+#### Cost notes for the configured stack
+
+| Adapter                  | Pricing                                         | Notes                                                                                    |
+| ------------------------ | ----------------------------------------------- | ---------------------------------------------------------------------------------------- |
+| `gpt-4o-transcribe`      | $0.006 / min                                    | Default primary. Word-level logprobs → uncertain spans.                                  |
+| `gpt-4o-mini-transcribe` | $0.003 / min                                    | Half the cost, ~4-5% WER. Same logprobs surface.                                         |
+| `whisper-1`              | $0.006 / min                                    | Default fallback. No logprobs (older endpoint).                                          |
+| `gemini-2.5-pro` (audio) | ~$0.002/min input (estimate)                    | Per-token pricing — Google's pricing page advertises 32 tokens/sec on one row and 25 tokens/sec on another, so treat the per-minute figure as approximate. Cheaper than gpt-4o-transcribe for long audio thanks to the per-token rate, more expensive per call. |
 
 #### Cloud API Options
 
