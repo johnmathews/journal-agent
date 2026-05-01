@@ -14,7 +14,7 @@ from journal.logging import setup_logging
 from journal.providers.embeddings import OpenAIEmbeddingsProvider
 from journal.providers.extraction import AnthropicExtractionProvider
 from journal.providers.ocr import build_ocr_provider
-from journal.providers.transcription import OpenAITranscribeProvider
+from journal.providers.transcription import build_transcription_provider
 from journal.services.backfill import backfill_chunk_counts, rechunk_entries
 from journal.services.chunking import build_chunker
 from journal.services.chunking_eval import evaluate_chunking
@@ -36,11 +36,7 @@ def _build_services(config):
     )
 
     ocr = build_ocr_provider(config)
-    transcription = OpenAITranscribeProvider(
-        api_key=config.openai_api_key,
-        model=config.transcription_model,
-        confidence_threshold=config.transcription_confidence_threshold,
-    )
+    transcription = build_transcription_provider(config)
     embeddings = OpenAIEmbeddingsProvider(
         api_key=config.openai_api_key,
         model=config.embedding_model,

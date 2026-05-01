@@ -18,10 +18,15 @@ from google.genai import types as genai_types
 from pydantic import BaseModel, Field
 
 from journal.models import TranscriptionResult
-from journal.services.transcription_context import build_full_context_instruction
+from journal.services.transcription_context import (
+    build_full_context_instruction,
+    build_whisper_prompt,
+)
 
 if TYPE_CHECKING:
     from pathlib import Path
+
+    from journal.config import Config
 
 logger = logging.getLogger(__name__)
 
@@ -597,3 +602,153 @@ class ShadowTranscriptionProvider:
                 "shadow_label": self._shadow_label,
             },
         )
+
+
+# ---------------------------------------------------------------------------
+# Factory
+# ---------------------------------------------------------------------------
+
+
+_DEFAULT_TRANSCRIPTION_MODELS: dict[str, str] = {
+    "openai": "gpt-4o-transcribe",
+    "gemini": "gemini-2.5-pro",
+}
+
+
+def _resolve_model(provider: str, configured: str) -> str:
+    """Return the configured model if compatible with *provider*, else the default.
+
+    Logs an INFO when an override happens — this protects against an OpenAI
+    default leaking into a Gemini run (or vice versa) when the user changes
+    `TRANSCRIPTION_PROVIDER` without also changing `TRANSCRIPTION_MODEL`.
+    """
+    default = _DEFAULT_TRANSCRIPTION_MODELS[provider]
+    if not configured:
+        return default
+    if provider == "gemini" and (
+        configured.startswith("gpt-") or configured.startswith("whisper")
+    ):
+        logger.info(
+            "TRANSCRIPTION_MODEL=%r is not compatible with provider=gemini; "
+            "using default %r",
+            configured,
+            default,
+        )
+        return default
+    if provider == "openai" and configured.startswith("gemini"):
+        logger.info(
+            "TRANSCRIPTION_MODEL=%r is not compatible with provider=openai; "
+            "using default %r",
+            configured,
+            default,
+        )
+        return default
+    return configured
+
+
+def _build_primary(
+    provider: str,
+    model: str,
+    config: Config,
+) -> TranscriptionProvider:
+    if provider == "openai":
+        return OpenAITranscribeProvider(
+            api_key=config.openai_api_key,
+            model=model,
+            confidence_threshold=config.transcription_confidence_threshold,
+            context_prompt=(
+                build_whisper_prompt(config.ocr_context_dir)
+                if config.transcription_context_enabled
+                else ""
+            ),
+        )
+    if provider == "gemini":
+        return GeminiTranscribeProvider(
+            api_key=config.google_api_key,
+            model=model,
+            context_dir=(
+                config.ocr_context_dir
+                if config.transcription_context_enabled
+                else None
+            ),
+        )
+    raise ValueError(
+        f"Unknown transcription provider {provider!r} — must be 'openai' or 'gemini'"
+    )
+
+
+def _describe_stack(provider: TranscriptionProvider) -> str:
+    """Return a short string describing the wrapper chain.
+
+    Examples:
+        ``openai/gpt-4o-transcribe``
+        ``retrying(openai/gpt-4o-transcribe, fb=whisper-1)``
+        ``shadow(retrying(openai/gpt-4o-transcribe, fb=whisper-1), gemini/gemini-2.5-pro)``
+    """
+    if isinstance(provider, ShadowTranscriptionProvider):
+        inner = _describe_stack(provider._primary)
+        shadow = _describe_stack(provider._shadow)
+        return f"shadow({inner}, {shadow})"
+    if isinstance(provider, RetryingTranscriptionProvider):
+        inner = _describe_stack(provider._primary)
+        if provider._fallback is not None:
+            fb = _describe_stack(provider._fallback)
+            return f"retrying({inner}, fb={fb})"
+        return f"retrying({inner})"
+    if isinstance(provider, OpenAITranscribeProvider):
+        return f"openai/{provider._model}"
+    if isinstance(provider, GeminiTranscribeProvider):
+        return f"gemini/{provider._model}"
+    return type(provider).__name__
+
+
+def build_transcription_provider(config: Config) -> TranscriptionProvider:
+    """Build the transcription provider stack from *config*.
+
+    Composition (innermost → outermost):
+        primary → optional retry+fallback wrapper → optional shadow wrapper.
+    """
+    primary_name = config.transcription_provider
+    primary_model = _resolve_model(primary_name, config.transcription_model)
+    provider: TranscriptionProvider = _build_primary(
+        primary_name, primary_model, config,
+    )
+
+    if config.transcription_fallback_enabled:
+        fallback_model = config.transcription_fallback_model
+        # Avoid wrapping an OpenAI provider with an identical OpenAI fallback.
+        if primary_name == "openai" and primary_model == fallback_model:
+            logger.info(
+                "Skipping fallback wrapper — primary and fallback both "
+                "openai/%s",
+                primary_model,
+            )
+        else:
+            fallback = OpenAITranscribeProvider(
+                api_key=config.openai_api_key,
+                model=fallback_model,
+                confidence_threshold=config.transcription_confidence_threshold,
+                context_prompt="",
+            )
+            provider = RetryingTranscriptionProvider(
+                primary=provider,
+                fallback=fallback,
+                max_attempts=config.transcription_retry_max_attempts,
+                base_delay=config.transcription_retry_base_delay,
+                max_delay=config.transcription_retry_max_delay,
+            )
+
+    shadow_name = config.transcription_shadow_provider
+    if shadow_name:
+        shadow_model = _resolve_model(
+            shadow_name, config.transcription_shadow_model,
+        )
+        shadow_adapter = _build_primary(shadow_name, shadow_model, config)
+        provider = ShadowTranscriptionProvider(
+            primary=provider,
+            shadow=shadow_adapter,
+            shadow_label=f"{shadow_name}/{shadow_model}",
+        )
+
+    logger.info("Transcription stack: %s", _describe_stack(provider))
+    return provider
