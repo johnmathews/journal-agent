@@ -951,12 +951,14 @@ class TestSearch:
         assert response.status_code == 400
         assert response.json()["error"] == "missing_query"
 
-    def test_search_invalid_mode(self, client: TestClient) -> None:
-        response = client.get("/api/search?q=vienna&mode=fuzzy")
+    def test_search_mode_param_rejected(self, client: TestClient) -> None:
+        # `mode` was removed when hybrid search shipped; passing it is
+        # a client bug, surfaced as 400 so the bug is loud.
+        response = client.get("/api/search?q=vienna&mode=keyword")
         assert response.status_code == 400
-        assert response.json()["error"] == "invalid_mode"
+        assert response.json()["error"] == "mode_removed"
 
-    def test_search_keyword_returns_snippet(
+    def test_search_returns_snippet_for_bm25_hit(
         self, client: TestClient, repo: SQLiteEntryRepository
     ) -> None:
         repo.create_entry(
@@ -968,33 +970,33 @@ class TestSearch:
         repo.create_entry(
             "2026-03-23", "voice", "Stayed home and read", 4
         )
-        response = client.get("/api/search?q=Vienna&mode=keyword")
+        response = client.get("/api/search?q=Vienna")
         assert response.status_code == 200
         data = response.json()
-        assert data["mode"] == "keyword"
+        assert "mode" not in data
+        assert "reranker" in data
         assert data["query"] == "Vienna"
         assert len(data["items"]) == 1
         item = data["items"][0]
         assert item["entry_date"] == "2026-03-22"
-        assert item["matching_chunks"] == []
         assert item["snippet"] is not None
         assert "\u0002" in item["snippet"]
         assert "\u0003" in item["snippet"]
 
-    def test_search_keyword_date_filter(
+    def test_search_date_filter(
         self, client: TestClient, repo: SQLiteEntryRepository
     ) -> None:
         repo.create_entry("2026-01-15", "photo", "Vienna in January", 3)
         repo.create_entry("2026-03-15", "photo", "Vienna in March", 3)
         response = client.get(
-            "/api/search?q=Vienna&mode=keyword&start_date=2026-03-01"
+            "/api/search?q=Vienna&start_date=2026-03-01"
         )
         assert response.status_code == 200
         data = response.json()
         assert len(data["items"]) == 1
         assert data["items"][0]["entry_date"] == "2026-03-15"
 
-    def test_search_keyword_pagination(
+    def test_search_pagination(
         self, client: TestClient, repo: SQLiteEntryRepository
     ) -> None:
         for i in range(5):
@@ -1005,10 +1007,10 @@ class TestSearch:
                 5,
             )
         page_one = client.get(
-            "/api/search?q=Atlas&mode=keyword&limit=2&offset=0"
+            "/api/search?q=Atlas&limit=2&offset=0"
         ).json()
         page_two = client.get(
-            "/api/search?q=Atlas&mode=keyword&limit=2&offset=2"
+            "/api/search?q=Atlas&limit=2&offset=2"
         ).json()
         assert len(page_one["items"]) == 2
         assert len(page_two["items"]) == 2
@@ -1019,18 +1021,18 @@ class TestSearch:
         assert page_one["limit"] == 2
         assert page_two["offset"] == 2
 
-    def test_search_keyword_no_results(self, client: TestClient) -> None:
-        response = client.get("/api/search?q=unicorn&mode=keyword")
+    def test_search_no_results(self, client: TestClient) -> None:
+        response = client.get("/api/search?q=unicorn")
         assert response.status_code == 200
         assert response.json()["items"] == []
 
-    def test_search_keyword_malformed_query_returns_400(
+    def test_search_malformed_fts_query_returns_400(
         self, client: TestClient, repo: SQLiteEntryRepository
     ) -> None:
-        """FTS5 parse errors (unterminated quote, bare operators) must
-        surface as a 400, not a 500."""
+        """FTS5 parse errors in the BM25 retriever must surface as a
+        400, not a 500."""
         repo.create_entry("2026-03-22", "photo", "Anything at all", 3)
-        response = client.get('/api/search?q="&mode=keyword')
+        response = client.get('/api/search?q="')
         assert response.status_code == 400
         assert response.json()["error"] == "invalid_query"
 
@@ -1038,23 +1040,22 @@ class TestSearch:
         self, client: TestClient, repo: SQLiteEntryRepository
     ) -> None:
         repo.create_entry("2026-03-22", "photo", "Vienna entry", 2)
-        # limit=500 should be clamped to 50; bad ints should fall back to 10.
-        response = client.get("/api/search?q=Vienna&mode=keyword&limit=500")
+        response = client.get("/api/search?q=Vienna&limit=500")
         assert response.status_code == 200
         assert response.json()["limit"] == 50
 
-        response = client.get("/api/search?q=Vienna&mode=keyword&limit=notanint")
+        response = client.get("/api/search?q=Vienna&limit=notanint")
         assert response.status_code == 200
         assert response.json()["limit"] == 10
 
-    def test_search_semantic_returns_chunk_offsets(
+    def test_search_returns_chunk_offsets_for_dense_hit(
         self,
         search_client: tuple[TestClient, object],
         repo: SQLiteEntryRepository,
         mock_embeddings: MagicMock,
     ) -> None:
-        """Semantic search returns matching_chunks with char offsets
-        filled in from entry_chunks."""
+        """A hybrid result driven by dense retrieval carries
+        matching_chunks with char offsets pulled from entry_chunks."""
         from journal.models import ChunkSpan
 
         client, vector_store = search_client
@@ -1072,7 +1073,6 @@ class TestSearch:
                 )
             ],
         )
-        # Real InMemoryVectorStore — stores chunk_index on metadata.
         vector_store.add_entry(  # type: ignore[attr-defined]
             entry_id=entry.id,
             chunks=[entry_text],
@@ -1080,36 +1080,18 @@ class TestSearch:
             metadata={"entry_date": "2026-03-22", "user_id": _TEST_USER_ID},
         )
 
-        response = client.get("/api/search?q=vienna&mode=semantic")
+        response = client.get("/api/search?q=vienna")
         assert response.status_code == 200
         data = response.json()
-        assert data["mode"] == "semantic"
+        assert "mode" not in data
         assert len(data["items"]) == 1
         item = data["items"][0]
-        assert item["snippet"] is None
+        # Dense contributed → matching_chunks populated with offsets.
         assert len(item["matching_chunks"]) == 1
         chunk = item["matching_chunks"][0]
         assert chunk["chunk_index"] == 0
         assert chunk["char_start"] == 0
         assert chunk["char_end"] == len(entry_text)
-
-    def test_search_default_mode_is_semantic(
-        self,
-        search_client: tuple[TestClient, object],
-        repo: SQLiteEntryRepository,
-        mock_embeddings: MagicMock,
-    ) -> None:
-        client, vector_store = search_client
-        repo.create_entry("2026-03-22", "photo", "Vienna trip", 2)
-        vector_store.add_entry(  # type: ignore[attr-defined]
-            entry_id=1,
-            chunks=["Vienna trip"],
-            embeddings=[[0.1] * 1024],
-            metadata={"entry_date": "2026-03-22", "user_id": _TEST_USER_ID},
-        )
-        response = client.get("/api/search?q=vienna")
-        assert response.status_code == 200
-        assert response.json()["mode"] == "semantic"
 
 
 class TestDashboardMoodDimensions:
@@ -1391,15 +1373,14 @@ class TestHealth:
         query_svc: QueryService = services["query"]
         repo.create_entry("2026-03-22", "photo", "Vienna today", 2)
 
-        # Fire a semantic + keyword search, then snapshot via /health.
+        # Fire two hybrid searches, then snapshot via /health.
         query_svc.search_entries("vienna")
-        query_svc.keyword_search("vienna")
+        query_svc.search_entries("anything")
 
         data = client.get("/health").json()
         assert data["queries"]["total_queries"] == 2
         by_type = data["queries"]["by_type"]
-        assert by_type["semantic_search"]["count"] == 1
-        assert by_type["keyword_search"]["count"] == 1
+        assert by_type["hybrid_search"]["count"] == 2
 
     def test_health_degraded_on_missing_api_key(
         self, repo: SQLiteEntryRepository, mock_embeddings: MagicMock
@@ -1477,7 +1458,7 @@ class TestHealth:
         client, services = health_client
         query_svc: QueryService = services["query"]
         repo.create_entry("2026-03-22", "photo", "sensitive marker word", 3)
-        query_svc.keyword_search("sensitive")
+        query_svc.search_entries("sensitive")
         data = client.get("/health").json()
         dumped = _json.dumps(data)
         # Assert the search term does not appear anywhere in the

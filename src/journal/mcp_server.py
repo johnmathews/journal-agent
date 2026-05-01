@@ -23,10 +23,12 @@ from journal.logging import setup_logging
 from journal.providers.embeddings import OpenAIEmbeddingsProvider
 from journal.providers.extraction import AnthropicExtractionProvider
 from journal.providers.ocr import build_ocr_provider
+from journal.providers.reranker import build_reranker
 from journal.providers.transcription import OpenAITranscriptionProvider
 from journal.services.backfill import backfill_mood_scores
 from journal.services.chunking import build_chunker
 from journal.services.entity_extraction import EntityExtractionService
+from journal.services.hybrid import HybridConfig
 from journal.services.ingestion import IngestionService
 from journal.services.jobs import JobRunner
 from journal.services.query import QueryService
@@ -107,11 +109,24 @@ def _init_services() -> dict:
         model=config.embedding_model,
         dimensions=config.embedding_dimensions,
     )
-    log.info("  Providers: OCR=%s%s (%s), transcription=%s, embeddings=%s",
-             config.ocr_provider,
-             " [dual-pass]" if config.ocr_dual_pass else "",
-             config.ocr_model or "default",
-             config.transcription_model, config.embedding_model)
+    reranker = build_reranker(
+        config.hybrid_reranker,
+        anthropic_api_key=config.anthropic_api_key,
+        model=config.reranker_model,
+    )
+    log.info(
+        "  Providers: OCR=%s%s (%s), transcription=%s, embeddings=%s, "
+        "reranker=%s (%s)",
+        config.ocr_provider,
+        " [dual-pass]" if config.ocr_dual_pass else "",
+        config.ocr_model or "default",
+        config.transcription_model,
+        config.embedding_model,
+        config.hybrid_reranker,
+        config.reranker_model
+        if config.hybrid_reranker != "none"
+        else "n/a",
+    )
     if config.preprocess_images:
         log.info("  Image preprocessing: enabled")
 
@@ -394,6 +409,13 @@ def _init_services() -> dict:
             vector_store=vector_store,
             embeddings_provider=embeddings,
             stats=stats_collector,
+            reranker=reranker,
+            hybrid_config=HybridConfig(
+                bm25_candidates=config.hybrid_bm25_candidates,
+                dense_candidates=config.hybrid_dense_candidates,
+                fusion_top_m=config.hybrid_fusion_top_m,
+                rrf_k=config.hybrid_rrf_k,
+            ),
         ),
         "entity_store": entity_store,
         "entity_extraction": entity_extraction_service,
@@ -471,14 +493,29 @@ def journal_search_entries(
     offset: int = 0,
     ctx: Context = None,  # type: ignore[assignment]
 ) -> str:
-    """Search journal entries using semantic similarity.
+    """Search journal entries by content.
+
+    Combines keyword (BM25) and semantic (embedding) retrieval, then
+    reranks the merged candidates. Use this for any question about
+    what is *in* the journal — proper nouns, exact phrases, paraphrased
+    themes, or open-ended questions all work. The query can be a
+    quote ("the meeting in Vienna"), a name or term ("Atlas",
+    "deadlift PR"), or a natural-language description of what you're
+    looking for ("times I felt anxious about work").
+
+    For browsing by date instead of content, use
+    journal_get_entries_by_date or journal_list_entries.
 
     Args:
-        query: Natural language query (e.g. "times I felt happy", "meetings with Atlas")
-        start_date: Filter entries from this date (ISO 8601, e.g. "2026-01-01"). Optional.
-        end_date: Filter entries until this date (ISO 8601, e.g. "2026-03-01"). Optional.
-        limit: Max results to return (1-50, default 10).
-        offset: Pagination offset for retrieving more results.
+        query: What to search for. Free-form text — keywords, phrases,
+            or natural language. Required, non-empty.
+        start_date: ISO 8601 date (e.g. "2026-01-01"). Only return
+            entries on or after this date. Optional.
+        end_date: ISO 8601 date. Only return entries on or before this
+            date. Optional.
+        limit: Max entries to return (1-50, default 10).
+        offset: Pagination offset. Combine with limit to page through
+            results.
     """
     log.info(
         "Tool call: journal_search_entries(query=%r, start_date=%s, end_date=%s)",

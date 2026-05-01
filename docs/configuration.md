@@ -88,6 +88,21 @@ reference and `docs/ocr-context.md` for the OCR-side mechanism.
 `raw_text` is preserved verbatim through both steps — the date strip and any LLM-inserted paragraph breaks land only on
 `final_text`. `final_text` is what the chunker, embedder, and search index see.
 
+## Optional — hybrid search
+
+`/api/search` and the `journal_search_entries` MCP tool both run a fixed hybrid pipeline: BM25 (FTS5) + dense retrieval, RRF fusion,
+listwise rerank. There is no `mode` toggle — the parameter was retired and now returns `400 mode_removed`. See [docs/search.md](search.md)
+for the full architecture and rationale.
+
+| Variable                  | Default            | Description                                                                                            |
+| ------------------------- | ------------------ | ------------------------------------------------------------------------------------------------------ |
+| `HYBRID_BM25_CANDIDATES`  | `50`               | Top-N entries fetched from FTS5 in L1.                                                                 |
+| `HYBRID_DENSE_CANDIDATES` | `50`               | Top-N chunks fetched from Chroma in L1.                                                                |
+| `HYBRID_FUSION_TOP_M`     | `30`               | Entries kept after RRF fusion, before reranking.                                                       |
+| `HYBRID_RRF_K`            | `60`               | RRF damping constant. Lower = sharper top-rank preference. Cormack et al. (2009) default.              |
+| `HYBRID_RERANKER`         | `anthropic`        | L2 reranker. `anthropic` runs Claude listwise; `none` skips L2 and returns RRF-only ordering.          |
+| `RERANKER_MODEL`          | `claude-haiku-4-5` | Model used by `AnthropicReranker`. Only consulted when `HYBRID_RERANKER=anthropic`.                    |
+
 ## Models (defaults, overridable via env vars or config.py)
 
 | Variable / Setting                   | Default                              | Description                                                                       |

@@ -280,6 +280,35 @@ class Config:
         default_factory=lambda: os.environ.get("PUSHOVER_APP_API_TOKEN", "")
     )
 
+    # Hybrid search
+    # The /api/search endpoint and the journal_search_entries MCP tool
+    # combine BM25 (SQLite FTS5) with dense embedding retrieval, fuse
+    # candidates with Reciprocal Rank Fusion, then rerank the top
+    # `hybrid_fusion_top_m` candidates with the configured reranker.
+    # All knobs are tunable via env vars; defaults match published
+    # guidance for hybrid retrieval at this corpus scale.
+    hybrid_bm25_candidates: int = field(
+        default_factory=lambda: int(os.environ.get("HYBRID_BM25_CANDIDATES", "50"))
+    )
+    hybrid_dense_candidates: int = field(
+        default_factory=lambda: int(os.environ.get("HYBRID_DENSE_CANDIDATES", "50"))
+    )
+    hybrid_fusion_top_m: int = field(
+        default_factory=lambda: int(os.environ.get("HYBRID_FUSION_TOP_M", "30"))
+    )
+    hybrid_rrf_k: int = field(
+        default_factory=lambda: int(os.environ.get("HYBRID_RRF_K", "60"))
+    )
+    # `anthropic` (default) | `none`. The `none` value runs RRF-only —
+    # useful for benchmarking the fusion stage in isolation or for
+    # cutting per-search latency at a quality cost.
+    hybrid_reranker: str = field(
+        default_factory=lambda: os.environ.get("HYBRID_RERANKER", "anthropic")
+    )
+    reranker_model: str = field(
+        default_factory=lambda: os.environ.get("RERANKER_MODEL", "claude-haiku-4-5")
+    )
+
     # Entity extraction
     entity_extraction_model: str = "claude-opus-4-6"
     entity_extraction_max_tokens: int = 4096

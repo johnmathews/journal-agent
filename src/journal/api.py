@@ -715,6 +715,18 @@ def register_api_routes(
                     "model": config.entity_extraction_model,
                     "dedup_similarity_threshold": config.entity_dedup_similarity_threshold,
                 },
+                "search": {
+                    "reranker": config.hybrid_reranker,
+                    "reranker_model": (
+                        config.reranker_model
+                        if config.hybrid_reranker != "none"
+                        else None
+                    ),
+                    "bm25_candidates": config.hybrid_bm25_candidates,
+                    "dense_candidates": config.hybrid_dense_candidates,
+                    "fusion_top_m": config.hybrid_fusion_top_m,
+                    "rrf_k": config.hybrid_rrf_k,
+                },
                 "features": {
                     "mood_scoring": _runtime_get(services, "enable_mood_scoring"),
                     "mood_scorer_model": config.mood_scorer_model,
@@ -1698,18 +1710,23 @@ def register_api_routes(
 
     @mcp.custom_route("/api/search", methods=["GET"], name="api_search")
     async def search(request: Request) -> JSONResponse:
-        """Full-text search across journal entries.
+        """Hybrid search across journal entries.
 
-        Two modes, both bearer-authenticated via the app-wide auth
-        middleware:
+        Combines BM25 (SQLite FTS5) and dense (embedding) retrieval,
+        fuses the candidates with Reciprocal Rank Fusion, then reranks
+        the top fan-out with the configured reranker. Bearer-
+        authenticated via the app-wide auth middleware.
 
-        - `semantic` (default): vector similarity over persisted chunk
-          embeddings. Each result's `matching_chunks` list carries
-          `char_start`/`char_end`/`chunk_index` so the client can
-          render in-place highlights.
-        - `keyword`: SQLite FTS5 over `final_text`. Each result has a
-          `snippet` string with `\\x02`/`\\x03` control chars wrapping
-          matched terms; `matching_chunks` is empty.
+        Each result item populates `snippet` (when BM25 contributed —
+        an FTS5 excerpt with `\\x02`/`\\x03` control chars wrapping
+        matched terms) and `matching_chunks` (when dense retrieval
+        contributed — chunks carry `char_start`/`char_end`/`chunk_index`
+        for in-place highlight rendering). Either or both may be
+        present per item.
+
+        The `mode` query parameter has been retired. Passing it is a
+        client bug — the response is 400 `mode_removed` so the bug is
+        visible.
         """
         services = services_getter()
         if services is None:
@@ -1729,12 +1746,15 @@ def register_api_routes(
                 status_code=400,
             )
 
-        mode = request.query_params.get("mode", "semantic")
-        if mode not in ("semantic", "keyword"):
+        if "mode" in request.query_params:
             return JSONResponse(
                 {
-                    "error": "invalid_mode",
-                    "message": "'mode' must be 'semantic' or 'keyword'",
+                    "error": "mode_removed",
+                    "message": (
+                        "The 'mode' parameter was removed when hybrid search "
+                        "shipped. Drop it from your request — every search "
+                        "now combines keyword and semantic retrieval."
+                    ),
                 },
                 status_code=400,
             )
@@ -1752,24 +1772,14 @@ def register_api_routes(
             offset = 0
 
         try:
-            if mode == "semantic":
-                results = query_svc.search_entries(
-                    query=q,
-                    start_date=start_date,
-                    end_date=end_date,
-                    limit=limit,
-                    offset=offset,
-                    user_id=user_id,
-                )
-            else:
-                results = query_svc.keyword_search(
-                    query=q,
-                    start_date=start_date,
-                    end_date=end_date,
-                    limit=limit,
-                    offset=offset,
-                    user_id=user_id,
-                )
+            results = query_svc.search_entries(
+                query=q,
+                start_date=start_date,
+                end_date=end_date,
+                limit=limit,
+                offset=offset,
+                user_id=user_id,
+            )
         except sqlite3.OperationalError as e:
             # FTS5 raises this on malformed queries (unterminated
             # quotes, bare operators like `AND`, etc.). Surface as a
@@ -1783,18 +1793,21 @@ def register_api_routes(
                 status_code=400,
             )
 
+        # The reranker name comes from the running service so clients
+        # can tell which L2 stage produced the order — useful for
+        # debugging and for cache busting on the webapp side.
+        reranker_name = type(query_svc.hybrid.reranker).__name__
+
         log.info(
-            "GET /api/search — mode=%s q=%r returned %d results",
-            mode,
-            q,
-            len(results),
+            "GET /api/search — q=%r reranker=%s returned %d results",
+            q, reranker_name, len(results),
         )
         return JSONResponse(
             {
                 "query": q,
-                "mode": mode,
                 "limit": limit,
                 "offset": offset,
+                "reranker": reranker_name,
                 "items": [_search_result_dict(r) for r in results],
             }
         )

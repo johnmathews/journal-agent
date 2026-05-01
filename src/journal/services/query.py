@@ -1,4 +1,15 @@
-"""Query service — combines SQLite and vector search for answering queries."""
+"""Query service — orchestrates hybrid search and stat/list lookups.
+
+The keyword/semantic mode toggle was retired when hybrid search shipped.
+`search_entries` now runs the full L1 (BM25 + dense) → RRF → L2 rerank
+pipeline; the `keyword_search` and semantic-only paths are gone.
+Callers (REST API, MCP tool, CLI) get a single search method that does
+the right thing without forcing a mode choice on the user.
+
+Other read methods (statistics, mood trends, topic frequency, list /
+get-by-date) are unchanged — they delegate to the repository and
+optionally record latency through `StatsCollector`.
+"""
 
 import logging
 import time
@@ -7,7 +18,6 @@ from typing import TypeVar
 
 from journal.db.repository import EntryRepository
 from journal.models import (
-    ChunkMatch,
     Entry,
     EntryPage,
     MoodTrend,
@@ -16,6 +26,8 @@ from journal.models import (
     TopicFrequency,
 )
 from journal.providers.embeddings import EmbeddingsProvider
+from journal.providers.reranker import NoopReranker, Reranker
+from journal.services.hybrid import HybridConfig, HybridSearchService
 from journal.services.stats import StatsCollector
 from journal.vectorstore.store import VectorStore
 
@@ -31,16 +43,28 @@ class QueryService:
         vector_store: VectorStore,
         embeddings_provider: EmbeddingsProvider,
         stats: StatsCollector | None = None,
+        reranker: Reranker | None = None,
+        hybrid_config: HybridConfig | None = None,
     ) -> None:
         self._repo = repository
+        # Kept as an attribute (not strictly needed for query routing)
+        # so the /health endpoint and other diagnostics that reach in
+        # for `query_svc._vector_store` continue to work.
         self._vector_store = vector_store
-        self._embeddings = embeddings_provider
-        # Optional stats collector. When `None`, the timed wrapper
-        # below is a straight passthrough — zero extra clock reads
-        # and no locks. The `/health` endpoint passes in an
-        # `InMemoryStatsCollector`; everything else keeps working
-        # unchanged.
         self._stats = stats
+        self._hybrid = HybridSearchService(
+            repository=repository,
+            vector_store=vector_store,
+            embeddings_provider=embeddings_provider,
+            reranker=reranker or NoopReranker(),
+            config=hybrid_config,
+            stats=stats,
+        )
+
+    @property
+    def hybrid(self) -> HybridSearchService:
+        """Expose the underlying hybrid service for diagnostics and admin."""
+        return self._hybrid
 
     def _timed(self, query_type: str, fn: Callable[[], T]) -> T:
         """Run `fn()` and record its latency under `query_type`.
@@ -57,13 +81,6 @@ class QueryService:
             latency_ms = (time.monotonic() - start) * 1000.0
             self._stats.record_query(query_type, latency_ms)
 
-    # When the caller asks for `limit` entries, we over-fetch chunks from
-    # the vector store so that after grouping by entry_id we still have a
-    # good chance of finding `limit` distinct entries. A factor of 5× is
-    # arbitrary but reasonable — tune if the real corpus shows low entry
-    # diversity in top results.
-    _VECTOR_OVERFETCH_FACTOR: int = 5
-
     def search_entries(
         self,
         query: str,
@@ -73,154 +90,19 @@ class QueryService:
         offset: int = 0,
         user_id: int | None = None,
     ) -> list[SearchResult]:
-        """Semantic search across journal entries.
+        """Hybrid search across journal entries.
 
-        Returns one `SearchResult` per unique entry, each carrying a list
-        of `ChunkMatch` objects for every chunk in that entry that matched
-        the query. The `SearchResult.score` is the max chunk score for
-        that entry, and the outer list is sorted by score descending.
+        Runs BM25 (FTS5) and dense embedding retrieval in parallel,
+        fuses the rankings with Reciprocal Rank Fusion, and reranks
+        the top-M candidates with the configured reranker.
+
+        Returns one `SearchResult` per matching entry. Each carries:
+        - `snippet` if BM25 contributed (FTS5-marked excerpt).
+        - `matching_chunks` if dense retrieval contributed.
+        Either or both may be present. The list is ordered by post-
+        rerank score descending, then sliced by `offset` / `limit`.
         """
-        return self._timed(
-            "semantic_search",
-            lambda: self._search_entries_impl(
-                query, start_date, end_date, limit, offset, user_id
-            ),
-        )
-
-    def _search_entries_impl(
-        self,
-        query: str,
-        start_date: str | None,
-        end_date: str | None,
-        limit: int,
-        offset: int,
-        user_id: int | None = None,
-    ) -> list[SearchResult]:
-        log.info("Semantic search: '%s' (limit=%d, offset=%d)", query, limit, offset)
-
-        query_embedding = self._embeddings.embed_query(query)
-
-        conditions: list[dict] = []
-        if user_id is not None:
-            conditions.append({"user_id": user_id})
-        if start_date:
-            conditions.append({"entry_date": {"$gte": start_date}})
-        if end_date:
-            conditions.append({"entry_date": {"$lte": end_date}})
-
-        where: dict = {}
-        if len(conditions) == 1:
-            where = conditions[0]
-        elif len(conditions) > 1:
-            where = {"$and": conditions}
-
-        # Over-fetch chunks so we can aggregate multiple matches per entry.
-        vector_limit = (limit + offset) * self._VECTOR_OVERFETCH_FACTOR
-        vector_results = self._vector_store.search(
-            query_embedding=query_embedding,
-            limit=vector_limit,
-            where=where or None,
-        )
-
-        # Group chunk matches by entry_id, preserving the order from the
-        # vector store (which is already sorted by ascending distance, i.e.
-        # descending similarity). Track the chunk_index from Chroma
-        # metadata so we can JOIN back to `entry_chunks` for char offsets
-        # after the grouping pass.
-        chunks_by_entry: dict[int, list[ChunkMatch]] = {}
-        for vr in vector_results:
-            chunk_index = vr.metadata.get("chunk_index")
-            chunks_by_entry.setdefault(vr.entry_id, []).append(
-                ChunkMatch(
-                    text=vr.chunk_text,
-                    score=1.0 - vr.distance,
-                    chunk_index=chunk_index,
-                )
-            )
-
-        # Build one SearchResult per entry, enriching with the full parent
-        # text and char offsets pulled from `entry_chunks` by chunk_index.
-        # Entries whose row has been deleted from SQLite (stale chromadb
-        # data) are skipped. Entries that were ingested before migration
-        # 0003 have no persisted chunks — we still return them but leave
-        # char_start/char_end as None on each ChunkMatch.
-        results: list[SearchResult] = []
-        for entry_id, chunks in chunks_by_entry.items():
-            entry = self._repo.get_entry(entry_id, user_id=user_id)
-            if entry is None:
-                continue
-
-            persisted_chunks = self._repo.get_chunks(entry_id)
-            if persisted_chunks:
-                for cm in chunks:
-                    if cm.chunk_index is None:
-                        continue
-                    if 0 <= cm.chunk_index < len(persisted_chunks):
-                        span = persisted_chunks[cm.chunk_index]
-                        cm.char_start = span.char_start
-                        cm.char_end = span.char_end
-
-            # Sort chunks within the entry by score descending.
-            chunks.sort(key=lambda c: c.score, reverse=True)
-            results.append(
-                SearchResult(
-                    entry_id=entry.id,
-                    entry_date=entry.entry_date,
-                    text=entry.final_text or entry.raw_text,
-                    score=chunks[0].score,
-                    matching_chunks=chunks,
-                )
-            )
-
-        # Sort entries by their top chunk score descending, then apply
-        # pagination.
-        results.sort(key=lambda r: r.score, reverse=True)
-        return results[offset : offset + limit]
-
-    def keyword_search(
-        self,
-        query: str,
-        start_date: str | None = None,
-        end_date: str | None = None,
-        limit: int = 10,
-        offset: int = 0,
-        user_id: int | None = None,
-    ) -> list[SearchResult]:
-        """FTS5 keyword search across journal entries.
-
-        Thin wrapper on `EntryRepository.search_text_with_snippets`.
-        Returns one `SearchResult` per matching entry, with `snippet`
-        populated (FTS5 `snippet()` output wrapping matched terms in
-        `\\x02`/`\\x03`) and `matching_chunks` intentionally empty —
-        FTS5 does not produce per-chunk scores.
-
-        The per-entry `score` is derived from the result's rank in the
-        FTS5 ORDER BY (1.0 for the best hit, decaying linearly across
-        the page). This is not a similarity score and is not comparable
-        to semantic mode scores — it only keeps the list ordering
-        stable when the frontend re-sorts.
-        """
-        return self._timed(
-            "keyword_search",
-            lambda: self._keyword_search_impl(
-                query, start_date, end_date, limit, offset, user_id
-            ),
-        )
-
-    def _keyword_search_impl(
-        self,
-        query: str,
-        start_date: str | None,
-        end_date: str | None,
-        limit: int,
-        offset: int,
-        user_id: int | None = None,
-    ) -> list[SearchResult]:
-        log.info(
-            "Keyword search: '%s' (limit=%d, offset=%d)", query, limit, offset
-        )
-
-        rows = self._repo.search_text_with_snippets(
+        return self._hybrid.search(
             query=query,
             start_date=start_date,
             end_date=end_date,
@@ -228,24 +110,6 @@ class QueryService:
             offset=offset,
             user_id=user_id,
         )
-
-        results: list[SearchResult] = []
-        for rank, (entry, snippet) in enumerate(rows):
-            # Linear decay from 1.0 so clients that sort by `score`
-            # preserve the FTS5 rank ordering. The exact decay is not
-            # meaningful — only the ordering is.
-            score = 1.0 - (rank / max(len(rows), 1))
-            results.append(
-                SearchResult(
-                    entry_id=entry.id,
-                    entry_date=entry.entry_date,
-                    text=entry.final_text or entry.raw_text,
-                    score=score,
-                    matching_chunks=[],
-                    snippet=snippet,
-                )
-            )
-        return results
 
     def get_entries_by_date(
         self, date: str, user_id: int | None = None

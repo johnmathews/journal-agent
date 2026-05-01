@@ -110,28 +110,40 @@ def test_search_aggregates_multiple_chunks_per_entry(repo, vector_store, mock_em
 
     assert len(results) == 1
     assert len(results[0].matching_chunks) == 3
-    # Chunks within the entry are sorted by score descending.
-    scores = [cm.score for cm in results[0].matching_chunks]
-    assert scores == sorted(scores, reverse=True)
-    # Entry-level score is the top chunk score.
-    assert results[0].score == results[0].matching_chunks[0].score
+    # Chunks within the entry are sorted by chunk-similarity descending.
+    chunk_scores = [cm.score for cm in results[0].matching_chunks]
+    assert chunk_scores == sorted(chunk_scores, reverse=True)
+    # The entry-level score is the post-rerank score, which is its own
+    # axis from the chunk similarity scores. We only require it is in
+    # [0.0, 1.0]; the relationship to chunk scores is not part of the
+    # hybrid contract.
+    assert 0.0 <= results[0].score <= 1.0
 
 
 def test_search_sorts_entries_by_top_score(repo, vector_store, mock_embeddings):
     """Two entries, one with a strong match, one with a weak match —
-    the strong-match entry should come first."""
-    e_weak = repo.create_entry("2026-03-25", "photo", "weak match entry", 3)
-    e_strong = repo.create_entry("2026-03-26", "photo", "strong match entry", 3)
+    the strong-match entry should come first.
+
+    The test is constructed so BOTH BM25 and dense favour `e_strong`:
+    - Dense: e_strong's chunk embedding is near the query vector;
+      e_weak is orthogonal.
+    - BM25: only e_strong contains the unique query term.
+    Hybrid fusion + Noop rerank should then put e_strong first.
+    """
+    e_weak = repo.create_entry("2026-03-25", "photo", "unrelated daily note", 3)
+    e_strong = repo.create_entry(
+        "2026-03-26", "photo", "qux uniqueterm here", 3,
+    )
 
     vector_store.add_entry(
         entry_id=e_weak.id,
-        chunks=["weak match"],
+        chunks=["unrelated daily note"],
         embeddings=[[0.1, 0.9, 0.0]],
         metadata={"entry_date": "2026-03-25"},
     )
     vector_store.add_entry(
         entry_id=e_strong.id,
-        chunks=["strong match"],
+        chunks=["qux uniqueterm here"],
         embeddings=[[0.95, 0.05, 0.0]],
         metadata={"entry_date": "2026-03-26"},
     )
@@ -142,12 +154,13 @@ def test_search_sorts_entries_by_top_score(repo, vector_store, mock_embeddings):
         vector_store=vector_store,
         embeddings_provider=mock_embeddings,
     )
-    results = svc.search_entries("match")
+    results = svc.search_entries("uniqueterm")
 
-    assert len(results) == 2
+    # `uniqueterm` only matches e_strong via BM25, and dense favours
+    # e_strong as well, so e_strong should come first regardless of
+    # rerank policy.
+    assert len(results) >= 1
     assert results[0].entry_id == e_strong.id
-    assert results[1].entry_id == e_weak.id
-    assert results[0].score > results[1].score
 
 
 def test_search_result_has_full_parent_text(seeded_service, mock_embeddings):
@@ -288,79 +301,10 @@ class TestSearchEntriesChunkOffsets:
         assert chunks[0].char_end is None
 
 
-class TestKeywordSearch:
-    """T1.4.a — keyword_search delegates to FTS5 snippet method."""
-
-    def test_keyword_search_returns_snippet(self, seeded_service):
-        results = seeded_service.keyword_search("Vienna")
-        assert len(results) == 1
-        r = results[0]
-        assert r.entry_date == "2026-03-22"
-        assert r.matching_chunks == []
-        assert r.snippet is not None
-        assert "\x02" in r.snippet and "\x03" in r.snippet
-        # Score is a positive float ordering hint.
-        assert r.score > 0
-
-    def test_keyword_search_date_filter(self, repo, vector_store, mock_embeddings):
-        repo.create_entry("2026-01-15", "photo", "Vienna in January", 3)
-        repo.create_entry("2026-03-15", "photo", "Vienna in March", 3)
-        svc = QueryService(
-            repository=repo,
-            vector_store=vector_store,
-            embeddings_provider=mock_embeddings,
-        )
-        results = svc.keyword_search("Vienna", start_date="2026-03-01")
-        assert len(results) == 1
-        assert results[0].entry_date == "2026-03-15"
-
-    def test_keyword_search_pagination(self, repo, vector_store, mock_embeddings):
-        for i in range(5):
-            repo.create_entry(
-                f"2026-03-{10 + i:02d}",
-                "photo",
-                f"Entry {i} mentions Atlas directly.",
-                5,
-            )
-        svc = QueryService(
-            repository=repo,
-            vector_store=vector_store,
-            embeddings_provider=mock_embeddings,
-        )
-        page_one = svc.keyword_search("Atlas", limit=2, offset=0)
-        page_two = svc.keyword_search("Atlas", limit=2, offset=2)
-        assert len(page_one) == 2
-        assert len(page_two) == 2
-        ids_one = {r.entry_id for r in page_one}
-        ids_two = {r.entry_id for r in page_two}
-        assert ids_one.isdisjoint(ids_two)
-
-    def test_keyword_search_no_match(self, seeded_service):
-        assert seeded_service.keyword_search("nonexistent") == []
-
-    def test_keyword_search_score_ordering_stable(
-        self, repo, vector_store, mock_embeddings
-    ):
-        """Scores should be decreasing across the returned list so
-        clients that sort by score preserve FTS5 rank order."""
-        for i in range(3):
-            repo.create_entry(
-                f"2026-03-{10 + i:02d}", "photo", f"Atlas entry {i}", 3
-            )
-        svc = QueryService(
-            repository=repo,
-            vector_store=vector_store,
-            embeddings_provider=mock_embeddings,
-        )
-        results = svc.keyword_search("Atlas", limit=10)
-        scores = [r.score for r in results]
-        assert scores == sorted(scores, reverse=True)
-
-
 class TestStatsCollectorIntegration:
-    """T1.2.a — QueryService forwards latency samples to the collector."""
+    """QueryService forwards latency samples to the collector."""
 
-    def test_stats_records_semantic_search(
+    def test_stats_records_hybrid_search(
         self, repo, vector_store, mock_embeddings
     ):
         from journal.services.stats import InMemoryStatsCollector
@@ -376,25 +320,8 @@ class TestStatsCollectorIntegration:
         svc.search_entries("vienna")
         snap = stats.snapshot()
         assert snap.total_queries == 1
-        assert "semantic_search" in snap.by_type
-        assert snap.by_type["semantic_search"].count == 1
-
-    def test_stats_records_keyword_search(
-        self, repo, vector_store, mock_embeddings
-    ):
-        from journal.services.stats import InMemoryStatsCollector
-
-        stats = InMemoryStatsCollector()
-        repo.create_entry("2026-03-22", "photo", "Vienna trip", 2)
-        svc = QueryService(
-            repository=repo,
-            vector_store=vector_store,
-            embeddings_provider=mock_embeddings,
-            stats=stats,
-        )
-        svc.keyword_search("vienna")
-        snap = stats.snapshot()
-        assert snap.by_type["keyword_search"].count == 1
+        assert "hybrid_search" in snap.by_type
+        assert snap.by_type["hybrid_search"].count == 1
 
     def test_stats_records_statistics_mood_topic(
         self, repo, vector_store, mock_embeddings
@@ -429,4 +356,3 @@ class TestStatsCollectorIntegration:
             embeddings_provider=mock_embeddings,
         )
         assert svc.search_entries("anything") == []
-        assert svc.keyword_search("anything") == []
