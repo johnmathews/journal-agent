@@ -122,8 +122,20 @@ class TranscriptionProvider(Protocol):
     ) -> TranscriptionResult: ...
 
 
-class OpenAITranscriptionProvider:
-    """Transcription provider using OpenAI's Whisper API."""
+class OpenAITranscribeProvider:
+    """Transcription provider using OpenAI's `/audio/transcriptions` endpoint.
+
+    Supports ``whisper-1``, ``gpt-4o-transcribe``, and ``gpt-4o-mini-transcribe``
+    via the ``model`` parameter. The endpoint contract is the same across all
+    three; the gpt-4o variants additionally accept ``include=["logprobs"]``,
+    which we use to derive ``uncertain_spans``.
+
+    The ``context_prompt`` is a Whisper-style spelling bias (capped at ~200
+    tokens — see ``services.transcription_context.build_whisper_prompt``).
+    OpenAI does not currently expose a system-instruction parameter on this
+    endpoint, so the prompt is not full instruction-following — for that, use
+    ``GeminiTranscribeProvider``.
+    """
 
     def __init__(
         self,

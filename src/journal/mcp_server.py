@@ -23,7 +23,7 @@ from journal.logging import setup_logging
 from journal.providers.embeddings import OpenAIEmbeddingsProvider
 from journal.providers.extraction import AnthropicExtractionProvider
 from journal.providers.ocr import build_ocr_provider
-from journal.providers.transcription import OpenAITranscriptionProvider
+from journal.providers.transcription import OpenAITranscribeProvider
 from journal.services.backfill import backfill_mood_scores
 from journal.services.chunking import build_chunker
 from journal.services.entity_extraction import EntityExtractionService
@@ -96,7 +96,7 @@ def _init_services() -> dict:
             log.info(
                 "  Whisper context prompt empty — context dir has no usable .md files"
             )
-    transcription = OpenAITranscriptionProvider(
+    transcription = OpenAITranscribeProvider(
         api_key=config.openai_api_key,
         model=config.transcription_model,
         confidence_threshold=config.transcription_confidence_threshold,

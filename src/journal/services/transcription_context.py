@@ -1,13 +1,17 @@
-"""Build a Whisper transcription `prompt` string from the OCR context files.
+"""Build transcription context strings from the OCR context files.
 
-The OpenAI Whisper API accepts an optional `prompt` parameter (up to ~224 tokens) that
-biases the model toward correct spellings of proper nouns and unusual terms. We reuse
-the user's existing `OCR_CONTEXT_DIR` (people, places, topics, glossary) as the source —
-no second directory to maintain.
+Two output formats are supported, one per provider class:
 
-Whisper prompts work best as dense lists of names/terms rather than long-form prose, so
-this module strips markdown structure, collapses whitespace, and truncates at a token
-boundary just below the API cap.
+1. ``build_whisper_prompt`` — for OpenAI's transcription endpoint, which exposes
+   only a `prompt` parameter (~224-token cap) used as a *spelling bias*. Output is
+   markdown-stripped, whitespace-collapsed, and truncated to ~200 tokens.
+2. ``build_full_context_instruction`` — for Gemini, which accepts a
+   ``system_instruction`` of effectively unlimited length and treats it as a
+   genuine instruction. Output preserves the full markdown structure so the model
+   can read it as a glossary, with an anti-hallucination preamble.
+
+A single set of context files (``OCR_CONTEXT_DIR``) drives both formats — no second
+directory to maintain.
 """
 
 from __future__ import annotations
@@ -125,3 +129,35 @@ def _approx_tokens(text: str) -> int:
         return len(tiktoken.get_encoding("o200k_base").encode(text))
     except Exception:
         return max(1, len(text) // 4)
+
+
+_FULL_CONTEXT_PREAMBLE = (
+    "The following is a glossary of proper nouns, places, and recurring topics "
+    "that may appear in the audio. Prefer these spellings when the spoken word "
+    "is phonetically consistent with one of them. Do not invent words that are "
+    "not actually heard — the glossary is a spelling reference, not a list of "
+    "things you must include in the transcript."
+)
+
+
+def build_full_context_instruction(context_dir: Path | None) -> str:
+    """Build a full-length system instruction for instruction-following providers.
+
+    Unlike ``build_whisper_prompt``, this preserves the markdown structure of the
+    context files (headings, bullets, bold names) so the model can read it as a
+    structured glossary. There is no token cap — Gemini's system_instruction is
+    effectively unlimited for our purposes.
+
+    Returns an empty string when the directory is missing or empty so that the
+    caller can decide whether to fall back to a default system prompt.
+    """
+    raw = load_context_files(context_dir)
+    if not raw:
+        return ""
+    instruction = f"{_FULL_CONTEXT_PREAMBLE}\n\n{raw}"
+    log.info(
+        "Full-context transcription instruction built (%d chars, ~%d tokens)",
+        len(instruction),
+        _approx_tokens(instruction),
+    )
+    return instruction
