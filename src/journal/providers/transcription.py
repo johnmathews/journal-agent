@@ -4,11 +4,14 @@ from __future__ import annotations
 
 import logging
 import tempfile
+import time
 from io import BytesIO
 from typing import TYPE_CHECKING, Protocol, runtime_checkable
 
+import httpx
 import openai
 from google import genai
+from google.genai import errors as genai_errors
 from google.genai import types as genai_types
 from pydantic import BaseModel, Field
 
@@ -398,3 +401,114 @@ class GeminiTranscribeProvider:
             len(spans),
         )
         return TranscriptionResult(text=parsed.text, uncertain_spans=spans)
+
+
+# ---------------------------------------------------------------------------
+# Retrying / fallback wrapper
+# ---------------------------------------------------------------------------
+
+
+class PrimaryExhaustedError(RuntimeError):
+    """Raised when the primary provider exhausts its retry budget without a fallback."""
+
+    def __init__(self, attempts: int, last_error: Exception) -> None:
+        self.attempts = attempts
+        self.last_error = last_error
+        super().__init__(
+            f"Primary transcription provider exhausted after {attempts} attempt(s); "
+            f"last error: {type(last_error).__name__}: {last_error}",
+        )
+
+
+def _is_transient(exc: Exception) -> bool:
+    """Return True if *exc* should be retried, False otherwise."""
+    # OpenAI transient: timeout, connection, rate-limit, 5xx.
+    if isinstance(exc, (
+        openai.APITimeoutError,
+        openai.APIConnectionError,
+        openai.RateLimitError,
+        openai.InternalServerError,
+    )):
+        return True
+    # OpenAI non-transient — explicit list to make intent clear.
+    if isinstance(exc, (
+        openai.AuthenticationError,
+        openai.PermissionDeniedError,
+        openai.NotFoundError,
+        openai.BadRequestError,
+        openai.UnprocessableEntityError,
+    )):
+        return False
+
+    # Gemini ServerError = 5xx → transient.
+    if isinstance(exc, genai_errors.ServerError):
+        return True
+    # Gemini ClientError → only 429 (rate limit) is transient.
+    if isinstance(exc, genai_errors.ClientError):
+        code = getattr(exc, "code", None)
+        return code == 429
+
+    # httpx low-level: Gemini surfaces these for timeouts/connection issues.
+    return isinstance(exc, (httpx.TimeoutException, httpx.ConnectError))
+
+
+class RetryingTranscriptionProvider:
+    """Wrapper that retries transient errors then falls through to a fallback provider."""
+
+    def __init__(
+        self,
+        primary: TranscriptionProvider,
+        fallback: TranscriptionProvider | None = None,
+        max_attempts: int = 3,
+        base_delay: float = 1.0,
+        max_delay: float = 30.0,
+    ) -> None:
+        self._primary = primary
+        self._fallback = fallback
+        self._max_attempts = max_attempts
+        self._base_delay = base_delay
+        self._max_delay = max_delay
+
+    def transcribe(
+        self,
+        audio_data: bytes,
+        media_type: str,
+        language: str = "en",
+    ) -> TranscriptionResult:
+        last_error: Exception | None = None
+        for attempt in range(self._max_attempts):
+            try:
+                return self._primary.transcribe(audio_data, media_type, language)
+            except Exception as exc:
+                if not _is_transient(exc):
+                    raise
+                last_error = exc
+                if attempt < self._max_attempts - 1:
+                    delay = min(self._base_delay * (2 ** attempt), self._max_delay)
+                    logger.warning(
+                        "Primary transcription provider raised transient error "
+                        "(%s: %s); attempt %d/%d, sleeping %.2fs before retry",
+                        type(exc).__name__,
+                        exc,
+                        attempt + 1,
+                        self._max_attempts,
+                        delay,
+                    )
+                    time.sleep(delay)
+                else:
+                    logger.warning(
+                        "Primary transcription provider exhausted after %d attempt(s) "
+                        "(last error: %s: %s)",
+                        self._max_attempts,
+                        type(exc).__name__,
+                        exc,
+                    )
+
+        assert last_error is not None  # noqa: S101 — loop ran at least once
+        if self._fallback is not None:
+            logger.warning(
+                "Falling back to secondary transcription provider after primary exhaustion",
+            )
+            return self._fallback.transcribe(audio_data, media_type, language)
+
+        raise PrimaryExhaustedError(attempts=self._max_attempts, last_error=last_error)
