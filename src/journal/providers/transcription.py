@@ -1,12 +1,22 @@
 """Transcription Protocol and OpenAI Whisper adapter."""
 
+from __future__ import annotations
+
 import logging
 import tempfile
-from typing import Protocol, runtime_checkable
+from io import BytesIO
+from typing import TYPE_CHECKING, Protocol, runtime_checkable
 
 import openai
+from google import genai
+from google.genai import types as genai_types
+from pydantic import BaseModel, Field
 
 from journal.models import TranscriptionResult
+from journal.services.transcription_context import build_full_context_instruction
+
+if TYPE_CHECKING:
+    from pathlib import Path
 
 logger = logging.getLogger(__name__)
 
@@ -204,3 +214,187 @@ class OpenAITranscribeProvider:
 
         logger.info("Transcription complete (%d characters)", len(text))
         return TranscriptionResult(text=text, uncertain_spans=uncertain_spans)
+
+
+# ---------------------------------------------------------------------------
+# Gemini transcription provider
+# ---------------------------------------------------------------------------
+
+
+_GEMINI_DEFAULT_SYSTEM_INSTRUCTION = (
+    "You are a careful transcription engine. Transcribe the audio accurately. "
+    "Do not invent words."
+)
+
+# 20 MB — Gemini's documented inline-bytes ceiling. Larger payloads must be
+# uploaded via the Files API and referenced by handle.
+_GEMINI_INLINE_LIMIT_BYTES = 20 * 1024 * 1024
+
+# Permissive set; if the model rejects a media_type we let its error
+# propagate rather than maintaining a parallel allowlist that drifts.
+_GEMINI_SUPPORTED_AUDIO_TYPES = frozenset({
+    "audio/mp3",
+    "audio/mpeg",
+    "audio/wav",
+    "audio/x-wav",
+    "audio/ogg",
+    "audio/flac",
+    "audio/aac",
+    "audio/aiff",
+    "audio/m4a",
+    "audio/x-m4a",
+    "audio/webm",
+    "audio/mp4",
+})
+
+
+class _GeminiUncertainPhrase(BaseModel):
+    phrase: str = Field(
+        description="The exact phrase from the transcript that you're uncertain about.",
+    )
+    reason: str = Field(
+        default="",
+        description="Why uncertain — e.g., 'unclear audio', 'unfamiliar name'.",
+    )
+
+
+class _GeminiTranscriptionResponse(BaseModel):
+    text: str
+    uncertain_phrases: list[_GeminiUncertainPhrase] = Field(default_factory=list)
+
+
+def _phrases_to_uncertain_spans(
+    text: str, phrases: list[_GeminiUncertainPhrase],
+) -> list[tuple[int, int]]:
+    """Locate each uncertain phrase in *text* and return merged spans.
+
+    For phrases that appear more than once, only the first occurrence is
+    used. Phrases not found in the text are skipped with a warning —
+    this happens when the model paraphrases the uncertain content
+    instead of quoting it verbatim.
+    """
+    raw_spans: list[tuple[int, int]] = []
+    for entry in phrases:
+        phrase = entry.phrase
+        if not phrase:
+            continue
+        idx = text.find(phrase)
+        if idx < 0:
+            logger.warning(
+                "Gemini uncertain phrase %r not found in transcript — skipping",
+                phrase,
+            )
+            continue
+        raw_spans.append((idx, idx + len(phrase)))
+
+    if not raw_spans:
+        return []
+
+    raw_spans.sort()
+    merged: list[tuple[int, int]] = [raw_spans[0]]
+    for start, end in raw_spans[1:]:
+        prev_start, prev_end = merged[-1]
+        if start <= prev_end:
+            merged[-1] = (prev_start, max(prev_end, end))
+        else:
+            merged.append((start, end))
+    return merged
+
+
+class GeminiTranscribeProvider:
+    """Transcription provider using Google's Gemini multimodal API.
+
+    Unlike OpenAI's /audio/transcriptions endpoint, Gemini accepts a full
+    instruction-following system prompt and structured output schemas. We
+    exploit this to ask the model to return both the transcript text and a
+    list of phrases it's uncertain about, in one call.
+
+    Uncertain spans are derived by string-locating each reported phrase in
+    the transcript text. This is model-introspective (not mechanically
+    grounded like logprobs) and should be eval'd before being trusted as
+    a primary signal.
+    """
+
+    def __init__(
+        self,
+        api_key: str,
+        model: str = "gemini-2.5-pro",
+        context_dir: Path | None = None,
+    ) -> None:
+        self._client = genai.Client(api_key=api_key)
+        self._model = model
+        instruction = build_full_context_instruction(context_dir)
+        self._system_instruction = instruction or _GEMINI_DEFAULT_SYSTEM_INSTRUCTION
+
+    def transcribe(
+        self,
+        audio_data: bytes,
+        media_type: str,
+        language: str = "en",
+    ) -> TranscriptionResult:
+        if not audio_data:
+            raise ValueError("Audio data is empty")
+
+        if media_type not in _GEMINI_SUPPORTED_AUDIO_TYPES:
+            logger.warning(
+                "Media type %r is not in the known Gemini audio set — "
+                "passing through and letting the API decide",
+                media_type,
+            )
+
+        logger.info(
+            "Transcribing audio via Gemini (model=%s, media_type=%s, language=%s, %d bytes)",
+            self._model,
+            media_type,
+            language,
+            len(audio_data),
+        )
+
+        if len(audio_data) <= _GEMINI_INLINE_LIMIT_BYTES:
+            audio_part: object = genai_types.Part.from_bytes(
+                data=audio_data, mime_type=media_type,
+            )
+        else:
+            logger.info(
+                "Audio exceeds %d bytes — uploading via Files API",
+                _GEMINI_INLINE_LIMIT_BYTES,
+            )
+            audio_part = self._client.files.upload(
+                file=BytesIO(audio_data),
+                config=genai_types.UploadFileConfig(mime_type=media_type),
+            )
+
+        prompt = (
+            f"Transcribe this audio. The speaker uses primarily {language}. "
+            "Return JSON conforming to the schema. List uncertain phrases — "
+            "names you're not sure of, words you couldn't make out. Do not "
+            "invent words."
+        )
+
+        response = self._client.models.generate_content(
+            model=self._model,
+            contents=[audio_part, prompt],
+            config=genai_types.GenerateContentConfig(
+                system_instruction=self._system_instruction,
+                response_mime_type="application/json",
+                response_schema=_GeminiTranscriptionResponse,
+                temperature=0.0,
+            ),
+        )
+
+        parsed = getattr(response, "parsed", None)
+        if parsed is None:
+            raw_text = getattr(response, "text", None)
+            if not raw_text:
+                raise RuntimeError(
+                    "Gemini transcription returned neither parsed object nor text",
+                )
+            parsed = _GeminiTranscriptionResponse.model_validate_json(raw_text)
+
+        spans = _phrases_to_uncertain_spans(parsed.text, parsed.uncertain_phrases)
+        logger.info(
+            "Gemini transcription complete (%d characters, %d uncertain span(s))",
+            len(parsed.text),
+            len(spans),
+        )
+        return TranscriptionResult(text=parsed.text, uncertain_spans=spans)

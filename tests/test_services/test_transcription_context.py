@@ -10,8 +10,8 @@ if TYPE_CHECKING:
     from pathlib import Path
 
 from journal.services.transcription_context import (
-    DEFAULT_MAX_TOKENS,
     _FULL_CONTEXT_PREAMBLE,
+    DEFAULT_MAX_TOKENS,
     _normalize_whitespace,
     _strip_markdown,
     _truncate_to_tokens,
