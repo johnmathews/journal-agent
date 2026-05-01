@@ -10,10 +10,12 @@ if TYPE_CHECKING:
     from pathlib import Path
 
 from journal.services.transcription_context import (
+    _FULL_CONTEXT_PREAMBLE,
     DEFAULT_MAX_TOKENS,
     _normalize_whitespace,
     _strip_markdown,
     _truncate_to_tokens,
+    build_full_context_instruction,
     build_whisper_prompt,
 )
 
@@ -166,11 +168,59 @@ class TestBuildWhisperPrompt:
         assert build_whisper_prompt(tmp_path) == ""
 
 
+class TestBuildFullContextInstruction:
+    def test_none_dir_returns_empty(self):
+        assert build_full_context_instruction(None) == ""
+
+    def test_missing_dir_returns_empty(self, tmp_path: Path):
+        assert build_full_context_instruction(tmp_path / "does-not-exist") == ""
+
+    def test_empty_dir_returns_empty(self, tmp_path: Path):
+        assert build_full_context_instruction(tmp_path) == ""
+
+    def test_includes_preamble_when_context_present(self, tmp_path: Path):
+        (tmp_path / "people.md").write_text("- **Adi** — close friend")
+        result = build_full_context_instruction(tmp_path)
+        assert _FULL_CONTEXT_PREAMBLE in result
+        assert "Adi" in result
+
+    def test_preserves_markdown_structure(self, tmp_path: Path):
+        (tmp_path / "people.md").write_text(
+            "- **Adi** — close friend\n- **Dr. Patel** — physio\n"
+        )
+        result = build_full_context_instruction(tmp_path)
+        # Markdown markers preserved (unlike whisper prompt) — model reads as glossary.
+        assert "**Adi**" in result
+        assert "**Dr. Patel**" in result
+
+    def test_no_truncation_for_long_context(self, tmp_path: Path):
+        # Build a file far longer than 200 tokens to confirm no truncation occurs.
+        names = [f"Person{i}" for i in range(500)]
+        long_content = "\n".join(f"- **{n}**" for n in names)
+        (tmp_path / "huge.md").write_text(long_content)
+
+        result = build_full_context_instruction(tmp_path)
+        # Every name must survive (whisper prompt would truncate).
+        for n in names:
+            assert n in result
+
+    def test_multiple_files_concatenated(self, tmp_path: Path):
+        (tmp_path / "people.md").write_text("- **Adi**")
+        (tmp_path / "places.md").write_text("- **Berlin**")
+        result = build_full_context_instruction(tmp_path)
+        assert "Adi" in result
+        assert "Berlin" in result
+
+    def test_anti_hallucination_language_present(self):
+        # The preamble must explicitly tell the model not to invent words.
+        assert "do not invent" in _FULL_CONTEXT_PREAMBLE.lower()
+
+
 class TestWhisperPromptForwarding:
     """Verify the OpenAI provider passes the context prompt to the API."""
 
     def test_prompt_forwarded_when_present(self, monkeypatch):
-        from journal.providers.transcription import OpenAITranscriptionProvider
+        from journal.providers.transcription import OpenAITranscribeProvider
 
         captured_kwargs: dict = {}
 
@@ -182,7 +232,7 @@ class TestWhisperPromptForwarding:
         class _FakeClient:
             audio = type("A", (), {"transcriptions": _FakeTranscriptions()})()
 
-        provider = OpenAITranscriptionProvider.__new__(OpenAITranscriptionProvider)
+        provider = OpenAITranscribeProvider.__new__(OpenAITranscribeProvider)
         provider._client = _FakeClient()
         provider._model = "gpt-4o-transcribe"
         provider._confidence_threshold = -0.5
@@ -193,7 +243,7 @@ class TestWhisperPromptForwarding:
         assert captured_kwargs.get("prompt") == "Adi Dr. Patel Hampstead Heath"
 
     def test_prompt_omitted_when_blank(self):
-        from journal.providers.transcription import OpenAITranscriptionProvider
+        from journal.providers.transcription import OpenAITranscribeProvider
 
         captured_kwargs: dict = {}
 
@@ -205,7 +255,7 @@ class TestWhisperPromptForwarding:
         class _FakeClient:
             audio = type("A", (), {"transcriptions": _FakeTranscriptions()})()
 
-        provider = OpenAITranscriptionProvider.__new__(OpenAITranscriptionProvider)
+        provider = OpenAITranscribeProvider.__new__(OpenAITranscribeProvider)
         provider._client = _FakeClient()
         provider._model = "gpt-4o-transcribe"
         provider._confidence_threshold = -0.5

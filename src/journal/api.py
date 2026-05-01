@@ -693,7 +693,22 @@ def register_api_routes(
                     "model": ocr_model,
                 },
                 "transcription": {
+                    "provider": config.transcription_provider,
                     "model": config.transcription_model,
+                    "fallback": {
+                        "enabled": config.transcription_fallback_enabled,
+                        "model": config.transcription_fallback_model,
+                    },
+                    "shadow": {
+                        "enabled": bool(config.transcription_shadow_provider),
+                        "provider": config.transcription_shadow_provider or None,
+                        "model": config.transcription_shadow_model or None,
+                    },
+                    "retry": {
+                        "max_attempts": config.transcription_retry_max_attempts,
+                        "base_delay_seconds": config.transcription_retry_base_delay,
+                        "max_delay_seconds": config.transcription_retry_max_delay,
+                    },
                 },
                 "transcript_formatting": {
                     "model": config.transcript_formatter_model,

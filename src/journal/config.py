@@ -74,7 +74,11 @@ class Config:
 
     # OpenAI (Whisper + Embeddings)
     openai_api_key: str = field(default_factory=lambda: os.environ.get("OPENAI_API_KEY", ""))
-    transcription_model: str = "gpt-4o-transcribe"
+    transcription_model: str = field(
+        default_factory=lambda: os.environ.get(
+            "TRANSCRIPTION_MODEL", "gpt-4o-transcribe"
+        )
+    )
     # Log-probability threshold for flagging uncertain words during
     # transcription.  Tokens with logprob below this value are marked
     # as uncertain spans.  Only effective with models that support
@@ -128,6 +132,48 @@ class Config:
             "TRANSCRIPTION_CONTEXT_ENABLED", "true"
         ).lower()
         in ("1", "true", "yes", "on")
+    )
+
+    # Transcription provider selection: "openai" or "gemini".
+    # Validated in __post_init__.
+    transcription_provider: str = field(
+        default_factory=lambda: os.environ.get("TRANSCRIPTION_PROVIDER", "openai")
+    )
+    # Wrap the primary transcription provider in a retry/fallback wrapper.
+    transcription_fallback_enabled: bool = field(
+        default_factory=lambda: os.environ.get(
+            "TRANSCRIPTION_FALLBACK_ENABLED", "true"
+        ).lower()
+        in ("1", "true", "yes", "on")
+    )
+    # OpenAI model used for the fallback adapter (cheap & robust default).
+    transcription_fallback_model: str = field(
+        default_factory=lambda: os.environ.get(
+            "TRANSCRIPTION_FALLBACK_MODEL", "whisper-1"
+        )
+    )
+    transcription_retry_max_attempts: int = field(
+        default_factory=lambda: int(
+            os.environ.get("TRANSCRIPTION_RETRY_MAX_ATTEMPTS", "3")
+        )
+    )
+    transcription_retry_base_delay: float = field(
+        default_factory=lambda: float(
+            os.environ.get("TRANSCRIPTION_RETRY_BASE_DELAY", "1.0")
+        )
+    )
+    transcription_retry_max_delay: float = field(
+        default_factory=lambda: float(
+            os.environ.get("TRANSCRIPTION_RETRY_MAX_DELAY", "30.0")
+        )
+    )
+    # Shadow provider: empty string disables, otherwise "openai" or "gemini".
+    transcription_shadow_provider: str = field(
+        default_factory=lambda: os.environ.get("TRANSCRIPTION_SHADOW_PROVIDER", "")
+    )
+    # Empty string means "use the shadow provider's default model".
+    transcription_shadow_model: str = field(
+        default_factory=lambda: os.environ.get("TRANSCRIPTION_SHADOW_MODEL", "")
     )
 
     # Slack (for downloading files from Slack URLs)
@@ -322,6 +368,32 @@ class Config:
     journal_author_name: str = field(
         default_factory=lambda: os.environ.get("JOURNAL_AUTHOR_NAME", "John")
     )
+
+    def __post_init__(self) -> None:
+        valid_providers = {"openai", "gemini"}
+        if self.transcription_provider not in valid_providers:
+            raise ValueError(
+                "TRANSCRIPTION_PROVIDER must be 'openai' or 'gemini'"
+            )
+        if (
+            self.transcription_shadow_provider
+            and self.transcription_shadow_provider not in valid_providers
+        ):
+            raise ValueError(
+                "TRANSCRIPTION_SHADOW_PROVIDER must be 'openai' or 'gemini'"
+            )
+        if self.transcription_retry_max_attempts < 1:
+            raise ValueError(
+                "TRANSCRIPTION_RETRY_MAX_ATTEMPTS must be >= 1"
+            )
+        if self.transcription_retry_base_delay < 0:
+            raise ValueError(
+                "TRANSCRIPTION_RETRY_BASE_DELAY must be >= 0"
+            )
+        if self.transcription_retry_max_delay < 0:
+            raise ValueError(
+                "TRANSCRIPTION_RETRY_MAX_DELAY must be >= 0"
+            )
 
 
 def load_config() -> Config:

@@ -1,12 +1,21 @@
 """Tests for ingestion service."""
 
-from unittest.mock import MagicMock
+import logging
+import sqlite3
+from unittest.mock import MagicMock, patch
 
+import httpx
+import openai
 import pytest
 
 from journal.db.repository import SQLiteEntryRepository
 from journal.models import TranscriptionResult
 from journal.providers.ocr import OCRResult
+from journal.providers.transcription import (
+    RetryingTranscriptionProvider,
+    ShadowTranscriptionProvider,
+    TranscriptionProvider,
+)
 from journal.services.chunking import FixedTokenChunker
 from journal.services.ingestion import IngestionService
 from journal.vectorstore.store import InMemoryVectorStore
@@ -1222,4 +1231,306 @@ class TestHeadingDetection:
         # formatter's output on the body — no markdown heading.
         assert entry.final_text == "Hello world.\n\nGoodbye world."
         assert not entry.final_text.startswith("#")
+
+
+# ---------------------------------------------------------------------------
+# WU7: integration tests that wire the real provider stack (Retrying / Shadow)
+# through the real IngestionService.ingest_voice path. The point is to catch
+# contract mismatches that the per-unit tests can't see — e.g. an exception
+# class change, a TranscriptionResult shape drift, or an uncertain_spans
+# attribute getting lost when a wrapper in the chain forwards the call.
+# ---------------------------------------------------------------------------
+
+
+def _openai_request() -> httpx.Request:
+    """Construct a dummy httpx.Request — required by openai exception ctors."""
+    return httpx.Request("POST", "https://api.openai.com/v1/audio/transcriptions")
+
+
+def _api_timeout() -> openai.APITimeoutError:
+    """Instantiate APITimeoutError; the SDK requires a `request` kwarg."""
+    return openai.APITimeoutError(request=_openai_request())
+
+
+class TestIngestionWithProviderStack:
+    """End-to-end tests for IngestionService.ingest_voice with real wrappers.
+
+    These tests instantiate the real RetryingTranscriptionProvider /
+    ShadowTranscriptionProvider classes around mock primary/fallback/shadow
+    adapters, then run them through the actual ingestion code path. They
+    exercise the contract surface between wrappers and the rest of the
+    pipeline — chunking, embedding, persistence, uncertain-span handling.
+    """
+
+    @pytest.fixture
+    def primary_provider(self) -> MagicMock:
+        provider = MagicMock(spec=TranscriptionProvider)
+        provider.transcribe.return_value = TranscriptionResult(
+            text="primary text", uncertain_spans=[],
+        )
+        return provider
+
+    @pytest.fixture
+    def fallback_provider(self) -> MagicMock:
+        provider = MagicMock(spec=TranscriptionProvider)
+        provider.transcribe.return_value = TranscriptionResult(
+            text="fallback text", uncertain_spans=[],
+        )
+        return provider
+
+    @pytest.fixture
+    def shadow_provider(self) -> MagicMock:
+        provider = MagicMock(spec=TranscriptionProvider)
+        provider.transcribe.return_value = TranscriptionResult(
+            text="shadow text", uncertain_spans=[],
+        )
+        return provider
+
+    def _build_service(
+        self,
+        db_conn: sqlite3.Connection,
+        transcription: TranscriptionProvider,
+        mock_embeddings: MagicMock,
+    ) -> IngestionService:
+        """Build a real IngestionService wrapping *transcription*.
+
+        OCR and embeddings are mocked at the same boundaries as the rest
+        of the test file's fixtures.
+        """
+        return IngestionService(
+            repository=SQLiteEntryRepository(db_conn),
+            vector_store=InMemoryVectorStore(),
+            ocr_provider=MagicMock(),
+            transcription_provider=transcription,
+            embeddings_provider=mock_embeddings,
+            chunker=FixedTokenChunker(max_tokens=150, overlap_tokens=40),
+            preprocess_images=False,
+        )
+
+    # ------------------------------------------------------------------
+    # (a) Retrying: primary fails once, succeeds the second time.
+    # ------------------------------------------------------------------
+    def test_ingest_voice_with_retrying_wrapper(
+        self,
+        db_conn: sqlite3.Connection,
+        mock_embeddings: MagicMock,
+        primary_provider: MagicMock,
+    ) -> None:
+        primary_provider.transcribe.side_effect = [
+            _api_timeout(),
+            TranscriptionResult(
+                text="success after retry", uncertain_spans=[],
+            ),
+        ]
+        wrapper = RetryingTranscriptionProvider(
+            primary=primary_provider, max_attempts=3,
+        )
+        service = self._build_service(db_conn, wrapper, mock_embeddings)
+
+        with patch("journal.providers.transcription.time.sleep") as mock_sleep:
+            entry = service.ingest_voice(
+                audio_data=b"fake audio",
+                media_type="audio/mp3",
+                date="2026-04-01",
+            )
+
+        assert entry.raw_text == "success after retry"
+        assert entry.final_text == "success after retry"
+        assert entry.source_type == "voice"
+        assert primary_provider.transcribe.call_count == 2
+        # Exactly one sleep between attempt 1 (failed) and attempt 2 (succeeded).
+        assert mock_sleep.call_count == 1
+
+    # ------------------------------------------------------------------
+    # (b) Retrying: primary exhausts; fallback (whisper-1 stand-in) succeeds.
+    # ------------------------------------------------------------------
+    def test_ingest_voice_falls_back_to_whisper(
+        self,
+        db_conn: sqlite3.Connection,
+        mock_embeddings: MagicMock,
+        primary_provider: MagicMock,
+        fallback_provider: MagicMock,
+    ) -> None:
+        primary_provider.transcribe.side_effect = _api_timeout()
+        fallback_provider.transcribe.return_value = TranscriptionResult(
+            text="from whisper fallback", uncertain_spans=[],
+        )
+        wrapper = RetryingTranscriptionProvider(
+            primary=primary_provider,
+            fallback=fallback_provider,
+            max_attempts=3,
+        )
+        service = self._build_service(db_conn, wrapper, mock_embeddings)
+
+        with patch("journal.providers.transcription.time.sleep"):
+            entry = service.ingest_voice(
+                audio_data=b"fake audio",
+                media_type="audio/mp3",
+                date="2026-04-01",
+            )
+
+        assert entry.raw_text == "from whisper fallback"
+        assert entry.source_type == "voice"
+        assert primary_provider.transcribe.call_count == 3
+        fallback_provider.transcribe.assert_called_once()
+
+    # ------------------------------------------------------------------
+    # (c) Shadow: primary text wins; shadow text never reaches the entry.
+    # ------------------------------------------------------------------
+    def test_ingest_voice_with_shadow_returns_primary(
+        self,
+        db_conn: sqlite3.Connection,
+        mock_embeddings: MagicMock,
+        primary_provider: MagicMock,
+        shadow_provider: MagicMock,
+    ) -> None:
+        primary_provider.transcribe.return_value = TranscriptionResult(
+            text="primary text", uncertain_spans=[],
+        )
+        shadow_provider.transcribe.return_value = TranscriptionResult(
+            text="shadow text", uncertain_spans=[],
+        )
+        wrapper = ShadowTranscriptionProvider(
+            primary=primary_provider, shadow=shadow_provider,
+        )
+        service = self._build_service(db_conn, wrapper, mock_embeddings)
+
+        entry = service.ingest_voice(
+            audio_data=b"fake audio",
+            media_type="audio/mp3",
+            date="2026-04-02",
+        )
+
+        assert entry.raw_text == "primary text"
+        assert entry.final_text == "primary text"
+        # And the persisted entry agrees with the in-memory one.
+        stored = service._repo.get_entry(entry.id)
+        assert stored is not None
+        assert stored.raw_text == "primary text"
+
+    # ------------------------------------------------------------------
+    # (d) Shadow failure: ingestion succeeds; warning is logged.
+    # ------------------------------------------------------------------
+    def test_ingest_voice_shadow_failure_does_not_break_ingestion(
+        self,
+        db_conn: sqlite3.Connection,
+        mock_embeddings: MagicMock,
+        primary_provider: MagicMock,
+        shadow_provider: MagicMock,
+        caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        primary_provider.transcribe.return_value = TranscriptionResult(
+            text="primary survives", uncertain_spans=[],
+        )
+        shadow_provider.transcribe.side_effect = RuntimeError(
+            "shadow exploded",
+        )
+        wrapper = ShadowTranscriptionProvider(
+            primary=primary_provider,
+            shadow=shadow_provider,
+            shadow_label="gemini/gemini-2.5-pro",
+        )
+        service = self._build_service(db_conn, wrapper, mock_embeddings)
+
+        with caplog.at_level(
+            logging.WARNING, logger="journal.providers.transcription",
+        ):
+            entry = service.ingest_voice(
+                audio_data=b"fake audio",
+                media_type="audio/mp3",
+                date="2026-04-03",
+            )
+
+        assert entry.raw_text == "primary survives"
+        # A WARNING log line names the failed shadow.
+        assert any(
+            record.levelno == logging.WARNING
+            and "gemini/gemini-2.5-pro" in record.getMessage()
+            for record in caplog.records
+        ), "Expected a WARNING naming the failed shadow"
+
+    # ------------------------------------------------------------------
+    # (e) Shadow logs a `transcription_shadow_diff` record with diffs.
+    # ------------------------------------------------------------------
+    def test_ingest_voice_shadow_logs_diff(
+        self,
+        db_conn: sqlite3.Connection,
+        mock_embeddings: MagicMock,
+        primary_provider: MagicMock,
+        shadow_provider: MagicMock,
+        caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        primary_provider.transcribe.return_value = TranscriptionResult(
+            text="alpha beta gamma", uncertain_spans=[],
+        )
+        shadow_provider.transcribe.return_value = TranscriptionResult(
+            text="alpha BETA gamma", uncertain_spans=[],
+        )
+        wrapper = ShadowTranscriptionProvider(
+            primary=primary_provider, shadow=shadow_provider,
+        )
+        service = self._build_service(db_conn, wrapper, mock_embeddings)
+
+        with caplog.at_level(
+            logging.INFO, logger="journal.providers.transcription",
+        ):
+            service.ingest_voice(
+                audio_data=b"fake audio",
+                media_type="audio/mp3",
+                date="2026-04-04",
+            )
+
+        diff_records = [
+            r for r in caplog.records
+            if r.getMessage() == "transcription_shadow_diff"
+        ]
+        assert len(diff_records) == 1, (
+            "Expected exactly one transcription_shadow_diff log record"
+        )
+        record = diff_records[0]
+        diffs = record.diffs  # type: ignore[attr-defined]
+        assert isinstance(diffs, list)
+        assert len(diffs) >= 1
+        # The disagreement covers the middle word.
+        assert any(
+            d["primary"] == "beta" and d["shadow"] == "BETA" for d in diffs
+        )
+
+    # ------------------------------------------------------------------
+    # (f) Uncertain spans must survive the wrapper chain (retry + shadow).
+    # ------------------------------------------------------------------
+    def test_ingest_voice_uncertain_spans_persist_through_stack(
+        self,
+        db_conn: sqlite3.Connection,
+        mock_embeddings: MagicMock,
+        primary_provider: MagicMock,
+        shadow_provider: MagicMock,
+    ) -> None:
+        primary_provider.transcribe.return_value = TranscriptionResult(
+            text="hello world", uncertain_spans=[(0, 5)],
+        )
+        shadow_provider.transcribe.return_value = TranscriptionResult(
+            text="hello world", uncertain_spans=[],
+        )
+        # Stack: Shadow(Retrying(primary), shadow)
+        retry_wrapper = RetryingTranscriptionProvider(
+            primary=primary_provider, max_attempts=3,
+        )
+        full_stack = ShadowTranscriptionProvider(
+            primary=retry_wrapper, shadow=shadow_provider,
+        )
+        service = self._build_service(db_conn, full_stack, mock_embeddings)
+
+        with patch("journal.providers.transcription.time.sleep"):
+            entry = service.ingest_voice(
+                audio_data=b"fake audio",
+                media_type="audio/mp3",
+                date="2026-04-05",
+            )
+
+        assert entry.raw_text == "hello world"
+        # The primary's uncertain span must have survived both wrappers.
+        spans = service._repo.get_uncertain_spans(entry.id)
+        assert spans == [(0, 5)]
+        assert entry.raw_text[0:5] == "hello"
 

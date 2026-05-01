@@ -4,16 +4,22 @@ import io
 import sqlite3
 from collections.abc import Generator
 from pathlib import Path
-from unittest.mock import MagicMock
+from unittest.mock import MagicMock, patch
 
 import pytest
 from starlette.testclient import TestClient
 
 from journal.auth import AuthenticatedUser, _current_user_id
+from journal.config import Config
 from journal.db.connection import get_connection
 from journal.db.jobs_repository import SQLiteJobRepository
 from journal.db.migrations import run_migrations
 from journal.db.repository import SQLiteEntryRepository
+from journal.providers.transcription import (
+    OpenAITranscribeProvider,
+    RetryingTranscriptionProvider,
+    build_transcription_provider,
+)
 from journal.services.chunking import FixedTokenChunker
 from journal.services.ingestion import IngestionService
 from journal.services.jobs import JobRunner
@@ -422,3 +428,180 @@ class TestListEntriesUncertainSpanCount:
         assert response.status_code == 200
         items = response.json()["items"]
         assert all(e["uncertain_span_count"] == 0 for e in items)
+
+
+class TestApiIngestWithFactory:
+    """End-to-end check that the build_transcription_provider factory
+    produces a TranscriptionProvider compatible with the IngestionService
+    that the audio endpoint depends on.
+
+    The existing TestIngestAudio fixtures inject a bare MagicMock as the
+    transcription provider, so they would silently miss any DI mismatch
+    introduced by the wrapper chain (e.g. a constructor signature change
+    in OpenAITranscribeProvider, or RetryingTranscriptionProvider losing
+    its `transcribe` method).
+    """
+
+    @pytest.fixture
+    def factory_built_transcription(
+        self, monkeypatch: pytest.MonkeyPatch,
+    ) -> Generator[object]:
+        """Build the transcription stack via the real factory.
+
+        Patches the OpenAI / Gemini SDK boundaries so no network calls
+        happen during construction. Returns the wrapper chain the
+        factory would build for default config.
+        """
+        # Clear any inherited env that would shift the default stack.
+        for var in (
+            "TRANSCRIPTION_PROVIDER",
+            "TRANSCRIPTION_MODEL",
+            "TRANSCRIPTION_FALLBACK_ENABLED",
+            "TRANSCRIPTION_FALLBACK_MODEL",
+            "TRANSCRIPTION_RETRY_MAX_ATTEMPTS",
+            "TRANSCRIPTION_RETRY_BASE_DELAY",
+            "TRANSCRIPTION_RETRY_MAX_DELAY",
+            "TRANSCRIPTION_SHADOW_PROVIDER",
+            "TRANSCRIPTION_SHADOW_MODEL",
+            "TRANSCRIPTION_CONTEXT_ENABLED",
+        ):
+            monkeypatch.delenv(var, raising=False)
+        # Disable context loading to avoid filesystem dependencies.
+        monkeypatch.setenv("TRANSCRIPTION_CONTEXT_ENABLED", "false")
+        monkeypatch.setenv("OPENAI_API_KEY", "test-key")
+
+        with (
+            patch("journal.providers.transcription.openai.OpenAI"),
+            patch("journal.providers.transcription.genai.Client"),
+        ):
+            provider = build_transcription_provider(Config())
+            yield provider
+
+    @pytest.fixture
+    def factory_services(
+        self,
+        repo: SQLiteEntryRepository,
+        mock_vector_store: MagicMock,
+        mock_embeddings: MagicMock,
+        api_db_conn: sqlite3.Connection,
+        factory_built_transcription: object,
+    ) -> Generator[dict]:
+        """Wire the IngestionService with the factory-built provider.
+
+        Mirrors the regular `services` fixture, but swaps the inline
+        transcription mock for the real wrapper chain.
+        """
+        from journal.models import ExtractionResult
+
+        ingestion = IngestionService(
+            repository=repo,
+            vector_store=mock_vector_store,
+            ocr_provider=MagicMock(),
+            transcription_provider=factory_built_transcription,  # type: ignore[arg-type]
+            embeddings_provider=mock_embeddings,
+            chunker=FixedTokenChunker(max_tokens=150, overlap_tokens=40),
+            preprocess_images=False,
+        )
+        query = QueryService(
+            repository=repo,
+            vector_store=mock_vector_store,
+            embeddings_provider=mock_embeddings,
+        )
+        job_repo = SQLiteJobRepository(api_db_conn)
+        mock_extraction = MagicMock()
+        mock_extraction.extract_from_entry = MagicMock(
+            return_value=ExtractionResult(
+                entry_id=0, extraction_run_id="test",
+                entities_created=0, entities_matched=0,
+                mentions_created=0, relationships_created=0,
+            ),
+        )
+        mock_mood_scoring = MagicMock()
+        mock_mood_scoring.score_entry = MagicMock(return_value=5)
+        job_runner = JobRunner(
+            job_repository=job_repo,
+            entity_extraction_service=mock_extraction,
+            mood_backfill_callable=MagicMock(),
+            mood_scoring_service=mock_mood_scoring,
+            entry_repository=repo,
+            ingestion_service=ingestion,
+        )
+        yield {
+            "ingestion": ingestion,
+            "query": query,
+            "job_runner": job_runner,
+            "job_repository": job_repo,
+        }
+        # ThreadPoolExecutor in JobRunner must shut down cleanly so the
+        # background ingestion job (if it ran) doesn't leak past test exit
+        # and segfault CI.
+        job_runner.shutdown(wait=True)
+
+    @pytest.fixture
+    def factory_client(
+        self, factory_services: dict,
+    ) -> Generator[TestClient]:
+        from mcp.server.fastmcp import FastMCP
+
+        from journal.api import register_api_routes
+
+        test_mcp = FastMCP("test-journal")
+        register_api_routes(test_mcp, lambda: factory_services)
+        app = _FakeAuthMiddleware(test_mcp.streamable_http_app())
+        with TestClient(app, raise_server_exceptions=False) as tc:
+            yield tc
+
+    def test_audio_endpoint_works_with_default_factory(
+        self,
+        factory_client: TestClient,
+        factory_built_transcription: object,
+    ) -> None:
+        """The audio endpoint must accept uploads when ingestion is wired
+        with the factory-built transcription stack (default config:
+        Retrying(OpenAI/gpt-4o-transcribe, fallback=whisper-1)).
+
+        The endpoint queues a background job and returns 202; the test
+        asserts the wrapper chain doesn't break that path. We don't run
+        the queued job — that's a separate concern covered by the
+        ingestion-stack tests.
+        """
+        # Sanity-check that the factory built what we expect.
+        assert isinstance(
+            factory_built_transcription, RetryingTranscriptionProvider,
+        )
+        assert isinstance(
+            factory_built_transcription._primary, OpenAITranscribeProvider,
+        )
+        assert isinstance(
+            factory_built_transcription._fallback, OpenAITranscribeProvider,
+        )
+
+        # Patch the OpenAI SDK so any background-job execution that
+        # happens between submission and shutdown doesn't try a real
+        # network call. The endpoint path itself never invokes it.
+        fake_transcript = MagicMock()
+        fake_transcript.text = "transcribed"
+        fake_transcript.logprobs = None
+        with patch(
+            "journal.providers.transcription.openai.OpenAI",
+        ) as mock_openai_cls:
+            instance = mock_openai_cls.return_value
+            instance.audio.transcriptions.create.return_value = fake_transcript
+
+            files = {
+                "audio": (
+                    "rec.webm",
+                    io.BytesIO(b"fake webm data"),
+                    "audio/webm",
+                ),
+            }
+            response = factory_client.post(
+                "/api/entries/ingest/audio", files=files,
+            )
+
+        assert response.status_code == 202, (
+            f"unexpected status {response.status_code}: {response.text}"
+        )
+        data = response.json()
+        assert "job_id" in data
+        assert data["status"] == "queued"

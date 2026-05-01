@@ -93,15 +93,25 @@ you can keep your files human-readable without paying for the syntax in token bu
 
 ## Token budget
 
-| Pipeline           | Cap                   | Notes                                                    |
-|--------------------|-----------------------|----------------------------------------------------------|
-| OCR (Anthropic)    | ~no practical limit   | Cached per session via `cache_control`. See ocr-context. |
-| OCR (Gemini)       | ~no practical limit   | No caching, but generally fast.                          |
-| Whisper            | **200 tokens**        | Hard truncation at a token boundary.                     |
+| Pipeline                       | Cap                   | Notes                                                            |
+|--------------------------------|-----------------------|------------------------------------------------------------------|
+| OCR (Anthropic)                | ~no practical limit   | Cached per session via `cache_control`. See ocr-context.         |
+| OCR (Gemini)                   | ~no practical limit   | No caching, but generally fast.                                  |
+| Transcription (OpenAI)         | **200 tokens**        | Hard truncation at a token boundary. Whisper-style spelling bias.|
+| Transcription (Gemini)         | ~no practical limit   | Full glossary becomes the system instruction (not a `prompt`).   |
 
-If your composed context exceeds 200 tokens, the Whisper prompt truncates first and the
-remaining content (deeper into alphabetically-ordered files) is silently dropped from the
-voice pipeline only. The OCR pipeline still sees the full set.
+The 200-token cap **only applies to the OpenAI transcription adapters** (`gpt-4o-transcribe`,
+`gpt-4o-mini-transcribe`, `whisper-1`), because the OpenAI `/audio/transcriptions` endpoint
+exposes spelling bias only via the `prompt` parameter — which has a documented hard cap. If
+the composed context exceeds 200 tokens, the OpenAI prompt truncates first and the remaining
+content (deeper into alphabetically-ordered files) is silently dropped from the OpenAI voice
+pipeline only.
+
+The Gemini transcription adapter is different: it accepts a `system_instruction` and the full
+markdown glossary is wired into it verbatim, so it sees the entire context regardless of size.
+This is one of the reasons to prefer Gemini when the glossary is large enough that OpenAI
+truncation is biting (see `docs/transcription-providers.md`). The OCR pipeline always sees the
+full set.
 
 If you're hitting the cap, reorder by importance — name files like `01-people.md`,
 `02-places.md` to control which entries survive the truncation.
@@ -125,7 +135,7 @@ Two independent toggles control the two pipelines:
 
 - `OCR_CONTEXT_DIR` — must be set for either pipeline to use context files. Unset = no context.
 - `TRANSCRIPTION_CONTEXT_ENABLED` (default `true`) — set to `false` if you want OCR priming
-  but no Whisper prompt.
+  but no transcription priming. Affects whichever transcription provider is active.
 
 Both are also editable at runtime through the admin settings UI without a server restart for
 the **toggle** — but edits to the **files** still require a restart to be picked up by the
