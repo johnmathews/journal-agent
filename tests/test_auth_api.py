@@ -46,12 +46,40 @@ def user_repo(auth_db_conn: sqlite3.Connection) -> SQLiteUserRepository:
 
 @pytest.fixture
 def auth_config(tmp_path: Path) -> Config:
+    # The OCR / mood fields are populated so the admin reload endpoints
+    # can stand up real providers in `services_with_reload` below. The
+    # auth-only tests don't read these fields.
+    ctx = tmp_path / "ocr-context"
+    ctx.mkdir()
+    (ctx / "people.md").write_text("Alice Example — close friend\n", encoding="utf-8")
+
+    mood = tmp_path / "mood-dimensions.toml"
+    mood.write_text(
+        '[[dimension]]\n'
+        'name = "joy_sadness"\n'
+        'positive_pole = "joy"\n'
+        'negative_pole = "sadness"\n'
+        'scale_type = "bipolar"\n'
+        'notes = "Score how joyful or sad the entry feels."\n',
+        encoding="utf-8",
+    )
+
     return Config(
         db_path=tmp_path / "test_auth_api.db",
         secret_key="test-secret-key-for-tokens",
         registration_enabled=True,
         session_expiry_days=7,
         app_base_url="http://localhost:5173",
+        anthropic_api_key="test-anthropic-key",
+        openai_api_key="test-openai-key",
+        ocr_provider="anthropic",
+        ocr_dual_pass=False,
+        ocr_context_dir=ctx,
+        transcription_provider="openai",
+        transcription_model="whisper-1",
+        transcription_fallback_enabled=False,
+        enable_mood_scoring=True,
+        mood_dimensions_path=mood,
     )
 
 
@@ -79,11 +107,44 @@ def services(
     auth_config: Config,
     mock_email_service: MagicMock,
 ) -> dict[str, Any]:
+    # `ingestion` and `job_runner` are stubbed minimally — the admin
+    # reload endpoints only need the swap targets (`_ocr`,
+    # `_transcription`, `_mood_scoring`, `_repo`) to exist. The
+    # auth-only tests don't touch them.
+    from journal.providers.mood_scorer import AnthropicMoodScorer
+    from journal.providers.ocr import build_ocr_provider
+    from journal.providers.transcription import build_transcription_provider
+    from journal.services.mood_dimensions import load_mood_dimensions
+    from journal.services.mood_scoring import MoodScoringService
+
+    dims = load_mood_dimensions(auth_config.mood_dimensions_path)
+    repo = MagicMock()
+    mood_service = MoodScoringService(
+        scorer=AnthropicMoodScorer(
+            api_key=auth_config.anthropic_api_key,
+            model=auth_config.mood_scorer_model,
+            max_tokens=auth_config.mood_scorer_max_tokens,
+        ),
+        repository=repo,
+        dimensions=dims,
+    )
+
+    ingestion = MagicMock()
+    ingestion._ocr = build_ocr_provider(auth_config)
+    ingestion._transcription = build_transcription_provider(auth_config)
+    ingestion._mood_scoring = mood_service
+    ingestion._repo = repo
+
+    job_runner = MagicMock()
+    job_runner._mood_scoring = mood_service
+
     return {
         "auth_service": auth_service,
         "email_service": mock_email_service,
         "user_repo": user_repo,
         "config": auth_config,
+        "ingestion": ingestion,
+        "job_runner": job_runner,
     }
 
 
@@ -1099,3 +1160,149 @@ class TestServicesUnavailable:
                 json={"email": "a@b.com", "password": "test"},
             )
             assert resp.status_code == 503
+
+
+# ---------------------------------------------------------------------------
+# Admin: reload endpoints
+# ---------------------------------------------------------------------------
+
+
+class TestAdminReloadOcrContext:
+    PATH = "/api/admin/reload/ocr-context"
+
+    def test_unauthenticated_401(self, client: TestClient) -> None:
+        resp = client.post(self.PATH)
+        assert resp.status_code == 401
+
+    def test_non_admin_403(
+        self,
+        client: TestClient,
+        auth_service: AuthService,
+        user_repo: SQLiteUserRepository,
+    ) -> None:
+        user, session_id = _register_user(auth_service)
+        user_repo.update_user(user.id, email_verified=True)
+        session_id = auth_service.create_session(user.id)
+        resp = client.post(self.PATH, cookies={"session_id": session_id})
+        assert resp.status_code == 403
+        assert resp.json()["error"] == "forbidden"
+
+    def test_admin_200(
+        self,
+        client: TestClient,
+        auth_service: AuthService,
+        user_repo: SQLiteUserRepository,
+        services: dict[str, Any],
+    ) -> None:
+        _admin, session_id = _register_admin(auth_service, user_repo)
+        old_ocr = services["ingestion"]._ocr
+
+        resp = client.post(self.PATH, cookies={"session_id": session_id})
+        assert resp.status_code == 200
+
+        body = resp.json()
+        assert body["reloaded"] == "ocr-context"
+        assert body["provider"] == "anthropic"
+        assert body["context_files"] == 1
+        assert body["context_chars"] > 0
+        assert "reloaded_at" in body
+
+        # Endpoint actually rebound the attribute.
+        assert services["ingestion"]._ocr is not old_ocr
+
+
+class TestAdminReloadTranscriptionContext:
+    PATH = "/api/admin/reload/transcription-context"
+
+    def test_unauthenticated_401(self, client: TestClient) -> None:
+        resp = client.post(self.PATH)
+        assert resp.status_code == 401
+
+    def test_non_admin_403(
+        self,
+        client: TestClient,
+        auth_service: AuthService,
+        user_repo: SQLiteUserRepository,
+    ) -> None:
+        user, _ = _register_user(auth_service)
+        user_repo.update_user(user.id, email_verified=True)
+        session_id = auth_service.create_session(user.id)
+        resp = client.post(self.PATH, cookies={"session_id": session_id})
+        assert resp.status_code == 403
+
+    def test_admin_200(
+        self,
+        client: TestClient,
+        auth_service: AuthService,
+        user_repo: SQLiteUserRepository,
+        services: dict[str, Any],
+    ) -> None:
+        _admin, session_id = _register_admin(auth_service, user_repo)
+        old = services["ingestion"]._transcription
+
+        resp = client.post(self.PATH, cookies={"session_id": session_id})
+        assert resp.status_code == 200
+
+        body = resp.json()
+        assert body["reloaded"] == "transcription-context"
+        assert "stack" in body
+        assert services["ingestion"]._transcription is not old
+
+
+class TestAdminReloadMoodDimensions:
+    PATH = "/api/admin/reload/mood-dimensions"
+
+    def test_unauthenticated_401(self, client: TestClient) -> None:
+        resp = client.post(self.PATH)
+        assert resp.status_code == 401
+
+    def test_non_admin_403(
+        self,
+        client: TestClient,
+        auth_service: AuthService,
+        user_repo: SQLiteUserRepository,
+    ) -> None:
+        user, _ = _register_user(auth_service)
+        user_repo.update_user(user.id, email_verified=True)
+        session_id = auth_service.create_session(user.id)
+        resp = client.post(self.PATH, cookies={"session_id": session_id})
+        assert resp.status_code == 403
+
+    def test_admin_200(
+        self,
+        client: TestClient,
+        auth_service: AuthService,
+        user_repo: SQLiteUserRepository,
+        services: dict[str, Any],
+    ) -> None:
+        _admin, session_id = _register_admin(auth_service, user_repo)
+        old = services["ingestion"]._mood_scoring
+
+        resp = client.post(self.PATH, cookies={"session_id": session_id})
+        assert resp.status_code == 200
+
+        body = resp.json()
+        assert body["reloaded"] == "mood-dimensions"
+        assert body["dimension_count"] == 1
+        assert body["dimensions"] == ["joy_sadness"]
+        assert services["ingestion"]._mood_scoring is not old
+        # Both services swapped to the same fresh instance.
+        assert services["ingestion"]._mood_scoring is services["job_runner"]._mood_scoring
+
+    def test_admin_409_when_disabled(
+        self,
+        client: TestClient,
+        auth_service: AuthService,
+        user_repo: SQLiteUserRepository,
+        services: dict[str, Any],
+    ) -> None:
+        _admin, session_id = _register_admin(auth_service, user_repo)
+        # Flip the live config to disabled. `Config` is frozen, so
+        # rebuild and re-attach to the services dict.
+        from dataclasses import replace
+
+        services["config"] = replace(services["config"], enable_mood_scoring=False)
+
+        resp = client.post(self.PATH, cookies={"session_id": session_id})
+        assert resp.status_code == 409
+        assert resp.json()["error"] == "reload_unavailable"

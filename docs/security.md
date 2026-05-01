@@ -45,6 +45,9 @@ through any API endpoint or MCP tool. Isolation is enforced at the repository la
 vector store layer (ChromaDB `where` filter on `user_id` metadata).
 
 Admin users (`is_admin=true`) can see all jobs via the jobs API, but cannot access other users' entries or entities.
+Admins can also trigger live reloads of file-backed config — OCR glossary, transcription context, and mood dimensions
+— via `POST /api/admin/reload/{ocr-context,transcription-context,mood-dimensions}` (see `docs/configuration.md`).
+Non-admin sessions get 403; unauthenticated requests get 401.
 
 ### Session and API key storage
 

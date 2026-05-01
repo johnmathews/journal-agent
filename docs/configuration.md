@@ -147,6 +147,49 @@ export GOOGLE_API_KEY=...         # required only when OCR_PROVIDER=gemini
 docker compose up
 ```
 
+## Reloading file-backed config
+
+Three resources are read from disk only at startup and otherwise stay
+cached in memory: the OCR glossary directory (`OCR_CONTEXT_DIR/*.md`),
+the transcription context (same files, different formatter), and the
+mood-dimensions TOML (`MOOD_DIMENSIONS_PATH`). When you edit one of
+those files in production, the server will not see the change until you
+either restart it or hit one of these admin-only endpoints.
+
+| Endpoint                                       | Reloads                                                                                |
+| ---------------------------------------------- | -------------------------------------------------------------------------------------- |
+| `POST /api/admin/reload/ocr-context`           | OCR provider (rebuilds with the current glossary)                                      |
+| `POST /api/admin/reload/transcription-context` | Transcription provider stack (Whisper / Gemini, with current context)                  |
+| `POST /api/admin/reload/mood-dimensions`       | `MoodScoringService` (rebuilds from the TOML); 409 if `JOURNAL_ENABLE_MOOD_SCORING` is unset |
+
+All three require an admin session (or admin API key). They take no
+body, return a small JSON summary describing what was reloaded, and
+don't disturb in-flight requests — callers that already resolved the
+old provider keep using it until they finish; new requests pick up the
+fresh one. See `docs/security.md` for the auth posture.
+
+```bash
+# After editing OCR_CONTEXT_DIR/*.md
+curl -X POST -b "session_id=$ADMIN_SESSION" \
+  http://localhost:8400/api/admin/reload/ocr-context
+
+# After editing the same files but caring about transcription
+curl -X POST -b "session_id=$ADMIN_SESSION" \
+  http://localhost:8400/api/admin/reload/transcription-context
+
+# After editing MOOD_DIMENSIONS_PATH
+curl -X POST -b "session_id=$ADMIN_SESSION" \
+  http://localhost:8400/api/admin/reload/mood-dimensions
+```
+
+OCR and transcription deliberately do not share a reload — although both
+read `OCR_CONTEXT_DIR`, the formatter chains differ and a single reload
+would create an implicit coupling. After editing the glossary, hit both
+endpoints.
+
+The webapp surfaces these as buttons under `/admin/server` for users
+with `is_admin=true`.
+
 ## Media VM Deployment
 
 The `docker-compose.yml` is configured for the media VM stack:

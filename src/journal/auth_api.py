@@ -746,3 +746,83 @@ def register_admin_routes(
             update_kwargs,
         )
         return JSONResponse({"user": _user_to_dict(updated_user)})
+
+    # ── POST /api/admin/reload/{resource} ──────────────────────────────
+    #
+    # Three operator-triggered reloads for file-backed config that the
+    # server otherwise reads only at startup. Each returns the helper's
+    # summary dict; the operator uses it to confirm the reload landed.
+    # Admin-gated; no body required.
+
+    from journal.services.reload import (
+        reload_mood_dimensions,
+        reload_ocr_provider,
+        reload_transcription_provider,
+    )
+
+    def _reload_endpoint(
+        request: Request,
+        helper: Callable[[dict, Config], dict],
+        label: str,
+    ) -> JSONResponse:
+        """Common scaffolding for the three reload endpoints.
+
+        Resolves services + admin user, runs the helper, and converts
+        ``RuntimeError`` (raised by the mood-dimensions helper when the
+        feature is disabled) into a 409.
+        """
+        result = _services_or_503(services_getter)
+        if isinstance(result, JSONResponse):
+            return result
+        services = result
+
+        user = get_authenticated_user(request)
+        if not user.is_admin:
+            return JSONResponse(
+                {"error": "forbidden", "message": "Admin access required"},
+                status_code=403,
+            )
+
+        try:
+            summary = helper(services, services["config"])
+        except RuntimeError as e:
+            return JSONResponse(
+                {"error": "reload_unavailable", "message": str(e)},
+                status_code=409,
+            )
+
+        log.info(
+            "Admin user %d reloaded %s: %s", user.user_id, label, summary,
+        )
+        return JSONResponse(summary)
+
+    @mcp.custom_route(
+        "/api/admin/reload/ocr-context",
+        methods=["POST"],
+        name="api_admin_reload_ocr_context",
+    )
+    async def admin_reload_ocr_context(request: Request) -> JSONResponse:
+        """Re-read the OCR glossary directory and rebuild the OCR provider."""
+        return _reload_endpoint(request, reload_ocr_provider, "ocr-context")
+
+    @mcp.custom_route(
+        "/api/admin/reload/transcription-context",
+        methods=["POST"],
+        name="api_admin_reload_transcription_context",
+    )
+    async def admin_reload_transcription_context(request: Request) -> JSONResponse:
+        """Re-read the OCR glossary directory and rebuild the transcription stack."""
+        return _reload_endpoint(
+            request, reload_transcription_provider, "transcription-context",
+        )
+
+    @mcp.custom_route(
+        "/api/admin/reload/mood-dimensions",
+        methods=["POST"],
+        name="api_admin_reload_mood_dimensions",
+    )
+    async def admin_reload_mood_dimensions(request: Request) -> JSONResponse:
+        """Re-read the mood-dimensions TOML and rebuild the mood scoring service."""
+        return _reload_endpoint(
+            request, reload_mood_dimensions, "mood-dimensions",
+        )

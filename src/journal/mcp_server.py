@@ -207,41 +207,53 @@ def _init_services() -> dict:
         )
 
     def _on_runtime_setting_change(key: str, value: Any) -> None:
-        """Side-effect callback: rebuild OCR provider when relevant settings change."""
+        """Side-effect callback: rebuild OCR / mood / formatter / heading
+        detector when the matching runtime setting changes.
+
+        OCR and mood-scoring rebuilds delegate to the same helpers that
+        back the admin reload endpoints (`services/reload.py`). Keeping
+        both paths on a single implementation means a future fix to the
+        swap logic lands everywhere it needs to.
+        """
         if key in ("ocr_dual_pass", "ocr_provider"):
             from dataclasses import replace
 
-            # Build a temporary Config with the runtime value overridden
-            # so build_ocr_provider sees the new setting.
-            patched = replace(config, **{key: value})
-            # Also apply the other OCR-related runtime setting
+            from journal.services.reload import reload_ocr_provider
+
+            # Build a Config with both OCR runtime values overlaid so
+            # the helper sees the freshly toggled setting.
             other_key = "ocr_dual_pass" if key == "ocr_provider" else "ocr_provider"
-            patched = replace(patched, **{other_key: runtime_settings.get(other_key)})
-            new_ocr = build_ocr_provider(patched)
-            ingestion_service._ocr = new_ocr
-            log.info("OCR provider rebuilt due to runtime setting change: %s=%r", key, value)
+            patched = replace(
+                config,
+                **{key: value, other_key: runtime_settings.get(other_key)},
+            )
+            reload_ocr_provider(
+                {"ingestion": ingestion_service}, patched,
+            )
+            log.info(
+                "OCR provider rebuilt due to runtime setting change: %s=%r",
+                key,
+                value,
+            )
         elif key == "preprocess_images":
             ingestion_service._preprocess_images = value
             log.info("Preprocessing %s via runtime settings", "enabled" if value else "disabled")
         elif key == "enable_mood_scoring":
             if value:
-                from journal.providers.mood_scorer import AnthropicMoodScorer
-                from journal.services.mood_dimensions import load_mood_dimensions
-                from journal.services.mood_scoring import MoodScoringService
+                from dataclasses import replace
 
-                dims = load_mood_dimensions(config.mood_dimensions_path)
-                scorer = AnthropicMoodScorer(
-                    api_key=config.anthropic_api_key,
-                    model=config.mood_scorer_model,
-                    max_tokens=config.mood_scorer_max_tokens,
+                from journal.services.reload import reload_mood_dimensions
+
+                # The runtime flip is the source of truth here — the
+                # startup config may still say `enable_mood_scoring=False`.
+                # Patch it on so the helper doesn't refuse to build.
+                reload_mood_dimensions(
+                    {
+                        "ingestion": ingestion_service,
+                        "job_runner": job_runner,
+                    },
+                    replace(config, enable_mood_scoring=True),
                 )
-                svc = MoodScoringService(
-                    scorer=scorer,
-                    repository=repo,
-                    dimensions=dims,
-                )
-                ingestion_service._mood_scoring = svc
-                job_runner._mood_scoring = svc
                 log.info("Mood scoring enabled via runtime settings")
             else:
                 ingestion_service._mood_scoring = None
