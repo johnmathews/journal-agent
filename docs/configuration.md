@@ -82,10 +82,10 @@ reference and `docs/ocr-context.md` for the OCR-side mechanism.
 | ------------------------------ | ------------------ | ------------------------------------------------------------------------------------------------------------------------------------------ |
 | `TRANSCRIPT_FORMATTING`        | `false`            | Use Anthropic Haiku to insert paragraph breaks into voice transcripts. Word preservation is enforced; failures fall back to raw text.      |
 | `TRANSCRIPT_FORMATTER_MODEL`   | `claude-haiku-4-5` | Model used for paragraph formatting.                                                                                                       |
-| `DATE_HEADING_DETECTION`       | `true`             | When the transcript or OCR text begins with a date (numeric, written, or relative like "today"), lift it into a markdown `# ` heading.     |
+| `DATE_HEADING_DETECTION`       | `true`             | When the transcript or OCR text begins with a date (numeric, written, or relative like "today"), strip it from the body. The entry's title already shows the date, so a leading date in the body is just a redundant duplicate. |
 | `DATE_HEADING_MODEL`           | `claude-haiku-4-5` | Model used for heading detection.                                                                                                          |
 
-`raw_text` is preserved verbatim through both steps — the heading and any LLM-inserted paragraph breaks land only on
+`raw_text` is preserved verbatim through both steps — the date strip and any LLM-inserted paragraph breaks land only on
 `final_text`. `final_text` is what the chunker, embedder, and search index see.
 
 ## Models (defaults, overridable via env vars or config.py)
