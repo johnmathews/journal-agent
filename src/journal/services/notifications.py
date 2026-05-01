@@ -60,6 +60,13 @@ TOPICS: list[dict[str, Any]] = [
         "default": True,
     },
     {
+        "key": "notif_job_success_save_entry",
+        "label": "Entry update succeeded",
+        "group": "success",
+        "admin_only": False,
+        "default": True,
+    },
+    {
         "key": "notif_job_retrying",
         "label": "Job retrying (backoff started)",
         "group": "failure",
@@ -69,6 +76,13 @@ TOPICS: list[dict[str, Any]] = [
     {
         "key": "notif_job_failed",
         "label": "Job failed permanently",
+        "group": "failure",
+        "admin_only": False,
+        "default": True,
+    },
+    {
+        "key": "notif_job_failed_save_entry",
+        "label": "Entry update failed",
         "group": "failure",
         "admin_only": False,
         "default": True,
@@ -90,10 +104,21 @@ TOPICS: list[dict[str, Any]] = [
 ]
 
 # Map job_type -> topic key for success notifications.
-# Only ingestion jobs have user-facing success topics.
+# Ingestion and save-entry-pipeline have user-facing success topics;
+# any job type not listed here always notifies (e.g. ad-hoc batch
+# entity_extraction or mood_backfill).
 _SUCCESS_TOPIC_MAP: dict[str, str] = {
     "ingest_images": "notif_job_success_ingest_images",
     "ingest_audio": "notif_job_success_ingest_audio",
+    "save_entry_pipeline": "notif_job_success_save_entry",
+}
+
+# Map parent_job_type -> topic key for pipeline-failure notifications.
+# Save-entry pipeline failures have their own dedicated toggle so the
+# user can mute "edit triggered entity-extraction failure" without
+# silencing every other job-failure notification (and vice versa).
+_PIPELINE_FAILURE_TOPIC_MAP: dict[str, str] = {
+    "save_entry_pipeline": "notif_job_failed_save_entry",
 }
 
 # Human-readable labels for job types.
@@ -344,7 +369,10 @@ class PushoverNotificationService:
         job failed.
         """
         try:
-            if not self._is_topic_enabled(user_id, "notif_job_failed"):
+            topic_key = _PIPELINE_FAILURE_TOPIC_MAP.get(
+                parent_job_type, "notif_job_failed",
+            )
+            if not self._is_topic_enabled(user_id, topic_key):
                 return
 
             user_key, app_token = self._resolve_credentials(user_id)

@@ -175,6 +175,58 @@ class TestNotifyJobSuccess:
         mock_urlopen.assert_called_once()
 
     @patch("journal.services.notifications.urllib.request.urlopen")
+    def test_save_entry_pipeline_success_gated_by_dedicated_topic(
+        self, mock_urlopen: MagicMock, svc: PushoverNotificationService,
+        mock_user_repo: MagicMock,
+    ) -> None:
+        """The save-entry pipeline (entity extraction + mood analysis +
+        embedding reprocessing after an edit) gets its own dedicated
+        success toggle, separate from ingestion success notifications."""
+        def pref_side_effect(user_id: int, key: str):
+            if key == "notif_job_success_save_entry":
+                return False
+            return None
+
+        mock_user_repo.get_preference.side_effect = pref_side_effect
+        svc.notify_job_success(
+            1, "save_entry_pipeline", {"entry_id": 42, "chunk_count": 3},
+        )
+        mock_urlopen.assert_not_called()
+
+    @patch("journal.services.notifications.urllib.request.urlopen")
+    def test_save_entry_pipeline_success_fires_when_enabled(
+        self, mock_urlopen: MagicMock, svc: PushoverNotificationService,
+        mock_user_repo: MagicMock,
+    ) -> None:
+        """When the save-entry success topic is left at default (True),
+        the notification fires after a save."""
+        mock_urlopen.return_value = _make_urlopen_response({"status": 1})
+        # Default: get_preference returns None → topic uses default (True)
+        svc.notify_job_success(
+            1, "save_entry_pipeline", {"entry_id": 42, "chunk_count": 3},
+        )
+        mock_urlopen.assert_called_once()
+
+    @patch("journal.services.notifications.urllib.request.urlopen")
+    def test_save_entry_pipeline_success_independent_of_ingest_topics(
+        self, mock_urlopen: MagicMock, svc: PushoverNotificationService,
+        mock_user_repo: MagicMock,
+    ) -> None:
+        """Disabling image ingestion success must not silence save-entry
+        pipeline success (or vice versa) — the toggles are independent."""
+        def pref_side_effect(user_id: int, key: str):
+            if key == "notif_job_success_ingest_images":
+                return False
+            return None
+
+        mock_user_repo.get_preference.side_effect = pref_side_effect
+        mock_urlopen.return_value = _make_urlopen_response({"status": 1})
+        svc.notify_job_success(
+            1, "save_entry_pipeline", {"entry_id": 42, "chunk_count": 3},
+        )
+        mock_urlopen.assert_called_once()
+
+    @patch("journal.services.notifications.urllib.request.urlopen")
     def test_no_credentials_skips(
         self, mock_urlopen: MagicMock, mock_user_repo: MagicMock,
     ) -> None:
@@ -310,7 +362,9 @@ class TestGetTopicsForUser:
     ) -> None:
         topics = svc.get_topics_for_user(1, is_admin=False)
         assert all(not t["admin_only"] for t in topics)
-        assert len(topics) == 4  # 2 success + 2 failure
+        # 3 success (ingest_images, ingest_audio, save_entry) +
+        # 3 failure (job_retrying, job_failed, job_failed_save_entry)
+        assert len(topics) == 6
 
     def test_admin_sees_all_topics(
         self, svc: PushoverNotificationService,
@@ -581,13 +635,16 @@ class TestNotifyPipelineFailed:
             # High priority
             assert "priority=1" in posted_data
 
-    def test_skips_when_topic_disabled(
+    def test_skips_when_save_entry_failure_topic_disabled(
         self,
         svc: PushoverNotificationService,
         mock_user_repo: MagicMock,
     ) -> None:
+        """Save-entry pipeline failures are gated by their own dedicated
+        topic — toggling it off mutes save-entry failures specifically,
+        leaving other failure notifications alone."""
         def pref_side_effect(user_id: int, key: str):
-            if key == "notif_job_failed":
+            if key == "notif_job_failed_save_entry":
                 return False
             return None
 
@@ -595,6 +652,26 @@ class TestNotifyPipelineFailed:
         with patch("urllib.request.urlopen") as mock_urlopen:
             svc.notify_pipeline_failed(1, "save_entry_pipeline", "body")
             mock_urlopen.assert_not_called()
+
+    def test_save_entry_failure_not_gated_by_global_failed_topic(
+        self,
+        svc: PushoverNotificationService,
+        mock_user_repo: MagicMock,
+    ) -> None:
+        """Disabling the global notif_job_failed must not silence
+        save-entry pipeline failures — those have their own dedicated
+        toggle. (Otherwise the user could silence save-entry pipeline
+        failures only by silencing every job failure.)"""
+        def pref_side_effect(user_id: int, key: str):
+            if key == "notif_job_failed":
+                return False
+            return None  # save-entry-specific topic stays at default (True)
+
+        mock_user_repo.get_preference.side_effect = pref_side_effect
+        with patch("urllib.request.urlopen") as mock_urlopen:
+            mock_urlopen.return_value = _make_urlopen_response({"status": 1})
+            svc.notify_pipeline_failed(1, "save_entry_pipeline", "body")
+            mock_urlopen.assert_called_once()
 
     def test_skips_when_no_credentials(
         self,
