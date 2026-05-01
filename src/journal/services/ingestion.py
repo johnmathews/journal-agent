@@ -247,12 +247,14 @@ class IngestionService:
         if extracted:
             date = extracted
 
-        # Optional date-heading detection — lift a leading date in the OCR
-        # text into a markdown heading on final_text. raw_text is left
-        # verbatim so the OCR overlay/audit trail still points at exactly
-        # what the model returned.
+        # Optional date-heading detection. When a leading date is found
+        # we strip it from the body entirely — the entry's title already
+        # shows the date, so reproducing it as a markdown heading or
+        # leaving it as the first line would just be a redundant duplicate
+        # of the title. raw_text is left verbatim so the OCR overlay /
+        # audit trail still points at exactly what the model returned.
         det = self._detect_heading(raw_text, date)
-        final_text = det.to_text() if det.has_heading else None
+        final_text = det.body if det.has_heading else None
 
         # Store entry (final_text defaults to raw_text when None)
         word_count = len(raw_text.split())
@@ -301,22 +303,18 @@ class IngestionService:
         if not raw_text.strip():
             raise ValueError("Transcription produced no text from audio")
 
-        # Lift a leading date into a markdown heading (no-op when the
-        # detector is disabled or returns no heading). The formatter is
-        # then applied to the BODY only, so its word-preservation
-        # contract is unaffected by heading characters.
+        # Detect a leading date and strip it from the body when found —
+        # the entry's title already shows the date, so a duplicate at the
+        # start of the body would just be redundant. The formatter then
+        # runs on the BODY only, so its word-preservation contract is
+        # unaffected by any heading characters that no longer appear.
         det = self._detect_heading(raw_text, date)
         formatted_body = self._maybe_format_transcript(det.body) if det.body else det.body
-        from journal.services.heading_detector import HeadingDetectionResult
-
-        final_text = HeadingDetectionResult(
-            heading_text=det.heading_text, body=formatted_body
-        ).to_text()
 
         word_count = len(raw_text.split())
         entry = self._repo.create_entry(
             date, source_type, raw_text, word_count, user_id=user_id,
-            final_text=final_text if final_text != raw_text else None,
+            final_text=formatted_body if formatted_body != raw_text else None,
         )
         self._store_source_file(entry.id, f"voice_{date}", media_type, file_hash)
 
@@ -415,19 +413,16 @@ class IngestionService:
         # Heading detection runs against the combined raw text — the
         # date typically appears at the very start of the first
         # recording, so this catches it the same way single-voice does.
-        # Formatter then operates on the body only.
+        # When a date is found we strip it entirely (the entry's title
+        # is already the date — a markdown heading would just duplicate
+        # it). Formatter then operates on the body only.
         det = self._detect_heading(raw_text, date)
         formatted_body = self._maybe_format_transcript(det.body) if det.body else det.body
-        from journal.services.heading_detector import HeadingDetectionResult
-
-        final_text = HeadingDetectionResult(
-            heading_text=det.heading_text, body=formatted_body
-        ).to_text()
 
         word_count = len(raw_text.split())
         entry = self._repo.create_entry(
             date, source_type, raw_text, word_count, user_id=user_id,
-            final_text=final_text if final_text != raw_text else None,
+            final_text=formatted_body if formatted_body != raw_text else None,
         )
 
         # Store source file records for each recording
@@ -771,9 +766,12 @@ class IngestionService:
         if extracted:
             date = extracted
 
-        # Optional date-heading detection — same as single-page OCR.
+        # Optional date-heading detection — same as single-page OCR. A
+        # detected leading date is stripped from the body entirely, never
+        # promoted to a markdown heading: the entry's title already shows
+        # the date, so a heading would just duplicate the title.
         det = self._detect_heading(combined_text, date)
-        final_text = det.to_text() if det.has_heading else None
+        final_text = det.body if det.has_heading else None
 
         # Create single entry
         entry = self._repo.create_entry(

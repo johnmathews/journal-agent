@@ -1041,7 +1041,7 @@ class TestHeadingDetection:
             heading_detector=mock_detector,
         )
 
-    def test_voice_with_detected_heading_writes_heading_to_final_text_only(
+    def test_voice_with_detected_heading_strips_date_from_final_text(
         self, detection_service, mock_transcription, mock_detector,
     ):
         from journal.services.heading_detector import HeadingDetectionResult
@@ -1057,8 +1057,14 @@ class TestHeadingDetection:
             b"audio", "audio/webm", "2026-04-28",
         )
 
+        # raw_text preserves the verbatim transcription (audit trail).
         assert entry.raw_text == raw
-        assert entry.final_text == "# 28 April 2026\n\nToday I went for a long run."
+        # final_text drops the leading date entirely — no markdown heading,
+        # because the entry's title is already the date and a duplicate
+        # heading would just be redundant.
+        assert entry.final_text == "Today I went for a long run."
+        assert "28 April 2026" not in entry.final_text
+        assert not entry.final_text.startswith("#")
         mock_detector.detect.assert_called_once_with(raw, entry_date="2026-04-28")
 
     def test_voice_with_no_detected_heading_leaves_final_text_unchanged(
@@ -1079,7 +1085,7 @@ class TestHeadingDetection:
         assert entry.raw_text == raw
         assert entry.final_text == raw
 
-    def test_ocr_with_detected_heading_writes_heading_to_final_text_only(
+    def test_ocr_with_detected_heading_strips_date_from_final_text(
         self, detection_service, mock_ocr, mock_detector,
     ):
         from journal.services.heading_detector import HeadingDetectionResult
@@ -1096,11 +1102,10 @@ class TestHeadingDetection:
         )
 
         assert entry.raw_text == ocr_text
-        assert entry.final_text == (
-            "# 28 April 2026\n\nWoke up early and watched the sunrise."
-        )
+        assert entry.final_text == "Woke up early and watched the sunrise."
+        assert not entry.final_text.startswith("#")
 
-    def test_multi_page_ocr_with_detected_heading(
+    def test_multi_page_ocr_with_detected_heading_strips_date(
         self, detection_service, mock_ocr, mock_detector,
     ):
         from journal.services.heading_detector import HeadingDetectionResult
@@ -1119,8 +1124,10 @@ class TestHeadingDetection:
             "2026-04-28",
         )
 
-        assert entry.final_text.startswith("# 28 April 2026\n\n")
-        # raw_text combines pages with single \n separator (existing behaviour)
+        # final_text contains the body verbatim, with no markdown heading.
+        assert entry.final_text == "First page text.\nSecond page text."
+        assert not entry.final_text.startswith("#")
+        # raw_text is the verbatim combined OCR text (still contains the date).
         assert "April 28th" in entry.raw_text
         assert "Second page text." in entry.raw_text
 
@@ -1143,9 +1150,8 @@ class TestHeadingDetection:
             "2026-04-28",
         )
 
-        assert entry.final_text == (
-            "# 28 April 2026\n\nFirst clip.\n\nSecond clip."
-        )
+        assert entry.final_text == "First clip.\n\nSecond clip."
+        assert not entry.final_text.startswith("#")
 
     def test_detector_exception_falls_back_to_no_heading(
         self, detection_service, mock_transcription, mock_detector,
@@ -1212,6 +1218,8 @@ class TestHeadingDetection:
         formatter.format_paragraphs.assert_called_once_with(
             "Hello world. Goodbye world."
         )
-        assert entry.final_text == (
-            "# 28 April 2026\n\nHello world.\n\nGoodbye world."
-        )
+        # The leading date is stripped entirely; final_text is just the
+        # formatter's output on the body — no markdown heading.
+        assert entry.final_text == "Hello world.\n\nGoodbye world."
+        assert not entry.final_text.startswith("#")
+
