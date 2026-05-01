@@ -138,6 +138,41 @@ class TestOcrDualPass:
         assert Config().ocr_dual_pass is True
 
 
+class TestHybridSearch:
+    def test_defaults(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        for var in (
+            "HYBRID_BM25_CANDIDATES",
+            "HYBRID_DENSE_CANDIDATES",
+            "HYBRID_FUSION_TOP_M",
+            "HYBRID_RRF_K",
+            "HYBRID_RERANKER",
+            "RERANKER_MODEL",
+        ):
+            monkeypatch.delenv(var, raising=False)
+        c = Config()
+        assert c.hybrid_bm25_candidates == 50
+        assert c.hybrid_dense_candidates == 50
+        assert c.hybrid_fusion_top_m == 30
+        assert c.hybrid_rrf_k == 60
+        assert c.hybrid_reranker == "anthropic"
+        assert c.reranker_model == "claude-haiku-4-5"
+
+    def test_overrides(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setenv("HYBRID_BM25_CANDIDATES", "20")
+        monkeypatch.setenv("HYBRID_DENSE_CANDIDATES", "40")
+        monkeypatch.setenv("HYBRID_FUSION_TOP_M", "15")
+        monkeypatch.setenv("HYBRID_RRF_K", "30")
+        monkeypatch.setenv("HYBRID_RERANKER", "none")
+        monkeypatch.setenv("RERANKER_MODEL", "claude-sonnet-4-6")
+        c = Config()
+        assert c.hybrid_bm25_candidates == 20
+        assert c.hybrid_dense_candidates == 40
+        assert c.hybrid_fusion_top_m == 15
+        assert c.hybrid_rrf_k == 30
+        assert c.hybrid_reranker == "none"
+        assert c.reranker_model == "claude-sonnet-4-6"
+
+
 def _clean_transcription_env(monkeypatch: pytest.MonkeyPatch) -> None:
     for var in (
         "TRANSCRIPTION_PROVIDER",
