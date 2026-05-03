@@ -161,12 +161,13 @@ class HybridSearchService:
         limit: int = 10,
         offset: int = 0,
         user_id: int | None = None,
+        sort: str = "relevance",
     ) -> list[SearchResult]:
         """Run the hybrid pipeline and return paginated results."""
         return self._timed(
             "hybrid_search",
             lambda: self._search_impl(
-                query, start_date, end_date, limit, offset, user_id
+                query, start_date, end_date, limit, offset, user_id, sort
             ),
         )
 
@@ -178,6 +179,7 @@ class HybridSearchService:
         limit: int,
         offset: int,
         user_id: int | None,
+        sort: str,
     ) -> list[SearchResult]:
         log.info(
             "Hybrid search: %r (limit=%d, offset=%d)", query, limit, offset
@@ -283,6 +285,15 @@ class HybridSearchService:
                     snippet=snippet,
                 )
             )
+
+        # Optional re-ordering by entry_date. Default ("relevance") keeps
+        # the rerank score order. Date sorts apply across the full reranked
+        # set before the offset/limit slice so pagination is stable.
+        if sort == "date_desc":
+            results.sort(key=lambda r: r.entry_date, reverse=True)
+        elif sort == "date_asc":
+            results.sort(key=lambda r: r.entry_date)
+
         return results[offset : offset + limit]
 
     def _dense_search(

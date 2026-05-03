@@ -1786,6 +1786,18 @@ def register_api_routes(
         except ValueError:
             offset = 0
 
+        sort = request.query_params.get("sort", "relevance")
+        if sort not in ("relevance", "date_desc", "date_asc"):
+            return JSONResponse(
+                {
+                    "error": "invalid_sort",
+                    "message": (
+                        "'sort' must be one of: relevance, date_desc, date_asc"
+                    ),
+                },
+                status_code=400,
+            )
+
         try:
             results = query_svc.search_entries(
                 query=q,
@@ -1794,6 +1806,7 @@ def register_api_routes(
                 limit=limit,
                 offset=offset,
                 user_id=user_id,
+                sort=sort,
             )
         except sqlite3.OperationalError as e:
             # FTS5 raises this on malformed queries (unterminated
@@ -1822,6 +1835,7 @@ def register_api_routes(
                 "query": q,
                 "limit": limit,
                 "offset": offset,
+                "sort": sort,
                 "reranker": reranker_name,
                 "items": [_search_result_dict(r) for r in results],
             }

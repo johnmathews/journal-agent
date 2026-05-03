@@ -1048,6 +1048,49 @@ class TestSearch:
         assert response.status_code == 200
         assert response.json()["limit"] == 10
 
+    def test_search_sort_invalid_returns_400(
+        self, client: TestClient
+    ) -> None:
+        response = client.get("/api/search?q=anything&sort=bogus")
+        assert response.status_code == 400
+        assert response.json()["error"] == "invalid_sort"
+
+    def test_search_sort_default_is_relevance(
+        self, client: TestClient, repo: SQLiteEntryRepository
+    ) -> None:
+        repo.create_entry("2026-03-22", "photo", "Vienna entry", 2)
+        response = client.get("/api/search?q=Vienna")
+        assert response.status_code == 200
+        assert response.json()["sort"] == "relevance"
+
+    def test_search_sort_date_desc(
+        self, client: TestClient, repo: SQLiteEntryRepository
+    ) -> None:
+        # Three entries each containing the same term — relevance order
+        # is reranker-dependent, but date_desc must be deterministic.
+        repo.create_entry("2026-01-15", "photo", "Atlas in January", 4)
+        repo.create_entry("2026-03-15", "photo", "Atlas in March", 4)
+        repo.create_entry("2026-02-15", "photo", "Atlas in February", 4)
+        response = client.get("/api/search?q=Atlas&sort=date_desc")
+        assert response.status_code == 200
+        data = response.json()
+        assert data["sort"] == "date_desc"
+        dates = [item["entry_date"] for item in data["items"]]
+        assert dates == ["2026-03-15", "2026-02-15", "2026-01-15"]
+
+    def test_search_sort_date_asc(
+        self, client: TestClient, repo: SQLiteEntryRepository
+    ) -> None:
+        repo.create_entry("2026-01-15", "photo", "Atlas in January", 4)
+        repo.create_entry("2026-03-15", "photo", "Atlas in March", 4)
+        repo.create_entry("2026-02-15", "photo", "Atlas in February", 4)
+        response = client.get("/api/search?q=Atlas&sort=date_asc")
+        assert response.status_code == 200
+        data = response.json()
+        assert data["sort"] == "date_asc"
+        dates = [item["entry_date"] for item in data["items"]]
+        assert dates == ["2026-01-15", "2026-02-15", "2026-03-15"]
+
     def test_search_returns_chunk_offsets_for_dense_hit(
         self,
         search_client: tuple[TestClient, object],

@@ -89,6 +89,7 @@ class QueryService:
         limit: int = 10,
         offset: int = 0,
         user_id: int | None = None,
+        sort: str = "relevance",
     ) -> list[SearchResult]:
         """Hybrid search across journal entries.
 
@@ -101,6 +102,10 @@ class QueryService:
         - `matching_chunks` if dense retrieval contributed.
         Either or both may be present. The list is ordered by post-
         rerank score descending, then sliced by `offset` / `limit`.
+
+        `sort` overrides the final ordering: "relevance" (default)
+        preserves the rerank order; "date_desc" / "date_asc" sort by
+        `entry_date` before the slice.
         """
         return self._hybrid.search(
             query=query,
@@ -109,6 +114,7 @@ class QueryService:
             limit=limit,
             offset=offset,
             user_id=user_id,
+            sort=sort,
         )
 
     def get_entries_by_date(
