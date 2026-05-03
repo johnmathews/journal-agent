@@ -400,28 +400,38 @@ class HybridSearchService:
         end_date: str | None,
         user_id: int | None,
     ) -> list[_DenseChunk]:
-        """Embed the query and run a Chroma search with date / user filters."""
+        """Embed the query and run a Chroma search with user filter,
+        then drop chunks outside the date range in Python.
+
+        Date filtering used to live in the Chroma `where` clause as
+        `$gte` / `$lte` on the `entry_date` string metadata. Recent
+        ChromaDB validates `$gte` / `$lte` operands as numeric and
+        rejects strings outright, so dense retrieval blew up in prod
+        whenever a date filter was set. We over-fetch unfiltered (still
+        bounded by `dense_candidates`) and filter post-hoc against the
+        chunk's `entry_date` metadata, which the BM25 path already
+        does in SQL anyway.
+        """
         query_embedding = self._embeddings.embed_query(query)
-        conditions: list[dict] = []
-        if user_id is not None:
-            conditions.append({"user_id": user_id})
-        if start_date:
-            conditions.append({"entry_date": {"$gte": start_date}})
-        if end_date:
-            conditions.append({"entry_date": {"$lte": end_date}})
-        where: dict | None
-        if not conditions:
-            where = None
-        elif len(conditions) == 1:
-            where = conditions[0]
-        else:
-            where = {"$and": conditions}
+        where = {"user_id": user_id} if user_id is not None else None
 
         raw = self._vector_store.search(
             query_embedding=query_embedding,
             limit=self._config.dense_candidates,
             where=where,
         )
+
+        def in_range(metadata: dict) -> bool:
+            entry_date = metadata.get("entry_date")
+            if not isinstance(entry_date, str):
+                # No date metadata — keep it; the entry-resolution pass
+                # in `_search_impl` will drop it if SQLite says it's
+                # out of range or the user can't see it.
+                return True
+            if start_date and entry_date < start_date:
+                return False
+            return not (end_date and entry_date > end_date)
+
         return [
             _DenseChunk(
                 entry_id=r.entry_id,
@@ -430,6 +440,7 @@ class HybridSearchService:
                 similarity=1.0 - r.distance,
             )
             for r in raw
+            if in_range(r.metadata)
         ]
 
     def _candidate_text(self, entry: Entry, snippet: str | None) -> str:

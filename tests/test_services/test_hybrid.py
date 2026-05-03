@@ -443,6 +443,163 @@ class TestHybridPipeline:
         assert snap.by_type["hybrid_search"].count == 1
 
 
+class TestDenseDateFiltering:
+    """Date filters must not be passed as `$gte` / `$lte` string operands
+    to the vector store — real ChromaDB rejects strings for those numeric
+    operators (validate_where in chromadb 0.5+) with::
+
+        ValueError: Expected operand value to be an int or a float for
+        operator $gte, got 2025-11-04 in query.
+
+    Our InMemoryVectorStore is permissive, so the bug only fires in
+    prod. We guard against it by asserting the structure of the
+    `where` clause that reaches the vector store.
+    """
+
+    def test_dense_where_clause_omits_string_range_operators(
+        self, repo, vector_store, mock_embeddings,
+    ) -> None:
+        from unittest.mock import patch
+
+        e = repo.create_entry("2026-03-22", "photo", "Vienna day", 4)
+        vector_store.add_entry(
+            entry_id=e.id, chunks=["Vienna day"],
+            embeddings=[[1.0, 0.0, 0.0]],
+            metadata={"entry_date": "2026-03-22", "user_id": 1},
+        )
+        mock_embeddings.embed_query.return_value = [1.0, 0.0, 0.0]
+        svc = _make_service(repo, vector_store, mock_embeddings)
+
+        captured: list[dict | None] = []
+        original_search = vector_store.search
+
+        def spy(*args, **kwargs):
+            captured.append(kwargs.get("where"))
+            return original_search(*args, **kwargs)
+
+        with patch.object(vector_store, "search", side_effect=spy):
+            svc.search(
+                "Vienna",
+                start_date="2025-11-04",
+                end_date="2026-05-04",
+                user_id=1,
+            )
+
+        assert captured, "vector_store.search was never called"
+        for where in captured:
+            assert _no_string_range_operators(where), (
+                f"Where clause contained $gte/$lte with string operand: "
+                f"{where!r}"
+            )
+
+    def test_dense_search_fails_loudly_on_chroma_style_validation(
+        self, repo, vector_store, mock_embeddings,
+    ) -> None:
+        """Simulate real ChromaDB validation. If the dense path passes
+        a string operand to $gte/$lte, this test fails with the same
+        ValueError the production server emitted."""
+        e = repo.create_entry("2026-03-22", "photo", "Vienna day", 4)
+        vector_store.add_entry(
+            entry_id=e.id, chunks=["Vienna day"],
+            embeddings=[[1.0, 0.0, 0.0]],
+            metadata={"entry_date": "2026-03-22", "user_id": 1},
+        )
+        mock_embeddings.embed_query.return_value = [1.0, 0.0, 0.0]
+        svc = _make_service(repo, vector_store, mock_embeddings)
+
+        original_search = vector_store.search
+
+        def chroma_strict_search(*args, **kwargs):
+            _validate_chroma_where(kwargs.get("where"))
+            return original_search(*args, **kwargs)
+
+        from unittest.mock import patch
+
+        with patch.object(vector_store, "search", side_effect=chroma_strict_search):
+            # Should not raise — the bug is the date filters reaching
+            # Chroma as $gte/$lte string operands.
+            results = svc.search(
+                "Vienna",
+                start_date="2025-11-04",
+                end_date="2026-05-04",
+                user_id=1,
+            )
+        assert isinstance(results, list)
+
+    def test_dense_results_outside_date_range_are_dropped(
+        self, repo, vector_store, mock_embeddings,
+    ) -> None:
+        """Filtering happens post-fetch; entries outside the range must
+        not appear in the final results, even if dense retrieval
+        returned them."""
+        in_range = repo.create_entry(
+            "2026-03-22", "photo", "Atlas in March", 4,
+        )
+        out_of_range = repo.create_entry(
+            "2025-06-01", "photo", "Atlas last summer", 4,
+        )
+        for entry, date in (
+            (in_range, "2026-03-22"),
+            (out_of_range, "2025-06-01"),
+        ):
+            vector_store.add_entry(
+                entry_id=entry.id, chunks=[entry.raw_text],
+                embeddings=[[1.0, 0.0, 0.0]],
+                metadata={"entry_date": date, "user_id": 1},
+            )
+        mock_embeddings.embed_query.return_value = [1.0, 0.0, 0.0]
+        svc = _make_service(repo, vector_store, mock_embeddings)
+
+        results = svc.search(
+            "Atlas", start_date="2026-01-01", end_date="2026-12-31",
+            user_id=1,
+        )
+        ids = {r.entry_id for r in results}
+        assert in_range.id in ids
+        assert out_of_range.id not in ids
+
+
+def _no_string_range_operators(where: dict | None) -> bool:
+    """Recursively check that no $gte / $lte / $gt / $lt operator has a
+    non-numeric operand. Used by tests to mirror Chroma's behaviour."""
+    if where is None:
+        return True
+    if isinstance(where, dict):
+        for k, v in where.items():
+            if k in ("$gte", "$lte", "$gt", "$lt") and not isinstance(
+                v, (int, float),
+            ):
+                return False
+            if not _no_string_range_operators(v):
+                return False
+    elif isinstance(where, list):
+        for item in where:
+            if not _no_string_range_operators(item):
+                return False
+    return True
+
+
+def _validate_chroma_where(where: dict | None) -> None:
+    """Minimal mirror of `chromadb.api.types.validate_where`. Raises the
+    same ValueError that prod hit when a string is passed to a numeric
+    range operator."""
+    if where is None:
+        return
+    if isinstance(where, dict):
+        for k, v in where.items():
+            if k in ("$gte", "$lte", "$gt", "$lt") and not isinstance(
+                v, (int, float),
+            ):
+                raise ValueError(
+                    f"Expected operand value to be an int or a float for "
+                    f"operator {k}, got {v} in query."
+                )
+            _validate_chroma_where(v)
+    elif isinstance(where, list):
+        for item in where:
+            _validate_chroma_where(item)
+
+
 class TestResultCacheUnit:
     """Direct tests of the LRU+TTL cache primitive."""
 
