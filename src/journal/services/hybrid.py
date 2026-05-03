@@ -21,7 +21,9 @@ matters.
 from __future__ import annotations
 
 import logging
+import threading
 import time
+from collections import OrderedDict
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, TypeVar
 
@@ -93,6 +95,24 @@ def rrf_fuse(
     return sorted(scores.items(), key=lambda kv: kv[1], reverse=True)
 
 
+def _apply_sort_and_slice(
+    results: list[SearchResult], sort: str, offset: int, limit: int,
+) -> list[SearchResult]:
+    """Apply final ordering and pagination to a reranked candidate list.
+
+    Pure / cheap — runs on every search call (cache hit or miss) so
+    sort and pagination don't trigger pipeline re-execution. Uses
+    `sorted()` (not in-place) so the cached list is never mutated.
+    """
+    if sort == "date_desc":
+        ordered = sorted(results, key=lambda r: r.entry_date, reverse=True)
+    elif sort == "date_asc":
+        ordered = sorted(results, key=lambda r: r.entry_date)
+    else:
+        ordered = results
+    return ordered[offset : offset + limit]
+
+
 @dataclass
 class _DenseChunk:
     """One chunk hit from the dense retriever, pre-aggregation."""
@@ -101,6 +121,60 @@ class _DenseChunk:
     chunk_index: int | None
     text: str
     similarity: float  # 1.0 - cosine distance
+
+
+# Cache key fields. We deliberately leave `sort`, `limit`, and `offset`
+# out — the cached value is the full reranked candidate list, and sort
+# and slicing are applied per-call. That's the whole point: changing
+# the sort or paging through results doesn't re-run the pipeline.
+_CacheKey = tuple[str, str | None, str | None, int | None]
+
+
+class _ResultCache:
+    """In-memory LRU + TTL cache for hybrid search results.
+
+    Holds the full reranked candidate list for a given (query, dates,
+    user) tuple. Sized for personal-scale traffic — a handful of
+    distinct queries kept warm for ~5 minutes is plenty.
+
+    Thread-safe via a single lock. The protected critical sections are
+    short (dict ops only) so contention is negligible.
+    """
+
+    def __init__(self, max_entries: int = 64, ttl_s: float = 300.0) -> None:
+        self._max = max_entries
+        self._ttl = ttl_s
+        self._data: OrderedDict[_CacheKey, tuple[float, list[SearchResult]]] = (
+            OrderedDict()
+        )
+        self._lock = threading.Lock()
+
+    def get(self, key: _CacheKey) -> list[SearchResult] | None:
+        with self._lock:
+            entry = self._data.get(key)
+            if entry is None:
+                return None
+            ts, results = entry
+            if time.monotonic() - ts > self._ttl:
+                self._data.pop(key, None)
+                return None
+            self._data.move_to_end(key)
+            return results
+
+    def set(self, key: _CacheKey, results: list[SearchResult]) -> None:
+        with self._lock:
+            self._data[key] = (time.monotonic(), results)
+            self._data.move_to_end(key)
+            while len(self._data) > self._max:
+                self._data.popitem(last=False)
+
+    def clear(self) -> None:
+        with self._lock:
+            self._data.clear()
+
+    def __len__(self) -> int:
+        with self._lock:
+            return len(self._data)
 
 
 class HybridSearchService:
@@ -126,6 +200,8 @@ class HybridSearchService:
         reranker: Reranker,
         config: HybridConfig | None = None,
         stats: StatsCollector | None = None,
+        cache_max_entries: int = 64,
+        cache_ttl_s: float = 300.0,
     ) -> None:
         self._repo = repository
         self._vector_store = vector_store
@@ -133,6 +209,9 @@ class HybridSearchService:
         self._reranker = reranker
         self._config = config or HybridConfig()
         self._stats = stats
+        self._cache = _ResultCache(
+            max_entries=cache_max_entries, ttl_s=cache_ttl_s,
+        )
 
     @property
     def config(self) -> HybridConfig:
@@ -171,6 +250,11 @@ class HybridSearchService:
             ),
         )
 
+    @property
+    def cache(self) -> _ResultCache:
+        """Expose the result cache for diagnostics and admin."""
+        return self._cache
+
     def _search_impl(
         self,
         query: str,
@@ -181,10 +265,31 @@ class HybridSearchService:
         user_id: int | None,
         sort: str,
     ) -> list[SearchResult]:
-        log.info(
-            "Hybrid search: %r (limit=%d, offset=%d)", query, limit, offset
-        )
+        cache_key: _CacheKey = (query, start_date, end_date, user_id)
+        cached = self._cache.get(cache_key)
+        if cached is not None:
+            log.info(
+                "Hybrid search cache hit: %r (sort=%s, offset=%d, limit=%d)",
+                query, sort, offset, limit,
+            )
+            return _apply_sort_and_slice(cached, sort, offset, limit)
 
+        log.info(
+            "Hybrid search cache miss: %r (limit=%d, offset=%d)",
+            query, limit, offset,
+        )
+        full = self._compute_full_results(query, start_date, end_date, user_id)
+        self._cache.set(cache_key, full)
+        return _apply_sort_and_slice(full, sort, offset, limit)
+
+    def _compute_full_results(
+        self,
+        query: str,
+        start_date: str | None,
+        end_date: str | None,
+        user_id: int | None,
+    ) -> list[SearchResult]:
+        """Run the full L1 + RRF + L2 pipeline. Expensive — cached by caller."""
         # ---- L1a: BM25 retrieval (entry-level) ----
         bm25_hits = self._repo.search_text_with_snippets(
             query=query,
@@ -286,15 +391,7 @@ class HybridSearchService:
                 )
             )
 
-        # Optional re-ordering by entry_date. Default ("relevance") keeps
-        # the rerank score order. Date sorts apply across the full reranked
-        # set before the offset/limit slice so pagination is stable.
-        if sort == "date_desc":
-            results.sort(key=lambda r: r.entry_date, reverse=True)
-        elif sort == "date_asc":
-            results.sort(key=lambda r: r.entry_date)
-
-        return results[offset : offset + limit]
+        return results
 
     def _dense_search(
         self,

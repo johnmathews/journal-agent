@@ -10,7 +10,12 @@ from journal.providers.reranker import (
     RerankCandidate,
     RerankResult,
 )
-from journal.services.hybrid import HybridConfig, HybridSearchService, rrf_fuse
+from journal.services.hybrid import (
+    HybridConfig,
+    HybridSearchService,
+    _ResultCache,
+    rrf_fuse,
+)
 from journal.vectorstore.store import InMemoryVectorStore
 
 # ---------------------------------------------------------------------------
@@ -436,3 +441,165 @@ class TestHybridPipeline:
         snap = stats.snapshot()
         assert "hybrid_search" in snap.by_type
         assert snap.by_type["hybrid_search"].count == 1
+
+
+class TestResultCacheUnit:
+    """Direct tests of the LRU+TTL cache primitive."""
+
+    def test_get_returns_none_for_unknown_key(self) -> None:
+        cache = _ResultCache()
+        assert cache.get(("q", None, None, None)) is None
+
+    def test_get_returns_what_was_set(self) -> None:
+        cache = _ResultCache()
+        cache.set(("q", None, None, None), [])
+        assert cache.get(("q", None, None, None)) == []
+
+    def test_ttl_expiry_drops_entry(self, monkeypatch) -> None:
+        # Drive the cache's clock manually so we don't rely on real sleeps.
+        from journal.services import hybrid as hybrid_mod
+
+        clock = [1000.0]
+        monkeypatch.setattr(hybrid_mod.time, "monotonic", lambda: clock[0])
+
+        cache = _ResultCache(ttl_s=10.0)
+        cache.set(("q", None, None, None), [])
+        assert cache.get(("q", None, None, None)) == []
+
+        clock[0] += 11.0  # 11s later — past TTL
+        assert cache.get(("q", None, None, None)) is None
+        assert len(cache) == 0  # expired entry was evicted
+
+    def test_lru_eviction_drops_oldest(self) -> None:
+        cache = _ResultCache(max_entries=2)
+        cache.set(("a", None, None, None), [])
+        cache.set(("b", None, None, None), [])
+        cache.set(("c", None, None, None), [])  # evicts "a"
+        assert cache.get(("a", None, None, None)) is None
+        assert cache.get(("b", None, None, None)) == []
+        assert cache.get(("c", None, None, None)) == []
+
+    def test_get_marks_recently_used(self) -> None:
+        # If "a" is touched, "b" should be the LRU instead.
+        cache = _ResultCache(max_entries=2)
+        cache.set(("a", None, None, None), [])
+        cache.set(("b", None, None, None), [])
+        assert cache.get(("a", None, None, None)) == []  # touch a
+        cache.set(("c", None, None, None), [])  # should evict b, not a
+        assert cache.get(("a", None, None, None)) == []
+        assert cache.get(("b", None, None, None)) is None
+
+    def test_clear_empties_cache(self) -> None:
+        cache = _ResultCache()
+        cache.set(("q", None, None, None), [])
+        cache.clear()
+        assert cache.get(("q", None, None, None)) is None
+        assert len(cache) == 0
+
+
+class TestHybridCacheIntegration:
+    """End-to-end: cache hits skip the pipeline; sort/pagination reuse cache."""
+
+    @staticmethod
+    def _seed(repo, vector_store, mock_embeddings):
+        # Three entries on different dates, all matching "Atlas".
+        ids = []
+        for date in ("2026-01-15", "2026-02-15", "2026-03-15"):
+            e = repo.create_entry(date, "photo", f"Atlas on {date}", 3)
+            vector_store.add_entry(
+                entry_id=e.id, chunks=[f"Atlas on {date}"],
+                embeddings=[[1.0, 0.0, 0.0]],
+                metadata={"entry_date": date},
+            )
+            ids.append(e.id)
+        mock_embeddings.embed_query.return_value = [1.0, 0.0, 0.0]
+        return ids
+
+    def test_second_identical_call_does_not_re_embed(
+        self, repo, vector_store, mock_embeddings,
+    ) -> None:
+        self._seed(repo, vector_store, mock_embeddings)
+        svc = _make_service(repo, vector_store, mock_embeddings)
+
+        svc.search("Atlas")
+        assert mock_embeddings.embed_query.call_count == 1
+
+        svc.search("Atlas")  # cache hit
+        assert mock_embeddings.embed_query.call_count == 1  # unchanged
+
+    def test_sort_change_reuses_cached_pipeline(
+        self, repo, vector_store, mock_embeddings,
+    ) -> None:
+        self._seed(repo, vector_store, mock_embeddings)
+        svc = _make_service(repo, vector_store, mock_embeddings)
+
+        relevance = svc.search("Atlas")
+        embed_calls_after_first = mock_embeddings.embed_query.call_count
+
+        desc = svc.search("Atlas", sort="date_desc")
+        asc = svc.search("Atlas", sort="date_asc")
+
+        # Same query + filters → no further embed calls.
+        assert mock_embeddings.embed_query.call_count == embed_calls_after_first
+
+        # Same set of entries, different ordering.
+        assert {r.entry_id for r in relevance} == {r.entry_id for r in desc}
+        assert [r.entry_date for r in desc] == sorted(
+            [r.entry_date for r in desc], reverse=True,
+        )
+        assert [r.entry_date for r in asc] == sorted(
+            [r.entry_date for r in asc],
+        )
+
+    def test_pagination_reuses_cached_pipeline(
+        self, repo, vector_store, mock_embeddings,
+    ) -> None:
+        self._seed(repo, vector_store, mock_embeddings)
+        svc = _make_service(repo, vector_store, mock_embeddings)
+
+        page1 = svc.search("Atlas", limit=2, offset=0)
+        embed_calls_after_first = mock_embeddings.embed_query.call_count
+
+        page2 = svc.search("Atlas", limit=2, offset=2)
+
+        assert mock_embeddings.embed_query.call_count == embed_calls_after_first
+        # Pages must be disjoint.
+        assert {r.entry_id for r in page1}.isdisjoint(
+            {r.entry_id for r in page2}
+        )
+
+    def test_different_date_filter_misses_cache(
+        self, repo, vector_store, mock_embeddings,
+    ) -> None:
+        self._seed(repo, vector_store, mock_embeddings)
+        svc = _make_service(repo, vector_store, mock_embeddings)
+
+        svc.search("Atlas")
+        assert mock_embeddings.embed_query.call_count == 1
+        svc.search("Atlas", start_date="2026-02-01")
+        assert mock_embeddings.embed_query.call_count == 2
+
+    def test_different_user_misses_cache(
+        self, repo, vector_store, mock_embeddings,
+    ) -> None:
+        self._seed(repo, vector_store, mock_embeddings)
+        svc = _make_service(repo, vector_store, mock_embeddings)
+
+        svc.search("Atlas", user_id=1)
+        svc.search("Atlas", user_id=2)
+        assert mock_embeddings.embed_query.call_count == 2
+
+    def test_cache_does_not_mutate_stored_list(
+        self, repo, vector_store, mock_embeddings,
+    ) -> None:
+        # Sorting must not corrupt the cached list — otherwise a
+        # date_desc call followed by a relevance call would return the
+        # date-ordered list.
+        self._seed(repo, vector_store, mock_embeddings)
+        svc = _make_service(repo, vector_store, mock_embeddings)
+
+        relevance_first = [r.entry_id for r in svc.search("Atlas")]
+        svc.search("Atlas", sort="date_desc")
+        relevance_second = [r.entry_id for r in svc.search("Atlas")]
+
+        assert relevance_first == relevance_second
