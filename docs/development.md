@@ -107,6 +107,26 @@ npm run dev
 | Keyword search (FTS)  | No              |            |
 | Seed sample data      | No              |            |
 
+### Creating a local test user
+
+The webapp gates every protected route on `email_verified=true`, so a freshly registered user can't browse the app
+until the email-verification bit is flipped — and SMTP isn't wired up locally. Register normally and then update the
+flag in SQLite. (`REGISTRATION_ENABLED` must be `true` in `.env`; `.env.example` ships it on by default.)
+
+```bash
+# Register via curl (or via the /register page in the webapp)
+curl -sS -X POST http://localhost:8400/api/auth/register \
+  -H 'Content-Type: application/json' \
+  -d '{"email":"dev@local.dev","password":"devpassword123","display_name":"Dev User"}'
+
+# Mark them verified
+sqlite3 journal.db "UPDATE users SET email_verified = 1 WHERE email = 'dev@local.dev';"
+```
+
+Then sign in at http://localhost:5173/login. The same flow is documented in detail in
+[`journal-webapp/docs/development.md`](../../journal-webapp/docs/development.md#local-full-stack-quickstart),
+including a SQL snippet for seeding fake job rows when you need to verify UI work on the Job History page.
+
 ### Seed data
 
 The `seed` command creates 5 sample journal entries with realistic text. No API keys, no ChromaDB, no embeddings needed —
